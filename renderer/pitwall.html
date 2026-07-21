@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>PitWall 24H — Pit Wall</title>
+  <link rel="stylesheet" href="css/app.css" />
+</head>
+<body class="app-screen">
+  <div class="topbar">
+    <div class="title">PIT<span>WALL</span></div>
+    <div class="clock num"><small>ELAPSED</small><span id="clock-elapsed">00:00:00</span></div>
+    <div class="clock num"><small>REMAINING</small><span id="clock-remaining">24:00:00</span></div>
+    <button class="primary" id="btn-start">START RACE</button>
+    <button class="fcybtn" id="btn-fcy">🟡 START FCY</button>
+    <div class="spacer"></div>
+    <span class="conn" id="server-ips">starting server…</span>
+    <span class="conn" id="conn">connecting…</span>
+    <button id="btn-settings" title="Race settings">⚙ SETTINGS</button>
+    <button class="danger" id="btn-reset" title="Reset race (keeps car setups)">RESET</button>
+    <button id="btn-back" title="Back to role selection">⏏</button>
+  </div>
+
+  <div class="wall" id="wall"></div>
+
+  <div class="overlay hidden" id="settings-overlay">
+    <div class="modal">
+      <div class="modal-head">
+        <h2>⚙ RACE SETTINGS</h2>
+        <button id="btn-settings-close">✕ CLOSE</button>
+      </div>
+      <div class="modal-body">
+        <section>
+          <h3>Race</h3>
+          <div class="form-grid">
+            <label>Race name <input id="race-name" type="text" /></label>
+            <label>Duration (hours) <input id="race-duration" type="number" min="1" step="1" /></label>
+            <label>Start date &amp; time <input id="race-start" type="datetime-local" style="width:190px" /></label>
+          </div>
+          <div class="modal-actions">
+            <button class="primary" id="btn-apply-start">SET START TIME</button>
+            <button class="danger" id="btn-clear-start">CLEAR START</button>
+          </div>
+          <p class="hint" id="race-hint"></p>
+          <p class="hint">
+            Set a start time in the future and every screen counts down to it; the race
+            clock and all stints start automatically at that moment. START RACE in the
+            top bar always starts the clock immediately instead.
+          </p>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="js/pitwall.js"></script>
+</body>
+</html>

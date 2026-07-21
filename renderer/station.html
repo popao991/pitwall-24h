@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>PitWall 24H — Car Station</title>
+  <link rel="stylesheet" href="css/app.css" />
+</head>
+<body class="app-screen">
+  <div class="topbar">
+    <div class="title" id="car-title">CAR <span>—</span></div>
+    <div class="clock num"><small>ELAPSED</small><span id="clock-elapsed">00:00:00</span></div>
+    <div class="clock num"><small>REMAINING</small><span id="clock-remaining">24:00:00</span></div>
+    <div class="spacer"></div>
+    <span class="conn" id="conn">connecting…</span>
+    <button id="btn-settings" title="Car &amp; driver settings">⚙ SETTINGS</button>
+    <button id="btn-back" title="Back to role selection">⏏</button>
+  </div>
+
+  <div class="station">
+    <!-- LEFT: live inputs -->
+    <div class="col">
+      <div class="panel">
+        <h3>Lap logging</h3>
+        <div class="lapbox">
+          <button class="lap" id="btn-lap">+ LAP</button>
+          <div class="side">
+            <input id="lap-time" placeholder="lap time s" title="Optional lap time in seconds, e.g. 104.7" />
+            <button id="btn-undo" title="Remove last lap">UNDO LAP</button>
+          </div>
+        </div>
+        <div class="kv"><span class="k">Laps this stint</span><span class="v big" id="laps-stint">0</span></div>
+        <div class="kv"><span class="k">Total laps</span><span class="v" id="laps-total">0</span></div>
+        <div class="kv"><span class="k">Last lap</span><span class="v" id="last-lap">--:--.-</span></div>
+      </div>
+
+      <div class="panel">
+        <h3>Track condition</h3>
+        <div class="condrow" id="cond-row"></div>
+        <button class="fcybtn" id="btn-fcy" style="width:100%;margin-top:8px">🟡 START FCY (RACE-WIDE)</button>
+      </div>
+
+      <div class="panel">
+        <h3>Fuel</h3>
+        <div class="kv"><span class="k">Fuel on board</span><span class="v big" id="fuel-now">0.0 L</span></div>
+        <div class="meter" id="fuel-meter"><i></i></div>
+        <div class="kv"><span class="k">Usable (above safety)</span><span class="v" id="fuel-usable">0.0 L</span></div>
+        <div class="kv"><span class="k">Burn / lap · / min</span><span class="v" id="fuel-burn">0.0 L</span></div>
+        <div class="kv"><span class="k">Laps to safety level</span><span class="v" id="fuel-laps">0</span></div>
+        <div class="kv"><span class="k">Time to safety level</span><span class="v" id="fuel-time">0:00</span></div>
+        <div class="kv"><span class="k">Fuel to finish (+margin)</span><span class="v" id="fuel-to-end">0 L</span></div>
+        <div class="kv">
+          <span class="k">Correct fuel reading</span>
+          <span><input id="fuel-correct" type="number" step="0.5" style="width:80px" title="Set actual fuel on board (L)" />
+          <button id="btn-fuel-correct" style="padding:4px 8px">SET</button></span>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>Tyres</h3>
+        <div class="kv"><span class="k">Laps on set</span><span class="v big" id="tyre-laps">0</span></div>
+        <div class="meter" id="tyre-meter"><i></i></div>
+        <div class="kv"><span class="k">Laps left in set</span><span class="v" id="tyre-left">0</span></div>
+        <div class="kv"><span class="k">Sets used</span><span class="v" id="tyre-sets">1</span></div>
+      </div>
+    </div>
+
+    <!-- MIDDLE: strategy overview -->
+    <div class="col">
+      <div class="fcybanner hidden" id="fcy-banner"></div>
+      <div class="limitbanner" id="limit-banner">
+        <div>
+          <div class="lab">NEXT STOP — LIMITED BY <span id="limit-key">—</span></div>
+          <div class="val" id="limit-time">--:--</div>
+        </div>
+        <div style="text-align:right">
+          <div class="lab">PROJECTED STOPS LEFT</div>
+          <div class="val" id="stops-left">—</div>
+        </div>
+      </div>
+
+      <div class="panel timeline-wrap">
+        <h3>Race timeline — stints &amp; pit stops</h3>
+        <svg id="timeline" viewBox="0 0 1000 110" preserveAspectRatio="none"></svg>
+      </div>
+
+      <div class="panel">
+        <h3>Brakes — pads &amp; discs</h3>
+        <div id="brakes"></div>
+      </div>
+
+    </div>
+
+    <!-- RIGHT: drivers + stop planner -->
+    <div class="col">
+      <div class="panel">
+        <h3>Drivers</h3>
+        <div id="drivers"></div>
+        <div class="kv" style="margin-top:6px"><span class="k">Stint time</span><span class="v big" id="stint-time">0:00</span></div>
+        <div class="kv"><span class="k">Max stint</span><span class="v" id="stint-max">—</span></div>
+      </div>
+
+      <div class="panel planner">
+        <h3>Next pit stop</h3>
+        <div class="row">
+          <span class="lab">FUEL (L)</span>
+          <span style="display:flex;gap:6px;align-items:center">
+            <span class="fuel-quick">
+              <button id="btn-fuel-fill" title="Fill tank">FILL</button>
+              <button id="btn-fuel-end" title="Fuel to reach the finish">TO END</button>
+            </span>
+            <input id="stop-fuel" type="number" step="1" min="0" style="width:80px" />
+          </span>
+        </div>
+        <div class="row"><span class="lab">TYRES</span><button class="toggle" id="stop-tyres">NO</button></div>
+        <div class="row">
+          <span class="lab">DRIVER</span>
+          <select id="stop-driver" style="min-width:150px"><option value="">no change</option></select>
+        </div>
+        <div class="row"><span class="lab">PADS FRONT</span><button class="toggle" id="stop-padsFront">NO</button></div>
+        <div class="row"><span class="lab">PADS REAR</span><button class="toggle" id="stop-padsRear">NO</button></div>
+        <div class="row"><span class="lab">DISCS FRONT</span><button class="toggle" id="stop-discsFront">NO</button></div>
+        <div class="row"><span class="lab">DISCS REAR</span><button class="toggle" id="stop-discsRear">NO</button></div>
+        <div class="row" style="border-bottom:none; flex-direction:column; align-items:stretch">
+          <span class="lab" style="margin-bottom:4px">NOTES FOR CREW</span>
+          <textarea id="stop-notes" placeholder="e.g. check FL wheel nut, clean screen"></textarea>
+        </div>
+        <div class="kv" style="margin-top:6px">
+          <span class="k">Est. stationary · total pit time</span>
+          <span class="v" id="stop-est">—</span>
+        </div>
+        <div class="actions">
+          <button id="btn-clear">CLEAR</button>
+          <button class="send" id="btn-send">SEND TO PIT WALL</button>
+        </div>
+        <div class="actions">
+          <button class="box big" id="btn-box">BOX BOX</button>
+        </div>
+        <div class="status-line" id="stop-status">— DRAFT —</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay hidden" id="settings-overlay">
+    <div class="modal">
+      <div class="modal-head">
+        <h2>⚙ CAR SETTINGS</h2>
+        <button id="btn-settings-close">✕ CLOSE</button>
+      </div>
+      <div class="modal-body">
+        <section>
+          <h3>Car information</h3>
+          <div class="form-grid">
+            <label>Car name <input data-path="name" type="text" /></label>
+            <label>Car number <input data-path="number" type="text" /></label>
+            <label>Make <input data-path="make" type="text" placeholder="e.g. Porsche" /></label>
+            <label>Model <input data-path="model" type="text" placeholder="e.g. 992 GT3 Cup" /></label>
+          </div>
+        </section>
+        <section>
+          <h3>Fuel &amp; lap model (car defaults)</h3>
+          <div class="form-grid">
+            <label>Tank (L) <input data-path="config.tankLiters" type="number" step="any" /></label>
+            <label>Burn dry (L/lap) <input data-path="config.burnPerLap.dry" type="number" step="any" /></label>
+            <label>Burn wet (L/lap) <input data-path="config.burnPerLap.wet" type="number" step="any" /></label>
+            <label>Burn SC/FCY (L/lap) <input data-path="config.burnPerLap.sc" type="number" step="any" /></label>
+            <label>Avg lap dry (s) <input data-path="config.avgLapSec.dry" type="number" step="any" /></label>
+            <label>Avg lap wet (s) <input data-path="config.avgLapSec.wet" type="number" step="any" /></label>
+            <label>Avg lap SC/FCY (s) <input data-path="config.avgLapSec.sc" type="number" step="any" /></label>
+            <label>Pit lane loss (s) <input data-path="config.pitLossSec" type="number" step="any" /></label>
+            <label>Finish margin (L) <input data-path="config.finishFuelL" type="number" step="any" /></label>
+            <label>Fuel safety level (L) <input data-path="config.safetyFuelL" type="number" step="any" /></label>
+          </div>
+          <p class="hint">
+            While the race clock runs, the tank drains continuously at the active burn rate
+            (per-driver, or FCY when active) — laps only count tyre wear. Use SET in the fuel
+            panel to correct to a real reading. Finish margin = fuel still wanted at the flag;
+            safety level = fuel the tank must never drop below — all window and refuel
+            calculations run on the fuel above safety.
+          </p>
+        </section>
+        <section>
+          <h3>Degradation &amp; limits</h3>
+          <div class="form-grid">
+            <label>Tyre life (laps) <input data-path="config.tyreLifeLaps" type="number" step="1" /></label>
+            <label>Tyre sets available <input data-path="config.tyreSets" type="number" step="1" /></label>
+            <label>Pads front life (h) <input data-path="config.brakeLifeH.padsFront" type="number" step="any" /></label>
+            <label>Pads rear life (h) <input data-path="config.brakeLifeH.padsRear" type="number" step="any" /></label>
+            <label>Discs front life (h) <input data-path="config.brakeLifeH.discsFront" type="number" step="any" /></label>
+            <label>Discs rear life (h) <input data-path="config.brakeLifeH.discsRear" type="number" step="any" /></label>
+            <label>Max stint (min) <input data-path="config.maxStintMin" type="number" step="1" /></label>
+          </div>
+        </section>
+        <section>
+          <h3>Pit stop timing</h3>
+          <div class="form-grid">
+            <label>Refuel speed (L/s) <input data-path="config.refuelLps" type="number" step="any" /></label>
+            <label>Tyre change (s) <input data-path="config.tyreChangeSec" type="number" step="any" /></label>
+          </div>
+          <p class="hint">
+            Estimated stationary time = fuel ÷ refuel speed + tyre change, assumed sequential
+            (no other work while fuel flows). Shown live in the stop planner and on the pit wall.
+          </p>
+        </section>
+        <section>
+          <h3>FCY / Code-60 time gain calculator</h3>
+          <div class="form-grid">
+            <label>Track length (km) <input data-path="config.trackKm" type="number" step="any" /></label>
+            <label>FCY speed (km/h) <input data-path="config.fcySpeedKmh" type="number" step="any" /></label>
+          </div>
+          <div id="fcy-out" style="margin-top:10px"></div>
+          <p class="hint">
+            Every FCY lap, the field loses (FCY lap − green lap) versus green running — that is
+            what a pit stop taken under FCY gains you compared to pitting under green.
+          </p>
+        </section>
+        <section>
+          <h3>Drivers</h3>
+          <table class="drv-table">
+            <thead>
+              <tr>
+                <th>Driver</th>
+                <th>Double stints</th>
+                <th>Night</th>
+                <th>Rain</th>
+                <th>Fuel dry (L/lap)</th>
+                <th>Fuel wet (L/lap)</th>
+              </tr>
+            </thead>
+            <tbody id="drv-table-body"></tbody>
+          </table>
+          <p class="hint">
+            Fuel 0 = use the car default burn rate. While a driver is in the car, their own
+            dry/wet consumption drives the fuel projections and the pit-window maths.
+          </p>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="js/station.js"></script>
+</body>
+</html>

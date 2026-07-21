@@ -1,0 +1,51 @@
+{
+  "name": "pitwall-24h",
+  "productName": "PitWall 24H",
+  "version": "1.0.0",
+  "description": "24h endurance race strategy stations + pit wall display for a 4-car team",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "start": "electron .",
+    "test": "node test/smoke.mjs",
+    "test:ui": "electron test/ui-check.cjs",
+    "package": "electron-packager . PitWall24H --platform=win32 --arch=x64 --out=dist --overwrite",
+    "dist": "electron-builder --win --publish never",
+    "release": "electron-builder --win --publish always"
+  },
+  "build": {
+    "appId": "com.pitwall24h.app",
+    "productName": "PitWall24H",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "**/*",
+      "!dist/**",
+      "!release/**",
+      "!test/**",
+      "!docs/**"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": true,
+      "runAfterFinish": true
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "OWNER_TBD",
+      "repo": "pitwall-24h"
+    }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@electron/packager": "^18.3.6",
+    "electron": "^33.4.11",
+    "electron-builder": "^26.15.3"
+  }
+}

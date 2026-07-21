@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>PitWall 24H — Select role</title>
+  <link rel="stylesheet" href="css/app.css" />
+</head>
+<body>
+  <div class="picker">
+    <h1>PIT<span>WALL</span> 24H</h1>
+    <div class="sub">Endurance strategy &amp; pit crew display — 4 cars, 1 wall</div>
+    <div class="cards">
+      <div class="card">
+        <h2>🖥️ PIT WALL</h2>
+        <p>Run this on the 5th PC in the pit box. Starts the data server and shows the mechanics, per car, exactly what the next stop needs: fuel, tyres, driver, brakes.</p>
+        <button class="primary big" id="btn-wall">START PIT WALL</button>
+      </div>
+      <div class="card">
+        <h2>📊 CAR STATION</h2>
+        <p>Run this on each of the 4 strategy PCs. Pick your car and enter the pit wall PC's IP address (shown on the pit wall screen).</p>
+        <label>Car
+          <select id="car-select">
+            <option value="1">Car 1</option>
+            <option value="2">Car 2</option>
+            <option value="3">Car 3</option>
+            <option value="4">Car 4</option>
+          </select>
+        </label>
+        <label>Pit wall IP
+          <input id="server-ip" placeholder="e.g. 192.168.1.50" />
+        </label>
+        <button class="primary big" id="btn-station">START STATION</button>
+      </div>
+    </div>
+    <div class="verline">
+      <span id="app-version">v—</span>
+      <button id="btn-update" style="font-size:12px;padding:4px 10px">CHECK FOR UPDATES</button>
+      <span id="update-status"></span>
+    </div>
+  </div>
+  <script type="module">
+    const carSel = document.getElementById('car-select');
+    const ipInput = document.getElementById('server-ip');
+    carSel.value = localStorage.getItem('carId') || '1';
+    ipInput.value = localStorage.getItem('serverIp') || '';
+
+    document.getElementById('btn-wall').addEventListener('click', () => {
+      location.href = 'pitwall.html';
+    });
+    document.getElementById('btn-station').addEventListener('click', () => {
+      const ip = ipInput.value.trim() || '127.0.0.1';
+      localStorage.setItem('carId', carSel.value);
+      localStorage.setItem('serverIp', ip);
+      location.href = 'station.html';
+    });
+
+    const verEl = document.getElementById('app-version');
+    const statusEl = document.getElementById('update-status');
+    window.pitwallApi.getVersion().then(v => {
+      verEl.textContent = 'v' + v.version + (v.packaged ? '' : ' (dev)');
+    }).catch(() => { verEl.textContent = ''; });
+    document.getElementById('btn-update').addEventListener('click', async () => {
+      statusEl.textContent = 'checking…';
+      try {
+        const r = await window.pitwallApi.checkUpdates();
+        statusEl.textContent = r.message;
+      } catch (e) {
+        statusEl.textContent = 'check failed';
+      }
+    });
+  </script>
+</body>
+</html>
