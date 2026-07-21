@@ -27,6 +27,8 @@ app.whenReady().then(async () => {
     const { startServer } = await import(pathToFileURL(path.join(root, 'server', 'server.js')));
     return startServer({ dataFile: null, port: 8485 });
   });
+  ipcMain.handle('get-version', () => ({ version: 'test', packaged: false }));
+  ipcMain.handle('check-updates', () => ({ status: 'dev', message: 'test mode' }));
 
   for (const page of ['index.html', 'pitwall.html', 'station.html']) {
     console.log('loading', page, '...');

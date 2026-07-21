@@ -96,20 +96,43 @@ wall cards automatically.
 
 ## Installing on the 5 PCs
 
-Option A — copy the packaged build (no installs needed):
+Option A — installer with auto-update (recommended):
 
 ```
-npm run package        # on this PC, creates dist/PitWall24H-win32-x64/
+npm run dist           # creates release/PitWall24H Setup <version>.exe
 ```
 
-Copy that folder to each PC (USB stick is fine) and run `PitWall24H.exe`.
+Run that installer on each PC. Installed apps check GitHub for new releases a
+few seconds after every launch and also via **CHECK FOR UPDATES** on the start
+screen; a downloaded update installs on restart (or automatically when the app
+closes).
 
-Option B — run from source (needs Node.js on each PC):
+Option B — portable folder (no auto-update):
 
 ```
-npm install
-npm start
+npm run package        # creates dist/PitWall24H-win32-x64/
 ```
+
+Copy that folder to each PC and run `PitWall24H.exe`.
+
+Option C — run from source (needs Node.js): `npm install && npm start`.
+
+## Releasing a new version
+
+One-time setup: install the GitHub CLI, run `gh auth login`, create the
+repository (`gh repo create pitwall-24h --public --source . --push`) and put
+your GitHub username as `build.publish.owner` in package.json.
+
+Then for every release:
+
+```
+1. Bump "version" in package.json  (e.g. 1.0.1)
+2. git commit -am "v1.0.1"  &&  git push
+3. $env:GH_TOKEN = gh auth token
+4. npm run release        # builds the installer and publishes the GitHub release
+```
+
+Every installed copy on the 5 PCs picks the new version up on its next launch.
 
 ## Development
 
