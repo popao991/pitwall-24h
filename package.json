@@ -37,7 +37,8 @@
     "publish": {
       "provider": "github",
       "owner": "popao991",
-      "repo": "pitwall-24h"
+      "repo": "pitwall-24h",
+      "releaseType": "release"
     }
   },
   "dependencies": {
