@@ -72,11 +72,22 @@ app.whenReady().then(() => {
     if (!serverInfo) {
       const { startServer } = await import('./server/server.js');
       serverInfo = startServer({
-        dataFile: path.join(app.getPath('userData'), 'pitwall-state.json')
+        dataFile: path.join(app.getPath('userData'), 'pitwall-state.json'),
+        backupDir: path.join(app.getPath('userData'), 'backups'),
+        replayDir: path.join(app.getPath('userData'), 'replays')
       });
     }
-    return serverInfo;
+    return { port: serverInfo.port, ips: serverInfo.ips };
   });
+
+  ipcMain.handle('list-backups', () => (serverInfo ? serverInfo.listBackups() : []));
+  ipcMain.handle('backup-now', () => {
+    if (!serverInfo) return { ok: false, error: 'server not running' };
+    const file = serverInfo.writeBackup();
+    return file ? { ok: true, file } : { ok: false, error: 'backup could not be written' };
+  });
+  ipcMain.handle('restore-backup', (_e, name) =>
+    serverInfo ? serverInfo.restoreBackup(String(name)) : { ok: false, error: 'server not running' });
 
   win = new BrowserWindow({
     width: 1500,

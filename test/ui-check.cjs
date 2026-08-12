@@ -25,10 +25,14 @@ app.whenReady().then(async () => {
   // Port 8485 so tests never touch a live app on the default port 8484.
   ipcMain.handle('start-server', async () => {
     const { startServer } = await import(pathToFileURL(path.join(root, 'server', 'server.js')));
-    return startServer({ dataFile: null, port: 8485 });
+    const info = startServer({ dataFile: null, port: 8485 });
+    return { port: info.port, ips: info.ips };
   });
   ipcMain.handle('get-version', () => ({ version: 'test', packaged: false }));
   ipcMain.handle('check-updates', () => ({ status: 'dev', message: 'test mode' }));
+  ipcMain.handle('list-backups', () => []);
+  ipcMain.handle('backup-now', () => ({ ok: false, error: 'test mode' }));
+  ipcMain.handle('restore-backup', () => ({ ok: false, error: 'test mode' }));
 
   for (const page of ['index.html', 'pitwall.html', 'station.html']) {
     console.log('loading', page, '...');

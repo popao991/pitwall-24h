@@ -7,16 +7,23 @@
 </head>
 <body>
   <div class="picker">
+    <div class="fx" aria-hidden="true">
+      <i class="streak s1"></i>
+      <i class="streak s2"></i>
+      <i class="streak s3"></i>
+      <i class="streak s4"></i>
+    </div>
     <h1>PIT<span>WALL</span> 24H</h1>
     <div class="sub">Endurance strategy &amp; pit crew display — 4 cars, 1 wall</div>
+    <div class="chequer" aria-hidden="true"></div>
     <div class="cards">
       <div class="card">
-        <h2>🖥️ PIT WALL</h2>
+        <h2><i data-icon="monitor"></i> PIT WALL</h2>
         <p>Run this on the 5th PC in the pit box. Starts the data server and shows the mechanics, per car, exactly what the next stop needs: fuel, tyres, driver, brakes.</p>
         <button class="primary big" id="btn-wall">START PIT WALL</button>
       </div>
       <div class="card">
-        <h2>📊 CAR STATION</h2>
+        <h2><i data-icon="chart"></i> CAR STATION</h2>
         <p>Run this on each of the 4 strategy PCs. Pick your car and enter the pit wall PC's IP address (shown on the pit wall screen).</p>
         <label>Car
           <select id="car-select">
@@ -27,22 +34,37 @@
           </select>
         </label>
         <label>Pit wall IP
-          <input id="server-ip" placeholder="e.g. 192.168.1.50" />
+          <input id="server-ip" placeholder="e.g. 192.168.1.50 — empty = this PC" title="Shown on the pit wall screen. Leave empty to connect to a pit wall running on this same PC (127.0.0.1). Can be changed later in the station's SETTINGS → CONNECTION tab." />
         </label>
         <button class="primary big" id="btn-station">START STATION</button>
       </div>
     </div>
     <div class="verline">
       <span id="app-version">v—</span>
-      <button id="btn-update" style="font-size:12px;padding:4px 10px">CHECK FOR UPDATES</button>
+      <button id="btn-update">CHECK FOR UPDATES</button>
       <span id="update-status"></span>
     </div>
   </div>
   <script type="module">
+    import { applyIcons } from './js/icons.js';
+    import { initTheme } from './js/theme.js';
+    applyIcons();
+    initTheme();
+
     const carSel = document.getElementById('car-select');
     const ipInput = document.getElementById('server-ip');
+    // Car names are set in the pit wall settings (or on each station); this
+    // screen has no server connection, so it shows the labels the pit wall or
+    // station last cached on this PC.
+    try {
+      const labels = JSON.parse(localStorage.getItem('carLabels') || '{}');
+      for (const opt of carSel.options) {
+        if (labels[opt.value]) opt.textContent = labels[opt.value];
+      }
+    } catch { /* stale cache: keep the default labels */ }
     carSel.value = localStorage.getItem('carId') || '1';
     ipInput.value = localStorage.getItem('serverIp') || '';
+    carSel.addEventListener('change', () => localStorage.setItem('carId', carSel.value));
 
     document.getElementById('btn-wall').addEventListener('click', () => {
       location.href = 'pitwall.html';

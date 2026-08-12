@@ -9,7 +9,58 @@
   --amber: #ffb454;
   --red: #ff5d5d;
   --green: #7ee787;
+  --field: #0e1520;        /* input backgrounds */
+  --well: #0e1520;         /* meter tracks, timeline base */
+  --night-row: #131b2e;    /* night stints in the plan table */
+  --tl-future: #31405a;    /* projected future stints on the timeline */
+  --fcy-bg: #2a2110;
+  --flash-bg: #2a1414;
+  --overlay: rgba(4, 8, 14, .78);
+  /* race-condition top bar: base tint and the brighter pulse peak */
+  --cond-yellow: #ffd23f;
+  --cond-yellow-bg: #3a2d08;
+  --cond-yellow-peak: #7a5c05;
+  --cond-yellow-ink: #ffe89a;
+  --cond-red-bg: #3a1010;
+  --cond-red-ink: #ffc9c9;
+  --cond-finish-bg: #23293a;
+  --cond-finish-ink: #e8eef8;
+  /* the pit wall's condition strip sits on the tinted bar — one shade louder */
+  --cond-red-strip: #571313;
+  --cond-finish-strip: #2e3750;
   --font-num: 'Consolas', 'Segoe UI', monospace;
+}
+
+/* Light theme — applied by theme.js (manual choice, or AUTO by daylight:
+   dark from 30 min before sunset until 1 h after sunrise). */
+body.light {
+  --bg: #e9edf3;
+  --panel: #f8fafc;
+  --panel-2: #e3e9f1;
+  --line: #c3cdda;
+  --text: #16202e;
+  --dim: #5a6a80;
+  --accent: #0b7dc9;
+  --amber: #b96e00;
+  --red: #d63535;
+  --green: #1d8a4a;
+  --field: #ffffff;
+  --well: #d7dfe9;
+  --night-row: #dde4f0;
+  --tl-future: #b6c3d6;
+  --fcy-bg: #fdf1da;
+  --flash-bg: #ffdada;
+  --overlay: rgba(23, 32, 45, .45);
+  --cond-yellow: #8a6000;
+  --cond-yellow-bg: #ffe9a8;
+  --cond-yellow-peak: #ffc933;
+  --cond-yellow-ink: #4a3200;
+  --cond-red-bg: #ffd2d2;
+  --cond-red-ink: #7a1414;
+  --cond-finish-bg: #dbe2ec;
+  --cond-finish-ink: #16202e;
+  --cond-red-strip: #ffbdbd;
+  --cond-finish-strip: #c9d3e4;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -32,6 +83,14 @@ button {
   padding: 8px 14px;
   cursor: pointer;
 }
+/* inline SVG icons (icons.js) — size with the text, inherit its color */
+svg.ico {
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.125em;
+  flex: none;
+}
+
 button:hover { border-color: var(--accent); }
 button:active { transform: translateY(1px); }
 button.primary { background: #10416000; border-color: var(--accent); color: var(--accent); }
@@ -46,7 +105,7 @@ button.big {
 input, select, textarea {
   font: inherit;
   color: var(--text);
-  background: #0e1520;
+  background: var(--field);
   border: 1px solid var(--line);
   border-radius: 5px;
   padding: 6px 8px;
@@ -59,29 +118,144 @@ input[type="number"] { font-family: var(--font-num); text-align: right; }
 /* ---------- role picker ---------- */
 
 .picker {
+  position: relative;
   height: 100vh;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 28px;
+  overflow: hidden;
+  /* soft headlight glow from the top + vignette so the panels sit in a scene */
+  background:
+    radial-gradient(1100px 520px at 50% -12%,
+      color-mix(in srgb, var(--accent) 9%, transparent), transparent 70%),
+    radial-gradient(900px 700px at 50% 115%,
+      color-mix(in srgb, var(--accent) 5%, transparent), transparent 70%);
 }
+/* drifting glow blobs + faint engineering grid behind everything */
+.picker::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(560px 420px at 16% 24%,
+      color-mix(in srgb, var(--accent) 9%, transparent), transparent 70%),
+    radial-gradient(640px 480px at 86% 76%,
+      color-mix(in srgb, var(--amber) 6%, transparent), transparent 70%),
+    linear-gradient(color-mix(in srgb, var(--line) 40%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--line) 40%, transparent) 1px, transparent 1px);
+  background-size: auto, auto, 46px 46px, 46px 46px;
+  animation: picker-drift 22s ease-in-out infinite;
+}
+@keyframes picker-drift {
+  0%, 100% { background-position: 0 0, 0 0, 0 0, 0 0; }
+  50% { background-position: 60px -40px, -70px 50px, 0 0, 0 0; }
+}
+/* everything but the fx layer stacks above the background */
+.picker > :not(.fx) { position: relative; z-index: 1; }
+
+/* speed-line streaks sweeping across, like cars passing on the straight */
+.picker .fx {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.picker .fx .streak {
+  position: absolute;
+  left: 0;
+  width: 240px;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg,
+    transparent, color-mix(in srgb, var(--accent) 55%, transparent), transparent);
+  transform: translateX(-320px);
+  animation: picker-streak 6s linear infinite;
+}
+.picker .fx .s1 { top: 14%; animation-duration: 5.4s; }
+.picker .fx .s2 {
+  top: 36%;
+  width: 150px;
+  height: 1px;
+  opacity: .7;
+  animation-duration: 8.5s;
+  animation-delay: 2.6s;
+}
+.picker .fx .s3 {
+  top: 68%;
+  animation-duration: 6.6s;
+  animation-delay: 1.2s;
+  background: linear-gradient(90deg,
+    transparent, color-mix(in srgb, var(--amber) 45%, transparent), transparent);
+}
+.picker .fx .s4 {
+  top: 88%;
+  width: 180px;
+  height: 1px;
+  opacity: .6;
+  animation-duration: 7.3s;
+  animation-delay: 4s;
+}
+@keyframes picker-streak {
+  to { transform: translateX(calc(100vw + 320px)); }
+}
+
 .picker h1 { font-size: 34px; letter-spacing: 3px; }
 .picker h1 span { color: var(--accent); }
 .picker .sub { color: var(--dim); margin-top: -18px; }
-.picker .cards { display: flex; gap: 26px; }
+/* slowly scrolling chequered ribbon under the title */
+.picker .chequer {
+  width: 220px;
+  height: 12px;
+  margin-top: -10px;
+  opacity: .55;
+  background: repeating-conic-gradient(var(--dim) 0 90deg, transparent 0 180deg);
+  background-size: 12px 12px;
+  animation: picker-chequer 2.4s linear infinite;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 22%, #000 78%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 22%, #000 78%, transparent);
+}
+@keyframes picker-chequer {
+  to { background-position: 24px 0; }
+}
+
+.picker .cards { display: flex; gap: 26px; align-items: stretch; }
 .picker .card {
   width: 340px;
-  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 26px;
   display: flex;
   flex-direction: column;
   gap: 14px;
+  transition: border-color .2s, transform .2s, box-shadow .2s;
 }
-.picker .card h2 { font-size: 20px; letter-spacing: 1px; }
+.picker .card:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  transform: translateY(-3px);
+  box-shadow: 0 14px 34px color-mix(in srgb, var(--bg) 65%, transparent);
+}
+.picker .card h2 {
+  font-size: 20px;
+  letter-spacing: 1px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.picker .card h2 svg { color: var(--accent); width: 22px; height: 22px; }
 .picker .card p { color: var(--dim); font-size: 13px; line-height: 1.5; }
+/* both start buttons hug the card bottom so they line up across cards */
+.picker .card button.big {
+  margin-top: auto;
+  transition: background .2s, box-shadow .2s;
+}
+.picker .card button.big:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: 0 0 20px color-mix(in srgb, var(--accent) 25%, transparent);
+}
 .picker label { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; color: var(--dim); }
 .picker label select, .picker label input { width: 170px; }
 .picker .verline {
@@ -91,6 +265,27 @@ input[type="number"] { font-family: var(--font-num); text-align: right; }
   color: var(--dim);
   font-size: 12px;
   font-family: var(--font-num);
+}
+.picker .verline button { font-size: 12px; padding: 4px 10px; }
+
+/* entrance — everything rises into place, cards slightly staggered */
+@keyframes picker-rise {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: none; }
+}
+.picker h1, .picker .sub { animation: picker-rise .5s ease backwards; }
+.picker .chequer {
+  animation: picker-rise .5s ease backwards, picker-chequer 2.4s linear infinite;
+}
+.picker .cards .card { animation: picker-rise .55s ease .08s backwards; }
+.picker .cards .card:nth-child(2) { animation-delay: .18s; }
+.picker .verline { animation: picker-rise .5s ease .3s backwards; }
+
+@media (prefers-reduced-motion: reduce) {
+  .picker::before, .picker .fx .streak, .picker .chequer,
+  .picker h1, .picker .sub, .picker .cards .card, .picker .verline {
+    animation: none;
+  }
 }
 
 /* ---------- common chrome ---------- */
@@ -106,11 +301,221 @@ input[type="number"] { font-family: var(--font-num); text-align: right; }
 .topbar .title { font-size: 19px; font-weight: 700; letter-spacing: 1px; }
 .topbar .title span { color: var(--accent); }
 .topbar .clock { font-size: 26px; font-weight: 700; }
-.topbar .clock small { font-size: 13px; color: var(--dim); font-weight: 400; margin-right: 6px; }
+.topbar .clock small { font-size: 14px; color: var(--dim); font-weight: 400; margin-right: 6px; }
 .topbar .spacer { flex: 1; }
-.conn { font-size: 12px; padding: 3px 10px; border-radius: 10px; border: 1px solid var(--line); color: var(--dim); }
+.conn { font-size: 13px; padding: 3px 10px; border-radius: 10px; border: 1px solid var(--line); color: var(--dim); }
 .conn.ok { color: var(--green); border-color: var(--green); }
 .conn.bad { color: var(--red); border-color: var(--red); }
+
+/* ---------- race condition: the top bar IS the indicator ----------
+   Green is deliberately unstyled — it is the normal state and must not
+   compete for attention. Every other condition tints the whole bar; only
+   the ones that change a pit decision right now (FCY / SC / Code 60) also
+   flash. Colour and motion are reinforcement only: the CONDITION BLOCK
+   always spells the state out in words. */
+
+.topbar.cond-fcy, .topbar.cond-sc, .topbar.cond-code60 {
+  background: var(--cond-yellow-bg);
+  border-bottom-color: var(--cond-yellow);
+  animation: condflash 1.1s steps(1, end) infinite;
+}
+.topbar.cond-red {
+  background: var(--cond-red-bg);
+  border-bottom: 2px solid var(--red);
+}
+.topbar.cond-finish {
+  background: var(--cond-finish-bg);
+  border-bottom: 2px solid var(--cond-finish-ink);
+}
+@keyframes condflash {
+  0%, 49% { background: var(--cond-yellow-bg); }
+  50%, 100% { background: var(--cond-yellow-peak); }
+}
+
+/* the words — the part that carries the actual meaning */
+.condblock {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 14px;
+  border-radius: 8px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  font-size: 17px;
+  white-space: nowrap;
+  border: 2px solid currentColor;
+}
+.topbar.cond-fcy .condblock,
+.topbar.cond-sc .condblock,
+.topbar.cond-code60 .condblock { display: inline-flex; color: var(--cond-yellow-ink); }
+.topbar.cond-red .condblock { display: inline-flex; color: var(--cond-red-ink); }
+.topbar.cond-finish .condblock { display: inline-flex; color: var(--cond-finish-ink); }
+.condblock .elapsed { font-family: var(--font-num); font-weight: 700; opacity: .85; }
+.condblock .src {
+  font-size: 11px;
+  letter-spacing: 1px;
+  font-weight: 700;
+  opacity: .75;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+}
+.condblock svg { width: 18px; height: 18px; }
+
+/* Keep the bar's own controls readable against the tint. */
+.topbar.cond-fcy, .topbar.cond-sc, .topbar.cond-code60 { color: var(--cond-yellow-ink); }
+.topbar.cond-red { color: var(--cond-red-ink); }
+.topbar.cond-fcy .clock small, .topbar.cond-sc .clock small,
+.topbar.cond-code60 .clock small, .topbar.cond-red .clock small { color: inherit; opacity: .8; }
+
+/* Motion is a reinforcement, never the only signal — the tint and the words
+   both survive when the user has asked for reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  .topbar.cond-fcy, .topbar.cond-sc, .topbar.cond-code60 {
+    animation: none;
+    border-bottom: 2px solid var(--cond-yellow);
+  }
+}
+
+/* ---------- pit wall top bar: the cockpit clock ----------
+   The wall is display-only during the race — no manual condition calls here
+   (the stations keep theirs). Left: navigation · centre: the clock instrument
+   · right: one health pill and a menu for the rare admin actions. Conditions
+   live on their own strip below, so the bar itself never reflows. */
+
+.topbar.pwbar {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 14px;
+  padding: 6px 16px;
+}
+.pwbar .tb-left { display: flex; align-items: center; gap: 12px; justify-self: start; min-width: 0; }
+.pwbar .tb-center { display: flex; align-items: center; gap: 16px; }
+.pwbar .tb-right { display: flex; align-items: center; gap: 10px; justify-self: end; }
+.pwbar .tb-vr { width: 1px; height: 24px; background: var(--line); flex: none; }
+.pwbar #btn-back { border-color: transparent; background: transparent; color: var(--dim); padding: 8px 10px; }
+.pwbar #btn-back:hover { color: var(--text); border-color: var(--line); }
+
+.pwbar .brand { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.pwbar .brand .mono {
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 800;
+  letter-spacing: 1px;
+  font-size: 13px;
+  border-radius: 5px;
+  padding: 3px 6px;
+  flex: none;
+}
+.pwbar .brand .montitle {
+  font-weight: 700;
+  letter-spacing: 2px;
+  font-size: 13px;
+  color: var(--dim);
+  white-space: nowrap;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pwbar .clockstack { display: flex; flex-direction: column; align-items: center; }
+.pwbar .clock { line-height: 1; }
+.pwbar .clocksub { font-size: 11px; letter-spacing: 1.5px; color: var(--dim); }
+
+/* keep the bar's small print readable on a condition tint */
+.topbar.cond-fcy .clocksub, .topbar.cond-sc .clocksub, .topbar.cond-code60 .clocksub,
+.topbar.cond-red .clocksub,
+.topbar.cond-fcy .montitle, .topbar.cond-sc .montitle, .topbar.cond-code60 .montitle,
+.topbar.cond-red .montitle { color: inherit; opacity: .8; }
+.pwbar .clocksub.warn { color: var(--red); font-weight: 700; opacity: 1; }
+
+/* one pill answers "is everything connected?" — detail lives in its popover */
+.healthpill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-family: var(--font-num);
+  font-size: 12px;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.healthpill .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
+.healthpill.ok { color: var(--green); border-color: var(--green); }
+.healthpill.warn { color: var(--amber); border-color: var(--amber); }
+.healthpill.bad { color: var(--red); border-color: var(--red); }
+@media (prefers-reduced-motion: no-preference) {
+  .healthpill.warn .dot, .healthpill.bad .dot { animation: healthpulse 1.2s ease-in-out infinite; }
+}
+@keyframes healthpulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+
+.tb-pop { position: relative; }
+.healthpop, .menupop {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 60;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  box-shadow: 0 14px 34px var(--overlay);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--text);
+}
+.healthpop.hidden, .menupop.hidden { display: none; }
+.healthpop { min-width: 300px; }
+.healthpop .hrow { display: flex; align-items: center; gap: 10px; }
+.healthpop .hlab {
+  flex: none;
+  width: 68px;
+  font-size: 10px;
+  letter-spacing: 2px;
+  font-weight: 700;
+  color: var(--dim);
+}
+.healthpop .conn { max-width: 340px; white-space: normal; }
+.healthpop .hstations { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.menupop { min-width: 190px; }
+.menupop button { display: flex; align-items: center; gap: 8px; text-align: left; }
+
+/* the condition strip — the bar tints (app-wide rule), the words live here */
+.condstrip {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.condstrip.hidden { display: none; }
+.condstrip .condblock {
+  display: inline-flex;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font-size: 16px;
+}
+.condstrip.cond-fcy, .condstrip.cond-sc, .condstrip.cond-code60 {
+  background: var(--cond-yellow-peak);
+  color: var(--cond-yellow-ink);
+  border-bottom-color: var(--cond-yellow);
+}
+.condstrip.cond-red {
+  background: var(--cond-red-strip);
+  color: var(--cond-red-ink);
+  border-bottom-color: var(--red);
+}
+.condstrip.cond-finish {
+  background: var(--cond-finish-strip);
+  color: var(--cond-finish-ink);
+  border-bottom-color: var(--cond-finish-ink);
+}
 
 .panel {
   background: var(--panel);
@@ -119,7 +524,7 @@ input[type="number"] { font-family: var(--font-num); text-align: right; }
   padding: 14px;
 }
 .panel h3 {
-  font-size: 12px;
+  font-size: 14px;
   letter-spacing: 2px;
   color: var(--dim);
   margin-bottom: 10px;
@@ -127,7 +532,7 @@ input[type="number"] { font-family: var(--font-num); text-align: right; }
 }
 
 .kv { display: flex; justify-content: space-between; align-items: baseline; padding: 3px 0; }
-.kv .k { color: var(--dim); font-size: 13px; }
+.kv .k { color: var(--dim); font-size: 15px; }
 .kv .v { font-family: var(--font-num); font-size: 17px; font-weight: 600; }
 .kv .v.big { font-size: 26px; }
 .kv .v.warn { color: var(--amber); }
@@ -137,7 +542,7 @@ input[type="number"] { font-family: var(--font-num); text-align: right; }
 .meter {
   height: 8px;
   border-radius: 4px;
-  background: #0e1520;
+  background: var(--well);
   overflow: hidden;
   margin: 4px 0 8px;
 }
@@ -156,21 +561,469 @@ input[type="number"] { font-family: var(--font-num); text-align: right; }
 body.app-screen {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  /* 100% (not 100vh): under standardized CSS zoom, vh inside the zoomed body
+     resolves to zoom × viewport, which clips the column bottoms and leaves a
+     dead band under the app whenever station.js auto-fit shrinks the page. */
+  height: 100%;
   overflow: hidden;
 }
 body.app-screen .topbar { flex: 0 0 auto; }
 
 .station {
-  display: grid;
-  grid-template-columns: 340px 1fr 380px;
+  display: flex;
+  flex-direction: column;
   gap: 12px;
   padding: 12px;
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden; /* never scroll — station.js auto-fits the page instead */
+}
+/* zones: NOW strip on top, then race picture + resources left, stop story right */
+.station .main {
+  display: grid;
+  grid-template-columns: 1fr 370px;
+  gap: 12px;
+  min-height: 0;
 }
 .station .col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+.station.hidden { display: none; }
+
+/* NOW strip — the one-glance row: who, how long, and what runs out first */
+.nowstrip {
+  display: flex;
+  align-items: center;
+  gap: 8px 22px;
+  flex-wrap: wrap;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 16px;
+}
+.nowstrip .itm { display: flex; align-items: baseline; gap: 7px; white-space: nowrap; }
+/* display:flex would beat the hidden attribute (same trap as .lapbox) */
+.nowstrip .itm[hidden] { display: none; }
+.nowstrip .lab {
+  color: var(--dim);
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+.nowstrip b { font-size: 19px; font-weight: 700; }
+.nowstrip .sub { color: var(--dim); font-size: 13px; }
+.nowstrip .warn { color: var(--amber); }
+.nowstrip .crit { color: var(--red); }
+.alertchip {
+  margin-left: auto;
+  border: 1px solid var(--line);
+  color: var(--dim);
+  border-radius: 7px;
+  padding: 4px 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.alertchip.warn {
+  color: var(--amber);
+  border-color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 10%, transparent);
+}
+.alertchip.crit {
+  color: var(--red);
+  border-color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+}
+
+/* RESOURCES: three gauges with one anatomy — big number, drain bar, what's left */
+.gaugerow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; min-width: 0; }
+.gaugerow .panel { min-width: 0; }
+.axlehead { color: var(--dim); font-size: 12px; letter-spacing: 1.5px; margin: 8px 0 2px; }
+.axlehead:first-child { margin-top: 0; }
+
+/* CONTEXT: mini scoreboard, seat time */
+.ctxrow { display: grid; grid-template-columns: 1.2fr 1fr; gap: 12px; min-width: 0; }
+.ctxrow .panel { min-width: 0; }
+
+/* INPUTS: lap logging + race-wide condition, bottom left */
+.inputrow { display: grid; grid-template-columns: 1.6fr 1fr; gap: 12px; min-width: 0; }
+.inputrow .panel { min-width: 0; }
+
+.around-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.around-table td { padding: 3px 6px; white-space: nowrap; }
+.around-table td.num { font-family: var(--font-num); font-variant-numeric: tabular-nums; text-align: right; }
+.around-table td.drv { overflow: hidden; text-overflow: ellipsis; max-width: 120px; }
+.around-table tr.ours td {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.around-table tr.own td {
+  color: var(--accent);
+  font-weight: 700;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+.around-table tr.inpit td { opacity: .62; }
+
+/* NEXT STOP: the lifecycle stepper on top of the planner */
+.stepper { display: flex; gap: 4px; margin-bottom: 8px; }
+.stepper span {
+  flex: 1;
+  text-align: center;
+  padding: 3px 0;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: var(--dim);
+  background: var(--well);
+  border-radius: 5px;
+}
+.stepper span.done { background: var(--green); color: #04180a; }
+.stepper span.cur { background: var(--amber); color: #241600; }
+
+.planner .limitbanner { padding: 8px 10px; margin-bottom: 4px; }
+.planner .limitbanner .lab { font-size: 11px; letter-spacing: 1.5px; }
+.planner .limitbanner .val { font-size: 19px; }
+
+/* ---------- next pit stop: three plans, one card ---------- */
+
+/* The three situations. The live one carries a dot; the selected one is lit. */
+.plantabs { display: flex; gap: 4px; margin-bottom: 8px; }
+.plantabs button {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 2px;
+  border-radius: 6px;
+  background: var(--well);
+  color: var(--dim);
+  line-height: 1.15;
+}
+.plantabs button b { font-size: 10px; letter-spacing: 1px; }
+.plantabs button span { font-family: var(--font-num); font-size: 11px; opacity: .85; }
+.plantabs button.live b::after { content: " ·"; color: var(--accent); }
+.plantabs button.on { background: var(--accent); color: #04121c; }
+.plantabs button.on span { opacity: 1; }
+
+/* The call itself — one answer, colour-coded, with the reason under it. */
+.verdictband {
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  border-radius: 8px 8px 0 0;
+  padding: 9px 11px;
+}
+.verdictband .vhead {
+  font-size: 20px;
+  font-weight: 900;
+  letter-spacing: .5px;
+  line-height: 1.1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.verdictband .vsub { font-size: 12px; color: var(--dim); line-height: 1.4; margin-top: 3px; }
+.verdictband.go { border-color: var(--green); background: color-mix(in srgb, var(--green) 10%, var(--panel-2)); }
+.verdictband.go .vhead { color: var(--green); }
+.verdictband.hold { border-color: var(--amber); background: var(--fcy-bg); }
+.verdictband.hold .vhead { color: var(--amber); }
+.verdictband.crit { border-color: var(--red); background: color-mix(in srgb, var(--red) 12%, var(--panel-2)); }
+.verdictband.crit .vhead { color: var(--red); animation: fcypulse 1.2s ease-in-out infinite; }
+.verdictband.calm .vhead { color: var(--accent); }
+
+.duestrip {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  background: var(--well);
+  padding: 6px 11px;
+}
+.duestrip .k { font-family: var(--font-num); font-size: 10px; letter-spacing: 1.5px; color: var(--dim); }
+.duestrip .t { font-size: 21px; font-weight: 800; }
+.duestrip .n { margin-left: auto; font-size: 11px; color: var(--dim); text-align: right; }
+
+/* The one call the app cannot finish on its own. */
+.askstrip {
+  margin-top: 6px;
+  border: 1px solid var(--red);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 12px;
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+}
+.askstrip.hidden { display: none; }
+
+.plansentence {
+  margin: 8px 0 6px;
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--text);
+}
+.plansentence b { font-weight: 800; }
+.plansentence .t { font-family: var(--font-num); }
+
+/* Every line: what it is, what the answer is, and every option on screen —
+   nothing to discover, and APP is just another option. */
+.planlines { display: flex; flex-direction: column; }
+.pline { border-top: 1px solid var(--line); padding: 6px 0; }
+.pline .top { display: flex; align-items: center; gap: 8px; }
+.pline .top .ic { width: 15px; height: 15px; color: var(--dim); flex: none; }
+.pline.pinned .top .ic { color: var(--amber); }
+.pline .kv2 { flex: 1; min-width: 0; }
+.pline .k { display: block; font-family: var(--font-num); font-size: 10px; letter-spacing: 1.4px; color: var(--dim); }
+.pline .v { font-size: 15px; font-weight: 800; }
+.pline.pinned .v { color: var(--amber); }
+.pline.quiet .v { color: var(--dim); font-weight: 700; }
+.pline .n { font-size: 11px; color: var(--dim); line-height: 1.35; }
+.pline .tag {
+  font-family: var(--font-num);
+  font-size: 9px;
+  letter-spacing: 1px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  color: var(--dim);
+}
+.pline .tag.pin { color: var(--amber); border-color: var(--amber); }
+.pline .opts { display: flex; flex-wrap: wrap; gap: 4px; margin: 5px 0 0 23px; }
+.pline .opts button {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: var(--well);
+  color: var(--dim);
+}
+.pline .opts button:hover { color: var(--text); }
+.pline .opts button.on { background: var(--amber); color: #241600; }
+.pline .opts button.on.app { background: var(--accent); color: #04121c; }
+.pline .opts input { width: 62px; }
+.pline .setpicker {
+  margin: 6px 0 0 23px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow-y: auto;
+  max-height: 168px;
+}
+.pline .setpicker .srow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  font-size: 12px;
+}
+.pline .setpicker .srow:last-child { border-bottom: none; }
+.pline .setpicker .srow:hover { background: var(--panel-2); }
+.pline .setpicker .srow.on { background: color-mix(in srgb, var(--amber) 15%, transparent); }
+.pline .setpicker .srow.mounted { color: var(--dim); cursor: default; }
+.pline .setpicker .srow .nm { font-weight: 700; }
+.pline .setpicker .srow .meta { margin-left: auto; font-family: var(--font-num); font-size: 11px; color: var(--dim); }
+
+/* The approval tick — the line between "the app suggests" and "we are doing
+   this". Set here, read-only on the wall. */
+.approvebar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 10px;
+  margin: 8px 0;
+  font-size: 12px;
+  color: var(--dim);
+}
+.approvebar .box {
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.approvebar .box .ic { width: 13px; height: 13px; }
+.approvebar button { margin-left: auto; padding: 5px 10px; font-weight: 800; }
+.approvebar.done { border-color: var(--green); background: color-mix(in srgb, var(--green) 10%, transparent); }
+.approvebar.done .box { background: var(--green); border-color: var(--green); color: #04180a; }
+.approvebar.done b { color: var(--green); }
+.approvebar.stale { border-color: var(--amber); background: var(--fcy-bg); }
+.approvebar.stale .box { border-color: var(--amber); color: var(--amber); }
+.approvebar.stale b { color: var(--amber); }
+
+/* After BOX BOX the feed owns the stop: these are states, not buttons. */
+.feedstate {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--dim);
+}
+.feedstate .ic { width: 15px; height: 15px; color: var(--accent); flex: none; }
+.feedstate b { color: var(--text); }
+.feedstate button { margin-left: auto; font-size: 11px; padding: 4px 8px; }
+
+/* view tabs in the topbar (strategy / scoreboard) */
+.topbar .viewtabs { display: flex; gap: 6px; }
+.topbar .viewtabs button {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--dim);
+  padding: 6px 12px;
+}
+.topbar .viewtabs button.on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--panel-2);
+}
+
+/* scoreboard tab — full standings from the timing feed */
+.sbview { flex: 1; min-height: 0; padding: 12px; display: flex; }
+.sbview.hidden { display: none; }
+.sbview .sbwrap { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.sbview .sb-scroll { flex: 1; overflow: auto; min-height: 0; }
+.sb-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.sb-table th, .sb-table td {
+  padding: 6px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+/* Zebra banding instead of a rule under every row: on a 24-row board the
+   horizontal lines add more noise than structure. */
+.sb-table tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--text) 3.5%, transparent);
+}
+.sb-table tbody tr:hover td {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.sb-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel);
+  color: var(--dim);
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  border-bottom: 2px solid var(--line);
+  padding-bottom: 5px;
+}
+.sb-table th.num, .sb-table td.num { text-align: right; }
+.sb-table td.num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+
+/* --- hierarchy: what matters loudest, context quietest ---------------- */
+/* Primary: position, number, driver — the identity of the row. */
+/* The left edge doubles as a class gutter: a continuous colour band per class
+   block, readable peripherally without spending a column on it. */
+.sb-table td.pos {
+  font-weight: 800;
+  font-size: 15px;
+  box-shadow: inset 3px 0 0 var(--cls-color, transparent);
+}
+.sb-table td.nr { font-weight: 800; color: var(--text); }
+.sb-table td.drv { font-weight: 600; color: var(--text); }
+/* Secondary: gaps and lap times — read often, but only after the identity. */
+.sb-table td.gap, .sb-table td.int { color: var(--text); }
+.sb-table td.lap { color: var(--text); }
+/* Tertiary: sectors, laps, pits, team, car — reference, not scan targets. */
+.sb-table td.lpit.warn, .sb-table td.stint.warn { color: var(--amber); }
+.sb-table td.sect, .sb-table td.laps, .sb-table td.pits,
+.sb-table td.lpit:not(.warn), .sb-table td.stint:not(.warn) {
+  color: var(--dim);
+  font-size: 13px;
+}
+.sb-table td.team { color: var(--text); }
+.sb-table td.car { color: var(--dim); font-size: 13px; }
+.sb-table td.team, .sb-table td.car {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sb-table td.pic { color: var(--dim); }
+
+/* Class tag — a coloured chip so a mixed field separates at a glance. */
+.sb-table td.cls { padding-right: 4px; }
+.sb-table .clstag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--cls-color, var(--dim));
+  background: color-mix(in srgb, var(--cls-color, var(--dim)) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--cls-color, var(--dim)) 40%, transparent);
+}
+.sb-table tr.c0 { --cls-color: var(--accent); }
+.sb-table tr.c1 { --cls-color: var(--amber); }
+.sb-table tr.c2 { --cls-color: var(--green); }
+.sb-table tr.c3 { --cls-color: #c792ea; }
+.sb-table tr.c4 { --cls-color: #ff8fa3; }
+.sb-table tr.clsbreak td { border-top: 1px solid var(--line); }
+
+/* Vertical rules between column groups (identity | gaps | pace | sectors |
+   race). Grouping is what makes 18 columns scannable instead of a wall. */
+.sb-table th.grp, .sb-table td.grp {
+  border-left: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  padding-left: 12px;
+}
+
+/* Lap times: motorsport convention — purple session best, green class best. */
+.sb-table td.lap.best-session { color: #c792ea; font-weight: 700; }
+.sb-table td.lap.best-class { color: var(--green); font-weight: 700; }
+.sb-table td.lap.best-own { color: var(--accent); }
+
+.sb-table td.eta { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+.sb-table td.eta.warn { color: var(--amber); }
+.sb-table td.eta.crit { color: var(--red); font-weight: 700; }
+.sb-table td.eta.dim { color: var(--dim); }
+
+/* In the pit: dim the whole row — it is not racing right now. */
+.sb-table tr.inpit td { opacity: 0.62; }
+.sb-table tr.inpit .drv { color: var(--amber); opacity: 1; }
+
+/* Own car: the one row that must be findable without reading. Strong enough
+   to catch the eye mid-field, since that is the whole job of this row. */
+.sb-table tr.own td {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  opacity: 1;
+}
+.sb-table tr.own:hover td { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+.sb-table tr.own td.pos {
+  box-shadow: inset 4px 0 0 var(--accent);
+  padding-left: 10px;
+}
+.sb-table tr.own .drv { color: var(--accent); font-weight: 800; }
+.sb-table tr.own td.pos, .sb-table tr.own td.nr { font-size: 16px; }
+
+/* Team cars: every filled-in car number lights up, not just the one this
+   station runs — the same set of cars the track map marks. Underlined accent
+   number on all four; the row tint stays lighter than the own row, which
+   must remain the loudest thing on the board. */
+.sb-table tr.ours td { opacity: 1; }
+.sb-table tr.ours td.nr {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+.sb-table tr.ours:not(.own) td {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.sb-table tr.ours:not(.own):hover td {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.sb-table tr.ours:not(.own) td.pos { box-shadow: inset 3px 0 0 var(--accent); }
 
 .lapbox { display: flex; gap: 10px; align-items: stretch; }
 .lapbox button.lap {
@@ -188,7 +1041,6 @@ body.app-screen .topbar { flex: 0 0 auto; }
 .condrow button { flex: 1; font-weight: 700; letter-spacing: 1px; }
 .condrow button.on { background: var(--accent); color: #04121c; border-color: var(--accent); }
 .condrow button.on.wet { background: #5b8dff; border-color: #5b8dff; }
-.condrow button.on.sc { background: var(--amber); border-color: var(--amber); }
 
 .limitbanner {
   border-radius: 10px;
@@ -199,7 +1051,7 @@ body.app-screen .topbar { flex: 0 0 auto; }
   justify-content: space-between;
   align-items: center;
 }
-.limitbanner .lab { color: var(--dim); font-size: 12px; letter-spacing: 2px; }
+.limitbanner .lab { color: var(--dim); font-size: 14px; letter-spacing: 2px; }
 .limitbanner .val { font-size: 24px; font-weight: 800; font-family: var(--font-num); }
 .limitbanner.warn { border-color: var(--amber); }
 .limitbanner.warn .val { color: var(--amber); }
@@ -207,7 +1059,7 @@ body.app-screen .topbar { flex: 0 0 auto; }
 .limitbanner.crit .val { color: var(--red); }
 
 .timeline-wrap { overflow: hidden; }
-.timeline-wrap svg { width: 100%; height: 110px; display: block; }
+.timeline-wrap svg { width: 100%; height: 150px; display: block; }
 
 .drv-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
 .drv-row .dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
@@ -232,22 +1084,27 @@ body.app-screen .topbar { flex: 0 0 auto; }
 }
 .planner .toggle.on { background: var(--amber); color: #201200; border-color: var(--amber); }
 .planner .fuel-quick { display: flex; gap: 6px; }
-.planner .fuel-quick button { font-size: 12px; padding: 4px 8px; }
+.planner .fuel-quick button { font-size: 13px; padding: 4px 8px; }
+.planner .row .duo { display: flex; gap: 6px; }
 .planner textarea { width: 100%; height: 44px; resize: none; }
 .planner .actions { display: flex; gap: 8px; margin-top: 12px; }
 .planner .actions button { flex: 1; font-weight: 800; letter-spacing: 1px; }
 .planner .send { border-color: var(--amber); color: var(--amber); }
 .planner .box { border-color: var(--red); color: var(--red); font-size: 18px; }
-.planner .status-line { margin-top: 10px; text-align: center; font-size: 13px; letter-spacing: 2px; color: var(--dim); }
+.planner .inpit { border-color: var(--accent); color: var(--accent); }
+.planner .inpit.on { background: var(--accent); color: #001322; border-color: var(--accent); }
+.planner .done { border-color: var(--green); color: var(--green); }
+.planner .status-line { margin-top: 10px; text-align: center; font-size: 14px; letter-spacing: 2px; color: var(--dim); }
 .planner .status-line.sent { color: var(--amber); }
 .planner .status-line.box { color: var(--red); font-weight: 800; }
+.planner .status-line.inpit { color: var(--accent); font-weight: 800; }
 
 /* ---------- settings modal ---------- */
 
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(4, 8, 14, .78);
+  background: var(--overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -261,8 +1118,34 @@ body.app-screen .topbar { flex: 0 0 auto; }
   border-radius: 12px;
   width: min(900px, 94vw);
   max-height: 90vh;
+  min-height: min(560px, 90vh); /* stable height while switching tabs */
   display: flex;
   flex-direction: column;
+}
+.modal.wide { width: min(1100px, 96vw); }
+
+.tabbar {
+  display: flex;
+  gap: 6px;
+  padding: 10px 18px 0;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.tabbar button {
+  border: 1px solid var(--line);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--dim);
+  background: transparent;
+}
+.tabbar button.on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--panel-2);
 }
 .modal-head {
   display: flex;
@@ -275,7 +1158,7 @@ body.app-screen .topbar { flex: 0 0 auto; }
 .modal-body { padding: 4px 18px 18px; overflow: auto; }
 .modal-body section { margin-top: 16px; }
 .modal-body section h3 {
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: 2px;
   color: var(--dim);
   text-transform: uppercase;
@@ -296,7 +1179,20 @@ body.app-screen .topbar { flex: 0 0 auto; }
 }
 .form-grid input { width: 130px; }
 .modal-actions { display: flex; gap: 10px; margin-top: 12px; }
-.hint { color: var(--dim); font-size: 12px; margin-top: 10px; line-height: 1.5; }
+.hint { color: var(--dim); font-size: 13px; margin-top: 10px; line-height: 1.5; }
+.hint.warn { color: var(--amber); }
+
+/* Manual text (.hint.help) hides behind the HELP toggle in the modal head so
+   the forms read clean; live status .hint lines are not .help and always show. */
+.modal .hint.help { display: none; }
+body.show-help .modal .hint.help { display: block; }
+.modal-head { gap: 8px; }
+.modal-head h2 { margin-right: auto; }
+.modal-head .helpbtn.on { color: var(--accent); border-color: var(--accent); }
+
+/* Live fuel-model readout, moved from settings into the fuel panel */
+.modelinfo { border-top: 1px dashed var(--line); margin-top: 4px; padding-top: 2px; }
+.modelinfo:empty { display: none; }
 
 .drv-table { width: 100%; border-collapse: collapse; }
 .drv-table th, .drv-table td {
@@ -306,31 +1202,176 @@ body.app-screen .topbar { flex: 0 0 auto; }
   font-size: 13px;
   white-space: nowrap;
 }
-.drv-table th { color: var(--dim); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
+.drv-table th { color: var(--dim); font-size: 12px; letter-spacing: 1px; text-transform: uppercase; }
 .drv-table input[type="text"] { width: 140px; }
 .drv-table input[type="number"] { width: 80px; }
-.drv-table .flag { min-width: 60px; font-weight: 700; font-size: 12px; }
-.drv-table .flag.on { background: var(--green); color: #04180a; border-color: var(--green); }
+.drv-table input.abbr { width: 52px; text-transform: uppercase; }
+.drv-table input.tname { width: 150px; }
+
+/* driver recognised from the timing feed */
+.drvtag {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  color: var(--dim);
+}
+.drvfeed { font-size: 12px; color: var(--dim); white-space: nowrap; }
+.drvfeed.ok { color: var(--green); }
+.drvfeed.warn { color: var(--amber); font-weight: 700; }
+.drvfeed .ico { width: 12px; height: 12px; vertical-align: -2px; }
+/* on/off toggle buttons (driver flags, auto-lap on station + pit wall links) */
+button.flag { min-width: 60px; font-weight: 700; font-size: 12px; }
+button.flag.on { background: var(--green); color: #04180a; border-color: var(--green); }
 
 .badge { font-size: 12px; }
 .badge.off { opacity: .18; filter: grayscale(1); }
 
-/* ---------- FCY procedure ---------- */
+/* ---------- fuel vs lap time curves ---------- */
 
-.fcybtn {
+#fuel-curve-editors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.curve-box {
+  flex: 1 1 260px;
+  min-width: 240px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+  background: var(--well);
+}
+.curve-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
+.curve-head .nm { font-weight: 700; }
+.curve-head .meta { color: var(--dim); font-size: 12px; }
+.curve-head .meta.good { color: var(--green); }
+.curve-head .meta.warn { color: var(--amber); }
+.curve-table { width: 100%; border-collapse: collapse; }
+.curve-table th, .curve-table td {
+  padding: 4px 6px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.curve-table th { color: var(--dim); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
+.curve-table input { width: 84px; font-family: var(--font-num); }
+.curve-add { margin-top: 10px; padding: 5px 12px; font-size: 12px; }
+
+/* ---------- setup presets ---------- */
+
+.preset-save { display: flex; gap: 8px; margin-bottom: 12px; }
+.preset-save input { flex: 1; }
+.preset-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+}
+.preset-row .nm { font-weight: 700; }
+.preset-row .meta { flex: 1; color: var(--dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preset-row button { padding: 5px 12px; font-size: 12px; }
+
+/* replay transport (settings → live timing → session replays) */
+.replay-ctl {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.replay-ctl input[type="range"] { flex: 1; min-width: 140px; }
+.replay-ctl .mono { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 12px; white-space: nowrap; }
+.replay-ctl button { padding: 5px 12px; font-size: 12px; }
+
+/* ---------- stint plan ---------- */
+
+#plan-overlay .hint { font-size: 14px; }
+
+.plan-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 28px;
+  margin: 14px 0;
+  padding: 10px 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 15px;
+  color: var(--text);
+}
+.plan-totals .tot { display: inline-flex; align-items: center; gap: 8px; }
+.plan-totals .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+.plan-totals b { color: var(--text); font-size: 16px; }
+
+.plan-table th, .plan-table td { font-size: 16px; padding: 9px 12px; }
+.plan-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  z-index: 1;
+  font-size: 12px;
+}
+.plan-table td .dot {
+  width: 11px; height: 11px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 6px;
+  vertical-align: -1px;
+}
+.plan-table td.drv { font-weight: 700; }
+.plan-table td.num, .plan-table th { font-family: var(--font-num); }
+.plan-table tr.night td { background: var(--night-row); }
+.plan-table tr.night td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* ---------- manual race-condition controls (FCY / SC / RED) ---------- */
+
+.condctl { display: flex; gap: 6px; }
+.condbtn {
+  flex: 1;
   font-weight: 800;
   letter-spacing: 1px;
+  white-space: nowrap;
+}
+.condbtn.c-fcy, .condbtn.c-sc {
   border-color: var(--amber);
   color: var(--amber);
 }
-.fcybtn.on {
+.condbtn.c-red {
+  border-color: var(--red);
+  color: var(--red);
+}
+.condbtn.on { animation: fcypulse 1.6s ease-in-out infinite; }
+.condbtn.c-fcy.on, .condbtn.c-sc.on {
   background: var(--amber);
   color: #201200;
-  animation: fcypulse 1.6s ease-in-out infinite;
 }
+.condbtn.c-red.on {
+  background: var(--red);
+  color: #fff;
+}
+/* A feed-reported red cannot be overridden away — the button is information. */
+.condbtn:disabled { opacity: .6; cursor: default; }
+/* FORCE GREEN: someone is overriding a flag the feed still reports. */
+.condbtn.forced-green {
+  border-color: var(--green);
+  color: var(--green);
+  background: transparent;
+  animation: none;
+}
+/* AUTO with the feed driving the condition — the button is a release, not a
+   trigger, so it must not look like an armed control. */
+.condbtn.from-feed { border-style: dashed; }
 .fcybanner {
   border: 2px solid var(--amber);
-  background: #2a2110;
+  background: var(--fcy-bg);
   color: var(--amber);
   border-radius: 10px;
   padding: 10px 14px;
@@ -342,11 +1383,122 @@ body.app-screen .topbar { flex: 0 0 auto; }
   animation: fcypulse 1.6s ease-in-out infinite;
 }
 .fcybanner.hidden { display: none; }
+/* Red flag / chequered: the field is stopped, so the banner states the fact
+   without the urgency styling a live neutralisation gets. */
+.fcybanner.stopped {
+  border-color: var(--dim);
+  background: var(--panel-2);
+  color: var(--text);
+  animation: none;
+}
 @keyframes fcypulse {
   50% { opacity: .6; }
 }
+/* Low fuel: amber while there is still slack, red + flashing once the stop is
+   due within a couple of laps. Same shape as the FCY banner so the eye reads
+   both as "act now" strips. */
+.fuelwarnbanner {
+  border: 2px solid var(--amber);
+  background: var(--fcy-bg);
+  color: var(--amber);
+  border-radius: 10px;
+  padding: 10px 14px;
+  text-align: center;
+  font-weight: 900;
+  letter-spacing: 2px;
+  font-size: 18px;
+  font-family: var(--font-num);
+}
+.fuelwarnbanner.crit {
+  border-color: var(--red);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  animation: fcypulse 1.1s ease-in-out infinite;
+}
+.fuelwarnbanner.hidden { display: none; }
 @media (prefers-reduced-motion: reduce) {
-  .fcybanner, .fcybtn.on, .wallcard.box { animation: none; }
+  .fcybanner, .fuelwarnbanner.crit, .condbtn.on, .wallcard.box { animation: none; }
+}
+
+/* A set has come off the car and is waiting for KEEP or SCRAP. Not an alarm —
+   a question, so it states the mileage and offers the two answers (scrapping
+   asks for a reason first, which is also the confirmation step). */
+.setdecision {
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  border-radius: 10px;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.setdecision.hidden { display: none; }
+.setdecision .lab {
+  font-family: var(--font-num);
+  font-size: 12px;
+  letter-spacing: 1.5px;
+  color: var(--dim);
+}
+.setdecision b { font-size: 16px; }
+.setdecision .mil { font-family: var(--font-num); font-size: 13px; color: var(--dim); }
+.setdecision .mil em { font-style: normal; color: var(--amber); }
+.setdecision .acts { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.setdecision button { padding: 6px 12px; font-weight: 700; }
+.setdecision button.keep { border-color: var(--green); color: var(--green); }
+.setdecision button.keep:hover { background: color-mix(in srgb, var(--green) 18%, transparent); }
+.setdecision button.scrap { border-color: var(--red); color: var(--red); }
+.setdecision button.scrap:hover { background: color-mix(in srgb, var(--red) 16%, transparent); }
+.setdecision .why { font-family: var(--font-num); font-size: 11px; letter-spacing: 1px; color: var(--dim); }
+
+/* "What actually happened": the four lines of the stop, filled in with what
+   was applied, for the engineer to change into the truth. */
+.correctform { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.correctform label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-num);
+  font-size: 10.5px;
+  letter-spacing: 1.2px;
+  color: var(--dim);
+}
+.correctform input[type="number"] { width: 72px; }
+.correctform select { max-width: 190px; }
+.correctform .fixbrakes { display: flex; gap: 8px; flex-wrap: wrap; }
+.correctform .fixbrakes .toggle { padding: 5px 9px; font-size: 11px; }
+/* Each brake group corrects as a pair: whether it was changed, and onto which
+   numbered set. The select is dim until the group is toggled on. */
+.correctform .fixbrake { display: flex; align-items: center; gap: 3px; }
+.correctform .fixbrake select { max-width: 84px; padding: 4px 5px; font-size: 11px; opacity: .5; }
+.correctform .fixbrake:has(.toggle.on) select { opacity: 1; }
+
+/* Tyre set rows in settings: state pill, mileage, and a two-step scrap. */
+.preset-row .setpill {
+  font-family: var(--font-num);
+  font-size: 10px;
+  letter-spacing: 1px;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--dim);
+}
+.preset-row .setpill.new { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
+.preset-row .setpill.oncar { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.preset-row .setpill.scrapped { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+.preset-row.isscrapped { opacity: .55; }
+.preset-row.isscrapped input[data-set-name] { text-decoration: line-through; }
+.preset-row .km { font-family: var(--font-num); font-size: 12px; color: var(--dim); }
+.preset-row .km em { font-style: normal; color: var(--amber); }
+.preset-row.isscrapped input[data-bset-name] { text-decoration: line-through; }
+
+/* The part number of the brake set on the car, next to its gauge label. */
+.setno {
+  font-family: var(--font-num);
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--accent);
+  margin-left: 6px;
 }
 
 /* ---------- pit wall ---------- */
@@ -360,6 +1512,8 @@ body.app-screen .topbar { flex: 0 0 auto; }
   flex: 1;
   min-height: 0;
 }
+
+.wall.hidden { display: none; }
 
 .wallcard {
   background: var(--panel);
@@ -375,8 +1529,9 @@ body.app-screen .topbar { flex: 0 0 auto; }
 }
 .wallcard.sent { border-color: var(--amber); }
 .wallcard.box { border-color: var(--red); animation: boxflash 0.8s steps(2, start) infinite; }
+.wallcard.inpit { border-color: var(--accent); }
 @keyframes boxflash {
-  0% { background: #2a1414; }
+  0% { background: var(--flash-bg); }
   100% { background: var(--panel); }
 }
 
@@ -404,7 +1559,7 @@ body.app-screen .topbar { flex: 0 0 auto; }
   text-overflow: ellipsis;
 }
 .wallcard .incar { margin-left: auto; text-align: right; min-width: 0; }
-.wallcard .incar .lab { font-size: 10px; letter-spacing: 2px; color: var(--dim); }
+.wallcard .incar .lab { font-size: 12px; letter-spacing: 2px; color: var(--dim); }
 .wallcard .incar b {
   display: block;
   font-size: 17px;
@@ -413,68 +1568,244 @@ body.app-screen .topbar { flex: 0 0 auto; }
   text-overflow: ellipsis;
 }
 
-.wallcard .statusband {
-  text-align: center;
-  font-size: 16px;
-  font-weight: 900;
-  letter-spacing: 2px;
-  padding: 9px 6px;
+/* verdict band — one line that answers "what now?": the stop status, the
+   pit-window verdict or the countdown to the next stop (replaces the old
+   stack of status / strategy / E.T.A. banners) */
+.verdict {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
   border-radius: 10px;
-  color: var(--dim);
   background: var(--panel-2);
+  border: 1px solid transparent;
 }
-.wallcard.sent .statusband { color: #201200; background: var(--amber); }
-.wallcard.box .statusband { color: #fff; background: var(--red); }
-
-/* service board — shown when a stop is planned */
-.service { flex: 1; display: flex; flex-direction: column; gap: 6px; min-height: 0; }
-.srow {
-  flex: 1;
+.verdict .vmain {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  background: var(--panel-2);
-  border-radius: 10px;
-  padding: 4px 12px;
-  min-height: 0;
-  opacity: .35;
-}
-.srow.on { opacity: 1; outline: 2px solid var(--amber); }
-.srow .lab {
-  font-size: 14px;
-  font-weight: 800;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 16px;
+  font-weight: 900;
   letter-spacing: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.verdict .vmain b { font-family: var(--font-num); font-size: 17px; }
+.verdict .vmain small { font-weight: 600; font-size: 12px; letter-spacing: 0.5px; color: var(--dim); }
+.verdict.calm { color: var(--dim); }
+.verdict.calm .vmain b { color: var(--text); }
+.verdict.good { color: var(--green); }
+.verdict.go {
+  color: #04170a;
+  background: var(--green);
+  animation: fcypulse 1.6s ease-in-out infinite;
+}
+.verdict.go .vmain small { color: inherit; opacity: 0.75; }
+.verdict.hold { color: var(--amber); border-color: var(--amber); background: var(--fcy-bg); }
+.verdict.sent { color: var(--amber); border-color: var(--amber); background: var(--fcy-bg); }
+.verdict.box { color: #fff; background: var(--red); }
+.verdict.inpit { color: #001322; background: var(--accent); }
+.verdict.warn { border-color: var(--amber); }
+.verdict.crit { border-color: var(--red); }
+.verdict .lowfuel { color: var(--red); }
+.verdict.go .lowfuel, .verdict.box .lowfuel { color: #7a0000; }
+.verdict .vsub {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 700;
+  font-family: var(--font-num);
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.verdict .vsub b { font-size: 15px; }
+.verdict .vsub small { font-weight: 400; color: var(--dim); }
+.verdict .vsub.fcy { color: var(--accent); }
+.verdict .vsub.stale { color: var(--dim); }
+.verdict.go .vsub, .verdict.box .vsub, .verdict.inpit .vsub { color: inherit; }
+.verdict.go .vsub small, .verdict.box .vsub small, .verdict.inpit .vsub small { color: inherit; opacity: 0.7; }
+@media (prefers-reduced-motion: reduce) {
+  .verdict.go { animation: none; }
+}
+
+/* station link line — no car on this entry, or its laptop dropped mid-race */
+.wallcard.nocar { opacity: 0.6; border-style: dashed; }
+.wallcard.nocar .foot { display: none; }
+.stationline {
+  text-align: center;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  color: var(--dim);
+  background: var(--panel-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stationline.lost { color: var(--amber); border: 1px solid var(--amber); }
+
+/* answer tiles — one per crew station, fixed 2×2 grid. The verdict on each
+   tile is the action itself; amber = work at this stop, red = critical,
+   quiet = nothing to do. LIMIT marks the category forcing the next stop. */
+/* The crew's grab list: parts down the side, one column per situation. The
+   yellow column is first because it is the one they can never prepare for
+   once it happens; matching cells collapse to "same" so only the differences
+   pull the eye. */
+.grab { flex: 1; min-height: 0; overflow: hidden; }
+.grabempty {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: var(--dim);
+  font-family: var(--font-num);
+  font-size: 13px;
+  letter-spacing: 1px;
+}
+.grabtable { width: 100%; height: 100%; border-collapse: collapse; table-layout: fixed; }
+.grabtable th {
+  font-family: var(--font-num);
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--dim);
+  text-align: left;
+  font-weight: 700;
+  padding: 2px 8px 6px;
+  border-bottom: 1px solid var(--line);
+}
+.grabtable th.hot { color: var(--amber); }
+.grabtable td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.grabtable tbody tr:last-child td { border-bottom: none; }
+.grabtable td.cat {
+  width: 86px;
+  color: var(--dim);
+  font-family: var(--font-num);
+  font-size: 11px;
+  letter-spacing: 1px;
+  white-space: nowrap;
+}
+.grabtable td.cat .ico { width: 14px; height: 14px; vertical-align: -3px; margin-right: 5px; }
+/* A long driver name must wrap inside its own cell, never run over the
+   column next to it. */
+.grabtable td .v {
+  display: block;
+  font-size: 19px;
+  font-weight: 800;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+.grabtable td .n { display: block; font-family: var(--font-num); font-size: 11px; color: var(--dim); }
+.grabtable td.act { background: var(--fcy-bg); }
+.grabtable td.act .v { color: var(--amber); }
+.grabtable td.crit { background: var(--flash-bg); }
+.grabtable td.crit .v { color: var(--red); }
+.grabtable td.ok .v, .grabtable td.same .v { color: var(--dim); font-weight: 700; font-size: 16px; }
+.grabtable tr.lim td.cat { color: var(--red); }
+.grabtable tfoot td {
+  border-top: 1px solid var(--line);
+  border-bottom: none;
+  font-family: var(--font-num);
+  font-size: 11px;
+  color: var(--dim);
+  padding-top: 6px;
+}
+
+/* Read-only on the wall: the tick is set by the engineer on the station. */
+.wapprove {
+  font-family: var(--font-num);
+  font-size: 11.5px;
+  letter-spacing: 1px;
+  color: var(--dim);
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.wapprove .ico { width: 14px; height: 14px; flex: none; }
+.wapprove.done { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
+.wapprove.stale { color: var(--amber); border-color: var(--amber); background: var(--fcy-bg); }
+
+.tiles {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-auto-rows: 1fr;
+  gap: 7px;
+}
+.tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px 9px;
+  border-radius: 10px;
+  background: var(--panel-2);
+  border: 1px solid transparent;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.tile .cat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
   color: var(--dim);
   white-space: nowrap;
 }
-.srow.on .lab { color: var(--text); }
-.srow .val {
-  font-size: 26px;
+.tile .v {
+  margin-top: 1px;
+  font-size: 21px;
   font-weight: 900;
+  letter-spacing: 0.3px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tile .due {
+  margin-top: auto;
+  font-size: 12px;
   font-family: var(--font-num);
   color: var(--dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.srow.on .val { color: var(--amber); }
-.srow.fuel .val { font-size: 38px; }
-.srow.fuel.on .val { color: var(--accent); }
+.tile.act { border-color: var(--amber); background: var(--fcy-bg); }
+.tile.act .cat { color: var(--text); }
+.tile.act .v { color: var(--amber); }
+.tile.crit { border-color: var(--red); background: var(--flash-bg); }
+.tile.crit .cat { color: var(--text); }
+.tile.crit .v { color: var(--red); }
+.tile .limtag {
+  position: absolute;
+  top: 7px;
+  right: 8px;
+  display: none;
+  padding: 1px 5px;
+  border: 1px solid var(--red);
+  border-radius: 4px;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: var(--red);
+}
+.tile.lim .limtag { display: inline-block; }
 
-/* brakes: label on top, 2x2 chip grid (front row, rear row) */
-.srow.brakes {
-  flex-direction: column;
-  align-items: stretch;
-  justify-content: center;
-  gap: 6px;
-  padding: 8px 12px;
-}
-.chips {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-}
+/* brake chip base kept for the track-map rail chips */
 .chip {
   padding: 7px 6px;
   border-radius: 8px;
@@ -486,26 +1817,20 @@ body.app-screen .topbar { flex: 0 0 auto; }
   white-space: nowrap;
   text-align: center;
 }
-.chip.on { background: var(--amber); border-color: var(--amber); color: #201200; }
 
-.wallcard .esttime {
-  color: var(--dim);
+/* under the tiles: stationary estimate + crew notes while a stop is live */
+.wallcard .extra {
+  color: var(--amber);
   font-size: 14px;
   font-weight: 700;
-  letter-spacing: 1px;
+  letter-spacing: 0.5px;
   font-family: var(--font-num);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.wallcard .notes { color: var(--amber); font-size: 15px; font-weight: 600; min-height: 20px; }
 
-/* idle summary — shown when no stop is planned */
-.idle { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 10px; }
-.idle .nextstop { display: flex; flex-direction: column; gap: 2px; }
-.idle .nextstop .lab { font-size: 12px; letter-spacing: 2px; color: var(--dim); }
-.idle .nextstop .val { font-size: 40px; font-weight: 900; font-family: var(--font-num); }
-.idle .nextstop .why { font-size: 13px; color: var(--amber); letter-spacing: 1px; }
-.idle .stats { color: var(--dim); font-size: 14px; font-family: var(--font-num); line-height: 1.6; }
-
-.wallcard .foot { display: flex; }
+.wallcard .foot { display: flex; gap: 8px; }
 .wallcard .foot .done {
   flex: 1;
   font-size: 15px;
@@ -515,3 +1840,404 @@ body.app-screen .topbar { flex: 0 0 auto; }
   color: var(--green);
   padding: 10px 6px;
 }
+.wallcard .foot .inpit {
+  flex: 1;
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  border-color: var(--accent);
+  color: var(--accent);
+  padding: 10px 6px;
+}
+
+/* ---------- compact mode for small laptop screens ---------- */
+
+@media (max-height: 820px) {
+  html, body { font-size: 13.5px; }
+  .panel { padding: 10px 12px; }
+  .panel h3 { margin-bottom: 6px; }
+  .kv { padding: 2px 0; }
+  .kv .v { font-size: 15px; }
+  .kv .v.big { font-size: 21px; }
+  .topbar { padding: 6px 12px; gap: 12px; }
+  .topbar .clock { font-size: 21px; }
+  .station { gap: 8px; padding: 8px; }
+  .station .main { grid-template-columns: 1fr 340px; gap: 8px; }
+  .station .col, .gaugerow, .ctxrow, .inputrow { gap: 8px; }
+  .nowstrip { gap: 6px 16px; padding: 6px 12px; }
+  .nowstrip b { font-size: 16px; }
+  .lapbox button.lap { font-size: 24px; }
+  button.big { font-size: 17px; padding: 10px 14px; }
+  .planner .row { padding: 4px 0; }
+  .planner textarea { height: 32px; }
+  .planner .actions { margin-top: 8px; }
+  .limitbanner .val { font-size: 20px; }
+  .timeline-wrap svg { height: 120px; }
+  .meter { margin: 3px 0 6px; }
+}
+
+/* ---- live timing ---- */
+
+.ltchip { font-family: var(--font-num); white-space: nowrap; }
+.ltchip.lt-green { color: var(--green); border-color: var(--green); }
+.ltchip.lt-red, .ltchip.lt-finish { color: var(--red); border-color: var(--red); }
+.ltchip.lt-sc, .ltchip.lt-fcy, .ltchip.lt-code60 { color: var(--amber); border-color: var(--amber); }
+
+/* one-line feed summary on each wall card (sits just above the foot) */
+.ltline {
+  padding: 4px 2px 0;
+  font-size: 14px;
+  font-family: var(--font-num);
+  color: var(--dim);
+  border-top: 1px solid var(--line);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ltline b { color: var(--text); }
+.ltline small { color: var(--dim); }
+.ltline.pit { color: var(--amber); }
+.ltpit {
+  background: var(--amber);
+  color: #14100a;
+  font-weight: 700;
+  padding: 0 6px;
+  border-radius: 3px;
+}
+
+/* station panel accents */
+#lt-panel .ltnr { color: var(--dim); font-size: 12px; font-weight: 400; }
+#lt-panel .v.lt-green { color: var(--green); }
+#lt-panel .v.lt-red, #lt-panel .v.lt-finish { color: var(--red); }
+#lt-panel .v.lt-sc, #lt-panel .v.lt-fcy, #lt-panel .v.lt-code60 { color: var(--amber); }
+
+/* Manual lap logging hides while the feed drives the counter
+   (display:flex on .lapbox would otherwise beat the hidden attribute) */
+.lapbox[hidden] { display: none; }
+
+/* ---------- tracker tab — live track map ---------- */
+.trkview { flex: 1; min-height: 0; padding: 12px; display: flex; flex-direction: column; gap: 0; }
+.trkview.hidden { display: none; }
+.trkwrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px 10px 0 0;
+  overflow: hidden;
+}
+.trkmap { flex: 1; min-width: 0; position: relative; padding: 6px; }
+.trkmap svg { width: 100%; height: 100%; display: block; }
+.trkhint {
+  position: absolute;
+  top: 12px;
+  left: 16px;
+  color: var(--dim);
+  font-size: 14px;
+  pointer-events: none;
+}
+
+.trk-loop {
+  fill: none;
+  stroke: var(--well);
+  stroke-width: 30;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.trk-pit {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 9;
+  stroke-dasharray: 20 14;
+  stroke-linecap: round;
+}
+.trk-sf { stroke: var(--dim); stroke-width: 5; }
+.trk-loopdot { fill: var(--panel); stroke: var(--dim); stroke-width: 3; }
+/* invisible drag targets over the S/F line and sector boundary dots */
+.trk-handle {
+  fill: transparent;
+  stroke: transparent;
+  stroke-width: 2;
+  cursor: grab;
+}
+.trk-handle:hover { stroke: var(--accent); stroke-dasharray: 5 5; }
+.trk-handle:active { cursor: grabbing; }
+
+/* sector colouring — S1 red, S2 yellow-green, S3 cyan (official sector map);
+   a 4th colour covers feeds with an extra timing loop */
+:root { --trk-s1: #e8434b; --trk-s2: #b7c92e; --trk-s3: #2cc3cf; --trk-s4: #b06fe0; }
+body.light { --trk-s1: #c92730; --trk-s2: #7f8f0a; --trk-s3: #0e93a0; --trk-s4: #8b3fc9; }
+.trk-sector { fill: none; stroke-width: 10; }
+.trk-sector.s0 { stroke: var(--trk-s1); }
+.trk-sector.s1 { stroke: var(--trk-s2); }
+.trk-sector.s2 { stroke: var(--trk-s3); }
+.trk-sector.s3 { stroke: var(--trk-s4); }
+.trk-sbadge rect { stroke: none; }
+.trk-sbadge.s0 rect { fill: var(--trk-s1); }
+.trk-sbadge.s1 rect { fill: var(--trk-s2); }
+.trk-sbadge.s2 rect { fill: var(--trk-s3); }
+.trk-sbadge.s3 rect { fill: var(--trk-s4); }
+.trk-sbadge text {
+  fill: #0b0e14;
+  font-size: 22px;
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+.trk-car { cursor: pointer; }
+.trk-car .body { fill: var(--panel-2); stroke: var(--dim); stroke-width: 3; }
+.trk-car text {
+  fill: var(--text);
+  font-size: 22px;
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+}
+.trk-car.ours .body { fill: var(--accent); stroke: var(--bg); }
+.trk-car.ours text { fill: var(--bg); }
+.trk-car .ring { fill: none; stroke: transparent; stroke-width: 4; }
+.trk-car.selected .ring { stroke: var(--green); stroke-dasharray: 8 7; }
+.trk-car.inpit .ring { stroke: var(--red); animation: trk-pitpulse 1.2s ease-in-out infinite; }
+@keyframes trk-pitpulse { 0%, 100% { stroke-opacity: .9; } 50% { stroke-opacity: .25; } }
+
+/* running-order rail */
+.trkrail {
+  width: 300px;
+  flex: 0 0 auto;
+  border-left: 1px solid var(--line);
+  overflow-y: auto;
+  min-height: 0;
+}
+.trkrail .hd {
+  display: flex;
+  gap: 10px;
+  padding: 7px 12px;
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 12px;
+  letter-spacing: 1px;
+}
+.trkrail .hd .g { margin-left: auto; }
+.trkrail .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  font-size: 14px;
+}
+.trkrail .row:hover { background: var(--panel-2); }
+.trkrail .row.ours {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.trkrail .row.sel { outline: 1px dashed var(--green); outline-offset: -1px; }
+.trkrail .pos { width: 26px; text-align: right; font-weight: 700; }
+.trkrail .nr { width: 34px; font-weight: 700; color: var(--accent); }
+.trkrail .row.ours .nr {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+.trkrail .drv {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dim);
+}
+.trkrail .chip {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  color: var(--dim);
+}
+.trkrail .chip.pit { background: var(--flash-bg); color: var(--red); border-color: var(--red); }
+.trkrail .chip.s0 { color: var(--trk-s1); border-color: var(--trk-s1); }
+.trkrail .chip.s1 { color: var(--trk-s2); border-color: var(--trk-s2); }
+.trkrail .chip.s2 { color: var(--trk-s3); border-color: var(--trk-s3); }
+.trkrail .chip.s3 { color: var(--trk-s4); border-color: var(--trk-s4); }
+.trkrail .gap { width: 68px; text-align: right; }
+
+/* calibration footer */
+.trkfoot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-top: none;
+  border-radius: 0 0 10px 10px;
+  flex: 0 0 auto;
+}
+.trkfoot .lab { color: var(--dim); font-size: 12px; letter-spacing: 1px; font-weight: 700; }
+.trkfoot .dragnote { color: var(--dim); font-size: 12px; }
+.trkfoot .spacer { flex: 1; }
+.trkfoot input[type="range"] { width: 150px; accent-color: var(--accent); }
+.trkfoot button { font-size: 12px; padding: 4px 10px; }
+.trkfoot button.on { color: var(--accent); border-color: var(--accent); }
+
+/* ---------- drive-time regulations (station drivers panel) ---------- */
+
+.regline {
+  margin: -2px 0 4px 18px;
+  font-size: 12px;
+  font-family: var(--font-num);
+  color: var(--dim);
+  letter-spacing: .5px;
+}
+.regline.warn { color: var(--amber); }
+.regline.crit { color: var(--red); font-weight: 700; }
+.regline .ico { width: 12px; height: 12px; vertical-align: -2px; }
+
+/* ---------- tyre set manager ---------- */
+
+.preset-row.oncar { border-color: var(--accent); }
+.preset-row.oncar .meta:first-of-type { color: var(--accent); font-weight: 700; }
+.preset-row input[type="number"] { font-family: var(--font-num); }
+.preset-row button[disabled] { opacity: .35; cursor: not-allowed; }
+
+/* ---------- learned-from-live-data table ---------- */
+
+.learned-table td, .learned-table th { font-size: 14px; }
+.learned-table td.good { color: var(--green); }
+.learned-table td.warn { color: var(--amber); }
+.learned-table td small { color: var(--dim); }
+
+/* ---------- plan vs actual ---------- */
+
+.plan-table tr.done td { opacity: .72; }
+.plan-table tr.cur td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.plan-table td.good { color: var(--green); }
+.plan-table td.warn { color: var(--amber); }
+.plan-table td.crit { color: var(--red); font-weight: 700; }
+.plan-table td .warn { color: var(--amber); font-weight: 700; }
+.plan-table td .ico { width: 14px; height: 14px; vertical-align: -2px; }
+
+.drift {
+  margin: 10px 0 2px;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: .5px;
+}
+.drift.good { color: var(--green); }
+.drift.warn { color: var(--amber); }
+.drift.crit { color: var(--red); }
+.drift .ico { width: 15px; height: 15px; vertical-align: -2px; }
+
+/* ---------- race control messages (pit wall + stations) ---------- */
+
+/* "the feed is on another session" question — sits under the top bar until
+   the pit wall answers it, because nothing from the feed counts until then */
+.sessionstrip {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 8px 14px 0;
+  padding: 8px 12px;
+  background: var(--fcy-bg);
+  border: 2px solid var(--amber);
+  border-radius: 10px;
+}
+.sessionstrip.hidden { display: none; }
+.sessionstrip .ss-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--amber);
+  font-size: 12px;
+  letter-spacing: 2px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.sessionstrip .ss-title .ico { width: 14px; height: 14px; }
+.sessionstrip .ss-body { flex: 1; min-width: 0; }
+.sessionstrip .ss-line {
+  font-size: 15px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sessionstrip .ss-sub { font-size: 12px; color: var(--dim); }
+.sessionstrip button { white-space: nowrap; }
+
+.rcstrip {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 8px 14px 0;
+  padding: 6px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.rcstrip.hidden { display: none; }
+.rcstrip .rc-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dim);
+  font-size: 12px;
+  letter-spacing: 2px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.rcstrip .rc-title .ico { width: 13px; height: 13px; }
+.rcstrip .rc-lines {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.rcstrip button { white-space: nowrap; }
+.rcline {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--dim);
+}
+.rcline .t { flex: none; font-family: var(--font-num); font-size: 11px; color: var(--dim); }
+.rcline .txt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rcline.newest { font-size: 15px; color: var(--text); font-weight: 700; }
+.rcline.red .txt { color: var(--red); }
+.rcline.fcy .txt { color: var(--amber); }
+.rcline.green .txt { color: var(--green); }
+.rcline.pen .txt { color: var(--accent); }
+/* a fresh message pulses the strip border so it registers from a distance */
+.rcstrip.flash { animation: rcflash 1.1s ease-in-out 3; }
+@keyframes rcflash {
+  50% { border-color: var(--amber); background: var(--fcy-bg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rcstrip.flash { animation: none; }
+}
+
+.rc-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+.rc-table th, .rc-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+}
+.rc-table th { font-size: 11px; letter-spacing: 2px; color: var(--dim); }
+.rc-table td.t { font-family: var(--font-num); white-space: nowrap; color: var(--dim); }
+.rc-table tr.red td:last-child { color: var(--red); font-weight: 700; }
+.rc-table tr.fcy td:last-child { color: var(--amber); }
+.rc-table tr.green td:last-child { color: var(--green); }
+.rc-table tr.pen td:last-child { color: var(--accent); }

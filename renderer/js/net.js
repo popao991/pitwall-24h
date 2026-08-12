@@ -1,7 +1,7 @@
 // Tiny WebSocket client with auto-reconnect. The server broadcasts the full
 // state after every change; messages sent while offline are queued.
 
-export function connect({ url, onState, onStatus }) {
+export function connect({ url, onState, onStatus, onTiming, onMessage }) {
   let ws = null;
   let alive = false;
   let queue = [];
@@ -26,6 +26,8 @@ export function connect({ url, onState, onStatus }) {
       let m;
       try { m = JSON.parse(ev.data); } catch { return; }
       if (m.type === 'state') onState(m.state);
+      else if (m.type === 'timing') onTiming?.(m.timing);
+      else onMessage?.(m);
     };
   }
   open();

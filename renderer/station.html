@@ -6,148 +6,234 @@
   <link rel="stylesheet" href="css/app.css" />
 </head>
 <body class="app-screen">
-  <div class="topbar">
+  <div class="topbar" id="topbar">
     <div class="title" id="car-title">CAR <span>—</span></div>
-    <div class="clock num"><small>ELAPSED</small><span id="clock-elapsed">00:00:00</span></div>
-    <div class="clock num"><small>REMAINING</small><span id="clock-remaining">24:00:00</span></div>
+    <div class="condblock" id="cond-block"></div>
+    <div class="viewtabs" id="view-tabs">
+      <button data-view="strategy" class="on">STRATEGY</button>
+      <button data-view="scoreboard">SCOREBOARD</button>
+      <button data-view="tracker"><i data-icon="track"></i> TRACKER</button>
+    </div>
+    <div class="clock num"><small>TO GO</small><span id="clock-remaining">24:00:00</span></div>
     <div class="spacer"></div>
     <span class="conn" id="conn">connecting…</span>
-    <button id="btn-settings" title="Car &amp; driver settings">⚙ SETTINGS</button>
-    <button id="btn-back" title="Back to role selection">⏏</button>
+    <button id="btn-plan" title="Stint plan generated from the driver table"><i data-icon="clipboard"></i> PLAN</button>
+    <button id="btn-settings" title="Car &amp; driver settings"><i data-icon="gear"></i> SETTINGS</button>
+    <button id="btn-back" title="Back to role selection"><i data-icon="back"></i></button>
+  </div>
+
+  <div class="rcstrip hidden" id="rc-strip">
+    <span class="rc-title"><i data-icon="flag"></i> RACE CONTROL</span>
+    <div class="rc-lines" id="rc-lines"></div>
+    <button id="btn-rc-history" title="Full race control message history with timestamps">HISTORY</button>
   </div>
 
   <div class="station">
-    <!-- LEFT: live inputs -->
-    <div class="col">
-      <div class="panel">
-        <h3>Lap logging</h3>
-        <div class="lapbox">
-          <button class="lap" id="btn-lap">+ LAP</button>
-          <div class="side">
-            <input id="lap-time" placeholder="lap time s" title="Optional lap time in seconds, e.g. 104.7" />
-            <button id="btn-undo" title="Remove last lap">UNDO LAP</button>
+    <div class="fcybanner hidden" id="fcy-banner"></div>
+    <div class="fuelwarnbanner hidden" id="fuel-warn"></div>
+    <div class="setdecision hidden" id="pit-visit"></div>
+    <div class="setdecision hidden" id="set-decision"></div>
+
+    <!-- NOW: the one-glance row -->
+    <div class="nowstrip">
+      <span class="itm" id="now-pos-wrap" hidden>
+        <span class="lab">Pos</span><b class="num" id="now-pos">—</b>
+        <span class="sub num" id="now-gap"></span>
+      </span>
+      <span class="itm"><span class="lab">Driver</span><b id="now-driver">—</b>
+        <span class="sub drvfeed" id="now-driver-feed" hidden></span></span>
+      <span class="itm"><span class="lab">Stint</span><b class="num" id="stint-time">0:00</b>
+        <span class="sub num">/ <span id="stint-max">—</span></span></span>
+      <span class="itm"><span class="lab">Last</span><b class="num" id="last-lap">--:--.-</b></span>
+      <span class="itm" title="Time until the tank hits the safety level"><span class="lab">Fuel</span><b class="num" id="now-fuel">—</b></span>
+      <span class="itm" title="Laps left in the tyre set"><span class="lab">Tyres</span><b class="num" id="now-tyres">—</b></span>
+      <span class="alertchip" id="now-alert">RACE NOT STARTED</span>
+    </div>
+
+    <div class="main">
+      <!-- LEFT: race picture, resources, context -->
+      <div class="col">
+        <div class="panel timeline-wrap">
+          <h3>Race timeline — stints &amp; pit stops</h3>
+          <svg id="timeline"></svg>
+        </div>
+
+        <div class="gaugerow">
+          <div class="panel">
+            <h3>Fuel</h3>
+            <div class="kv"><span class="k">On board</span><span class="v big" id="fuel-now">0.0 L</span></div>
+            <div class="meter" id="fuel-meter"><i></i></div>
+            <div class="kv"><span class="k">Laps · time to safety</span><span class="v"><span id="fuel-laps">0</span> · <span id="fuel-time">0:00</span></span></div>
+            <div class="kv"><span class="k">Usable (above safety)</span><span class="v" id="fuel-usable">0.0 L</span></div>
+            <div class="kv"><span class="k">Burn / lap · / min</span><span class="v" id="fuel-burn">0.0 L</span></div>
+            <div id="fuel-model-live" class="modelinfo"></div>
+            <div class="kv"><span class="k">To finish (+margin)</span><span class="v" id="fuel-to-end">0 L</span></div>
+            <div class="kv"><span class="k">Fuel stops still needed</span><span class="v" id="fuel-stops">—</span></div>
+            <div class="kv" title="Open = refuelling now costs no extra time (same total stops); closed = pitting now wastes one extra pit-lane loss"><span class="k">Pit window</span><span class="v" id="fuel-window">—</span></div>
+            <div class="kv">
+              <span class="k">Correct reading</span>
+              <span><input id="fuel-correct" type="number" step="0.5" style="width:70px" title="Set actual fuel on board (L)" />
+              <button id="btn-fuel-correct" style="padding:4px 8px">SET</button></span>
+            </div>
+          </div>
+          <div class="panel">
+            <h3>Tyres</h3>
+            <div class="kv"><span class="k">Laps on set</span><span class="v big" id="tyre-laps">0</span></div>
+            <div class="meter" id="tyre-meter"><i></i></div>
+            <div class="kv"><span class="k">Set on car</span><span class="v" id="tyre-current">—</span></div>
+            <div class="kv"><span class="k">Laps left in set</span><span class="v" id="tyre-left">0</span></div>
+            <div class="kv" title="Mileage banked on this set — green kilometres and the part driven under a neutralisation"><span class="k">Mileage · green · yellow</span><span class="v" id="tyre-km">—</span></div>
+            <div class="kv"><span class="k">Sets used · fresh</span><span class="v" id="tyre-sets">1</span></div>
+          </div>
+          <div class="panel">
+            <h3>Brakes</h3>
+            <div id="brakes"></div>
           </div>
         </div>
-        <div class="kv"><span class="k">Laps this stint</span><span class="v big" id="laps-stint">0</span></div>
-        <div class="kv"><span class="k">Total laps</span><span class="v" id="laps-total">0</span></div>
-        <div class="kv"><span class="k">Last lap</span><span class="v" id="last-lap">--:--.-</span></div>
-      </div>
 
-      <div class="panel">
-        <h3>Track condition</h3>
-        <div class="condrow" id="cond-row"></div>
-        <button class="fcybtn" id="btn-fcy" style="width:100%;margin-top:8px">🟡 START FCY (RACE-WIDE)</button>
-      </div>
+        <div class="ctxrow">
+          <div class="panel">
+            <h3>Around us</h3>
+            <table class="around-table"><tbody id="around-body"></tbody></table>
+            <p class="hint" id="around-empty">Live timing is off — connect the feed on the pit wall.</p>
+          </div>
+          <div class="panel">
+            <h3>Drivers &amp; seat time</h3>
+            <div id="drivers"></div>
+          </div>
+        </div>
 
-      <div class="panel">
-        <h3>Fuel</h3>
-        <div class="kv"><span class="k">Fuel on board</span><span class="v big" id="fuel-now">0.0 L</span></div>
-        <div class="meter" id="fuel-meter"><i></i></div>
-        <div class="kv"><span class="k">Usable (above safety)</span><span class="v" id="fuel-usable">0.0 L</span></div>
-        <div class="kv"><span class="k">Burn / lap · / min</span><span class="v" id="fuel-burn">0.0 L</span></div>
-        <div class="kv"><span class="k">Laps to safety level</span><span class="v" id="fuel-laps">0</span></div>
-        <div class="kv"><span class="k">Time to safety level</span><span class="v" id="fuel-time">0:00</span></div>
-        <div class="kv"><span class="k">Fuel to finish (+margin)</span><span class="v" id="fuel-to-end">0 L</span></div>
-        <div class="kv">
-          <span class="k">Correct fuel reading</span>
-          <span><input id="fuel-correct" type="number" step="0.5" style="width:80px" title="Set actual fuel on board (L)" />
-          <button id="btn-fuel-correct" style="padding:4px 8px">SET</button></span>
+        <div class="inputrow">
+          <div class="panel">
+            <h3>Inputs <span class="ltnr" id="lt-nr"></span></h3>
+            <div class="kv"><span class="k">Timing feed</span><span class="v" id="lt-state">off</span></div>
+            <div class="kv">
+              <span class="k" title="Feed drives laps + pit state for this car (set up on the pit wall)">Auto lap from feed</span>
+              <span><button id="lt-autolap" class="flag">OFF</button></span>
+            </div>
+            <div class="kv"><span class="k">Lap counting</span><span class="v" id="lap-feed-mode">manual</span></div>
+            <div id="lap-panel">
+              <div class="lapbox" id="lapbox">
+                <button class="lap" id="btn-lap">+ LAP</button>
+                <div class="side">
+                  <input id="lap-time" placeholder="lap time s" title="Optional lap time in seconds, e.g. 104.7" />
+                  <button id="btn-undo" title="Remove last lap">UNDO LAP</button>
+                </div>
+              </div>
+              <p class="hint" id="lap-auto-note" hidden>
+                Timing feed is live but auto lap is off — laps only count when
+                logged here. Turn auto lap back on to let the feed count them.
+              </p>
+              <div class="kv"><span class="k">Laps this stint</span><span class="v big" id="laps-stint">0</span></div>
+              <div class="kv"><span class="k">Total laps</span><span class="v" id="laps-total">0</span></div>
+            </div>
+          </div>
+          <div class="panel">
+            <h3>Track condition</h3>
+            <div class="condrow" id="cond-row"></div>
+            <div class="condctl" id="cond-controls" style="margin-top:8px" title="Manual race condition — starts/stops it for every screen"></div>
+          </div>
         </div>
       </div>
 
-      <div class="panel">
-        <h3>Tyres</h3>
-        <div class="kv"><span class="k">Laps on set</span><span class="v big" id="tyre-laps">0</span></div>
-        <div class="meter" id="tyre-meter"><i></i></div>
-        <div class="kv"><span class="k">Laps left in set</span><span class="v" id="tyre-left">0</span></div>
-        <div class="kv"><span class="k">Sets used</span><span class="v" id="tyre-sets">1</span></div>
-      </div>
-    </div>
-
-    <!-- MIDDLE: strategy overview -->
-    <div class="col">
-      <div class="fcybanner hidden" id="fcy-banner"></div>
-      <div class="limitbanner" id="limit-banner">
-        <div>
-          <div class="lab">NEXT STOP — LIMITED BY <span id="limit-key">—</span></div>
-          <div class="val" id="limit-time">--:--</div>
-        </div>
-        <div style="text-align:right">
-          <div class="lab">PROJECTED STOPS LEFT</div>
-          <div class="val" id="stops-left">—</div>
-        </div>
-      </div>
-
-      <div class="panel timeline-wrap">
-        <h3>Race timeline — stints &amp; pit stops</h3>
-        <svg id="timeline" viewBox="0 0 1000 110" preserveAspectRatio="none"></svg>
-      </div>
-
-      <div class="panel">
-        <h3>Brakes — pads &amp; discs</h3>
-        <div id="brakes"></div>
-      </div>
-
-    </div>
-
-    <!-- RIGHT: drivers + stop planner -->
-    <div class="col">
-      <div class="panel">
-        <h3>Drivers</h3>
-        <div id="drivers"></div>
-        <div class="kv" style="margin-top:6px"><span class="k">Stint time</span><span class="v big" id="stint-time">0:00</span></div>
-        <div class="kv"><span class="k">Max stint</span><span class="v" id="stint-max">—</span></div>
-      </div>
-
-      <div class="panel planner">
+      <!-- RIGHT: the whole stop story + inputs -->
+      <div class="col">
+        <div class="panel planner">
         <h3>Next pit stop</h3>
-        <div class="row">
-          <span class="lab">FUEL (L)</span>
-          <span style="display:flex;gap:6px;align-items:center">
-            <span class="fuel-quick">
-              <button id="btn-fuel-fill" title="Fill tank">FILL</button>
-              <button id="btn-fuel-end" title="Fuel to reach the finish">TO END</button>
-            </span>
-            <input id="stop-fuel" type="number" step="1" min="0" style="width:80px" />
-          </span>
+
+        <!-- The three situations the app keeps a plan for. The live one is
+             marked and pre-selected; the other two are one tap away. -->
+        <div class="plantabs" id="plan-tabs">
+          <button data-plan="green"><b>GREEN</b><span data-when>—</span></button>
+          <button data-plan="fcy"><b>CODE 60</b><span data-when>—</span></button>
+          <button data-plan="sc"><b>SAFETY CAR</b><span data-when>—</span></button>
         </div>
-        <div class="row"><span class="lab">TYRES</span><button class="toggle" id="stop-tyres">NO</button></div>
-        <div class="row">
-          <span class="lab">DRIVER</span>
-          <select id="stop-driver" style="min-width:150px"><option value="">no change</option></select>
+
+        <!-- The call, in words, with the reason under it. -->
+        <div class="verdictband" id="plan-verdict">
+          <div class="vhead" id="plan-head">—</div>
+          <div class="vsub" id="plan-sub"></div>
         </div>
-        <div class="row"><span class="lab">PADS FRONT</span><button class="toggle" id="stop-padsFront">NO</button></div>
-        <div class="row"><span class="lab">PADS REAR</span><button class="toggle" id="stop-padsRear">NO</button></div>
-        <div class="row"><span class="lab">DISCS FRONT</span><button class="toggle" id="stop-discsFront">NO</button></div>
-        <div class="row"><span class="lab">DISCS REAR</span><button class="toggle" id="stop-discsRear">NO</button></div>
+        <div class="duestrip" id="plan-due">
+          <span class="k" id="plan-due-k">BOX IN</span>
+          <span class="t num" id="plan-due-t">--:--</span>
+          <span class="n" id="plan-due-n"></span>
+        </div>
+        <div class="askstrip hidden" id="plan-ask"></div>
+
+        <!-- The plan as one sentence, so it never has to be assembled in
+             your head from four rows. -->
+        <div class="plansentence" id="plan-sentence">—</div>
+
+        <!-- Every line either follows the app or is pinned by you. -->
+        <div class="planlines" id="plan-lines"></div>
+
         <div class="row" style="border-bottom:none; flex-direction:column; align-items:stretch">
           <span class="lab" style="margin-bottom:4px">NOTES FOR CREW</span>
           <textarea id="stop-notes" placeholder="e.g. check FL wheel nut, clean screen"></textarea>
         </div>
-        <div class="kv" style="margin-top:6px">
-          <span class="k">Est. stationary · total pit time</span>
+        <div class="kv">
+          <span class="k" title="Estimated time stationary · total time lost vs staying out">Est. stationary · total</span>
           <span class="v" id="stop-est">—</span>
         </div>
-        <div class="actions">
-          <button id="btn-clear">CLEAR</button>
-          <button class="send" id="btn-send">SEND TO PIT WALL</button>
+
+        <!-- One tap that tells the crew a human has read this plan. -->
+        <div class="approvebar" id="plan-approve"></div>
+
+        <div class="stepper" id="stop-stepper">
+          <span data-st="draft">PLANNED</span><span data-st="sent">SENT</span><span data-st="box">BOX</span><span data-st="inpit">IN PIT</span><span data-st="done">DONE</span>
         </div>
-        <div class="actions">
-          <button class="box big" id="btn-box">BOX BOX</button>
+        <div class="actions" id="stop-actions"></div>
+        <div class="status-line" id="stop-status">— PLANNED —</div>
         </div>
-        <div class="status-line" id="stop-status">— DRAFT —</div>
+
       </div>
     </div>
   </div>
 
+  <div class="sbview hidden" id="sbview">
+    <div class="panel sbwrap">
+      <h3>Scoreboard <span class="ltnr" id="sb-session"></span></h3>
+      <div class="sb-scroll">
+        <table class="sb-table">
+          <thead><tr>
+            <th class="num">P</th><th class="num">#</th><th class="num">E.T.A.</th>
+            <th>Team</th><th>Car</th><th>Driver</th>
+            <th>Class</th><th class="num">PIC</th>
+            <th class="num grp">Gap</th><th class="num">Int</th>
+            <th class="num grp">Last</th><th class="num">Best</th>
+            <th class="num" title="Lap the best time was set on">In lap</th>
+            <th class="num" title="Second-best lap time">2nd</th>
+            <th class="num grp">S1</th><th class="num">S2</th><th class="num">S3</th>
+            <th class="num" title="Section marker — how far around the lap">S</th>
+            <th class="num grp">Laps</th><th class="num">Pit</th><th class="num">Last pit</th><th class="num">Stint</th>
+          </tr></thead>
+          <tbody id="sb-body"></tbody>
+        </table>
+        <p class="hint" id="sb-empty">Live timing is off — connect the feed on the pit wall.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="trkview hidden" id="trkview"></div>
+
   <div class="overlay hidden" id="settings-overlay">
     <div class="modal">
       <div class="modal-head">
-        <h2>⚙ CAR SETTINGS</h2>
-        <button id="btn-settings-close">✕ CLOSE</button>
+        <h2><i data-icon="gear"></i> CAR SETTINGS</h2>
+        <button id="btn-settings-close"><i data-icon="x"></i> CLOSE</button>
+      </div>
+      <div class="tabbar" id="settings-tabs">
+        <button data-tab="car" class="on">CAR</button>
+        <button data-tab="fuel">FUEL</button>
+        <button data-tab="wear">WEAR &amp; PIT</button>
+        <button data-tab="drivers">DRIVERS</button>
+        <button data-tab="presets">PRESETS</button>
+        <button data-tab="connection">CONNECTION</button>
+        <button data-tab="display">DISPLAY</button>
       </div>
       <div class="modal-body">
-        <section>
+        <section data-pane="car">
           <h3>Car information</h3>
           <div class="form-grid">
             <label>Car name <input data-path="name" type="text" /></label>
@@ -156,83 +242,322 @@
             <label>Model <input data-path="model" type="text" placeholder="e.g. 992 GT3 Cup" /></label>
           </div>
         </section>
-        <section>
+        <section data-pane="fuel">
+          <h3>Fuel consumption model</h3>
+          <div class="form-grid">
+            <label>Model
+              <select data-path="config.fuelModel" style="width:230px">
+                <option value="driver-avg">Per driver — average (table)</option>
+                <option value="driver-laptime">Per driver — per lap time (live timing)</option>
+              </select>
+            </label>
+          </div>
+          <p class="hint help">
+            Per-driver average uses each driver's dry/wet L/lap from the DRIVERS tab
+            (0 = car default below). Per lap time reads each driver's lap time → L/lap
+            table on the DRIVERS tab and interpolates between the measured points, using
+            the rolling average of the last laps from live timing. Outside the measured
+            range the nearest value is held flat rather than extrapolated. A driver with
+            no points falls back to their average, then to the car default. What the
+            model is doing right now is shown live in the fuel panel on the main screen.
+          </p>
+        </section>
+        <section data-pane="fuel">
+          <h3>Learned from live data</h3>
+          <div id="learned-out"></div>
+          <p class="hint help">
+            While the race runs, every representative green lap teaches the model each
+            driver's real pace, and every trusted fuel figure (a SET correction or a
+            refuel to a planned level) closes the laps since the previous one into a
+            real consumption sample. ADOPT writes the learned figure into the driver
+            table (or adds a curve point when the per-lap-time model is active) — the
+            projections use it immediately.
+          </p>
+        </section>
+        <section data-pane="fuel">
           <h3>Fuel &amp; lap model (car defaults)</h3>
           <div class="form-grid">
             <label>Tank (L) <input data-path="config.tankLiters" type="number" step="any" /></label>
             <label>Burn dry (L/lap) <input data-path="config.burnPerLap.dry" type="number" step="any" /></label>
             <label>Burn wet (L/lap) <input data-path="config.burnPerLap.wet" type="number" step="any" /></label>
-            <label>Burn SC/FCY (L/lap) <input data-path="config.burnPerLap.sc" type="number" step="any" /></label>
+            <label>Burn Safety Car (L/lap) <input data-path="config.burnPerLap.sc" type="number" step="any" /></label>
+            <label>Burn FCY / Code 60 (L/lap) <input data-path="config.burnPerLap.fcy" type="number" step="any" /></label>
             <label>Avg lap dry (s) <input data-path="config.avgLapSec.dry" type="number" step="any" /></label>
             <label>Avg lap wet (s) <input data-path="config.avgLapSec.wet" type="number" step="any" /></label>
-            <label>Avg lap SC/FCY (s) <input data-path="config.avgLapSec.sc" type="number" step="any" /></label>
-            <label>Pit lane loss (s) <input data-path="config.pitLossSec" type="number" step="any" /></label>
+            <label>Avg lap Safety Car (s) <input data-path="config.avgLapSec.sc" type="number" step="any" /></label>
+            <label>Avg lap FCY / Code 60 (s) <input data-path="config.avgLapSec.fcy" type="number" step="any" /></label>
             <label>Finish margin (L) <input data-path="config.finishFuelL" type="number" step="any" /></label>
             <label>Fuel safety level (L) <input data-path="config.safetyFuelL" type="number" step="any" /></label>
+            <label>Low-fuel warning (laps) <input data-path="config.fuelWarnLaps" type="number" step="1" min="0" title="Show the LOW FUEL banner once this few laps remain above the safety level (0 = off)" /></label>
           </div>
-          <p class="hint">
+          <p class="hint help">
+            Safety Car and FCY / Code 60 have separate rates: behind the Safety Car the field
+            still circulates at a fair pace, while FCY / Code 60 holds a fixed delta speed, so
+            the lap is slower but leaner. When the timing feed reports either one, every car
+            switches to the matching rate automatically.
             While the race clock runs, the tank drains continuously at the active burn rate
-            (per-driver, or FCY when active) — laps only count tyre wear. Use SET in the fuel
-            panel to correct to a real reading. Finish margin = fuel still wanted at the flag;
-            safety level = fuel the tank must never drop below — all window and refuel
-            calculations run on the fuel above safety.
+            (per-driver, or the neutralisation rate when one is in force) — laps only count
+            tyre wear. The drain pauses
+            while the car is marked IN PIT LANE, and a completed stop resets the tank to the
+            stop's fuel level. Use SET in the fuel panel to correct to a real reading.
+            Finish margin = fuel still wanted at the flag; safety level = fuel the tank must
+            never drop below — all window and refuel calculations run on the fuel above safety.
           </p>
         </section>
-        <section>
+        <section data-pane="wear">
           <h3>Degradation &amp; limits</h3>
           <div class="form-grid">
-            <label>Tyre life (laps) <input data-path="config.tyreLifeLaps" type="number" step="1" /></label>
+            <label>Tyre life (km) <input data-path="config.tyreLifeKm" type="number" step="10" title="Distance a set is good for — laps follow from the track length" /></label>
             <label>Tyre sets available <input data-path="config.tyreSets" type="number" step="1" /></label>
             <label>Pads front life (h) <input data-path="config.brakeLifeH.padsFront" type="number" step="any" /></label>
             <label>Pads rear life (h) <input data-path="config.brakeLifeH.padsRear" type="number" step="any" /></label>
             <label>Discs front life (h) <input data-path="config.brakeLifeH.discsFront" type="number" step="any" /></label>
             <label>Discs rear life (h) <input data-path="config.brakeLifeH.discsRear" type="number" step="any" /></label>
-            <label>Max stint (min) <input data-path="config.maxStintMin" type="number" step="1" /></label>
           </div>
+          <p class="hint help">
+            Tyre life is a distance: <span id="tyrelife-laps">—</span>. Change the track length
+            (event settings) and the lap figure follows.
+            The maximum stint length is an event setting — see the event settings below.
+          </p>
         </section>
-        <section>
+        <section data-pane="wear">
+          <h3>Tyre sets</h3>
+          <div id="tyreset-list"></div>
+          <div class="modal-actions">
+            <button class="primary" id="btn-tyreset-add"><i data-icon="plus"></i> ADD SET</button>
+          </div>
+          <p class="hint help">
+            Every set the car has for the race, by name. The set on the car accrues the
+            laps counter above and banks its mileage lap by lap (track length per lap,
+            with the part driven under a neutralisation counted separately). A stop with
+            TYRES moves the wear into the outgoing set and fits the chosen one (FIT SET in
+            the stop planner — default: the next new set); the set that comes off then asks
+            to be kept or scrapped. Refitting a used set starts it pre-worn with its
+            recorded laps. SCRAP takes a set out of the pool for good — it disappears from
+            FIT SET and the app will never choose it — until RESTORE brings it back.
+            "Tyre sets available" above and this list stay in sync.
+          </p>
+        </section>
+        <section data-pane="wear">
+          <h3>Brake sets</h3>
+          <div class="form-grid">
+            <label>Pads front sets <input data-path="config.brakeSets.padsFront" type="number" min="1" step="1" /></label>
+            <label>Pads rear sets <input data-path="config.brakeSets.padsRear" type="number" min="1" step="1" /></label>
+            <label>Discs front sets <input data-path="config.brakeSets.discsFront" type="number" min="1" step="1" /></label>
+            <label>Discs rear sets <input data-path="config.brakeSets.discsRear" type="number" min="1" step="1" /></label>
+          </div>
+          <div id="brakeset-list"></div>
+          <p class="hint help">
+            The rack, by part number. Front discs are one numbered pair and rear discs
+            another, and so are the front and rear pads — each is one line here and one
+            line on the stop card. Type the number that is written on the part; the
+            hours counter above belongs to whichever set is on the car. A stop that
+            changes a component banks its hours into the outgoing set and fits the
+            chosen one (SELECT PARTS… in the stop planner — default: the next unused
+            set). Refitting a used set starts it pre-worn with its recorded hours.
+            SCRAP takes a set out of the rack for good — the app will never choose it —
+            until RESTORE brings it back. The counts above and this list stay in sync.
+          </p>
+        </section>
+        <section data-pane="wear">
           <h3>Pit stop timing</h3>
           <div class="form-grid">
-            <label>Refuel speed (L/s) <input data-path="config.refuelLps" type="number" step="any" /></label>
             <label>Tyre change (s) <input data-path="config.tyreChangeSec" type="number" step="any" /></label>
           </div>
-          <p class="hint">
-            Estimated stationary time = fuel ÷ refuel speed + tyre change, assumed sequential
-            (no other work while fuel flows). Shown live in the stop planner and on the pit wall.
+          <p class="hint help">
+            Estimated stationary time = fuel ÷ refuel pump speed + tyre change, assumed
+            sequential (no other work while fuel flows). Shown live in the stop planner
+            and on the pit wall.
           </p>
         </section>
-        <section>
-          <h3>FCY / Code-60 time gain calculator</h3>
+        <section data-pane="wear">
+          <h3>Event settings (set on the pit wall)</h3>
+          <div id="event-info"></div>
+          <p class="hint help">
+            Track length, FCY speed, pit lane loss, refuel pump speed and max stint are
+            the same for every car — the pit wall's RACE SETTINGS → RACE tab is the only
+            place to change them. The FCY pit-gain figures live on the main screen next
+            to the timeline.
+          </p>
+        </section>
+        <section data-pane="drivers">
+          <h3>Race start</h3>
           <div class="form-grid">
-            <label>Track length (km) <input data-path="config.trackKm" type="number" step="any" /></label>
-            <label>FCY speed (km/h) <input data-path="config.fcySpeedKmh" type="number" step="any" /></label>
+            <label>Starting fuel (L) <input id="start-fuel" type="number" step="any" min="0" placeholder="full tank" /></label>
+            <label>Starting driver <select id="start-driver"></select></label>
           </div>
-          <div id="fcy-out" style="margin-top:10px"></div>
-          <p class="hint">
-            Every FCY lap, the field loses (FCY lap − green lap) versus green running — that is
-            what a pit stop taken under FCY gains you compared to pitting under green.
+          <div id="start-driver-note" class="hint"></div>
+          <p class="hint help">
+            Fuel on board when the race starts — leave empty (or 0) to start on a full tank.
+            Before the start the gauge follows this figure; a RESET RACE puts the car back on it.
+            The starting driver is the one credited with the first stint's seat time.
           </p>
         </section>
-        <section>
+        <section data-pane="drivers">
           <h3>Drivers</h3>
           <table class="drv-table">
             <thead>
               <tr>
                 <th>Driver</th>
+                <th>Abbr</th>
+                <th>Timing name</th>
                 <th>Double stints</th>
                 <th>Night</th>
                 <th>Rain</th>
                 <th>Fuel dry (L/lap)</th>
                 <th>Fuel wet (L/lap)</th>
+                <th></th>
               </tr>
             </thead>
             <tbody id="drv-table-body"></tbody>
           </table>
-          <p class="hint">
+          <div class="modal-actions" style="margin-top:10px">
+            <button class="primary" id="btn-drv-add"><i data-icon="plus"></i> ADD DRIVER</button>
+          </div>
+          <p class="hint help">
             Fuel 0 = use the car default burn rate. While a driver is in the car, their own
             dry/wet consumption drives the fuel projections and the pit-window maths.
+            <b>Abbr</b> is the short driver code shown in compact readouts (empty = derived
+            from the name). <b>Timing name</b> is the driver's name exactly as the live
+            timing feed prints it — it lets every screen recognise who is in the car from
+            the feed (a surname is enough; empty = match on the driver's name).
           </p>
         </section>
+        <section data-pane="drivers">
+          <h3>Fuel vs lap time</h3>
+          <div id="fuel-curve-editors"></div>
+          <p class="hint help">
+            One table per driver: a lap time and the fuel burned on a lap at that pace.
+            Consumption between two rows is interpolated linearly, so two or three honest
+            points (a push lap, a cruise lap, a fuel-save lap) are enough. These tables are
+            only used when the FUEL tab's model is set to <b>per lap time</b>.
+          </p>
+        </section>
+        <section data-pane="presets">
+          <h3>Setup presets</h3>
+          <div class="preset-save">
+            <input id="preset-name" type="text" placeholder="preset name, e.g. Spa dry" />
+            <button class="primary" id="btn-preset-save"><i data-icon="save"></i> SAVE CURRENT SETUP</button>
+          </div>
+          <div id="preset-list"></div>
+          <p class="hint help">
+            A preset stores this car's full setup — car info, fuel &amp; lap model, wear,
+            pit timing and the driver table. Presets are kept on the pit wall PC, so every
+            station sees the same list and can load one instantly.
+          </p>
+        </section>
+        <section data-pane="connection">
+          <h3>Pit wall connection</h3>
+          <div class="kv" style="max-width:440px"><span class="k">Status</span><span class="v" id="conn-status">—</span></div>
+          <div class="form-grid" style="margin-top:10px">
+            <label>Pit wall IP <input id="conn-ip" type="text" style="width:160px" placeholder="e.g. 192.168.1.50" /></label>
+            <label>Port <input id="conn-port" type="number" style="width:90px" /></label>
+            <label>Car
+              <select id="conn-car" style="width:110px">
+                <option value="1">Car 1</option>
+                <option value="2">Car 2</option>
+                <option value="3">Car 3</option>
+                <option value="4">Car 4</option>
+              </select>
+            </label>
+          </div>
+          <div class="modal-actions">
+            <button class="primary" id="btn-conn-apply"><i data-icon="refresh"></i> APPLY &amp; RECONNECT</button>
+          </div>
+          <p class="hint help">
+            This station connects to the pit wall PC whose address is shown above — it is
+            set on the start screen and remembered on this PC; it never switches to another
+            server by itself. The pit wall screen shows the address stations must use
+            (use 127.0.0.1 to run a station on the pit wall PC itself, e.g. for testing).
+            The port is 8484 unless the pit wall says otherwise. APPLY stores the new
+            address and reconnects this station immediately.
+          </p>
+        </section>
+        <section data-pane="display">
+          <h3>Theme</h3>
+          <div class="condrow" id="theme-row" style="max-width:440px">
+            <button data-theme="auto"><i data-icon="timer"></i> AUTO</button>
+            <button data-theme="light"><i data-icon="sun"></i> LIGHT</button>
+            <button data-theme="dark"><i data-icon="moon"></i> DARK</button>
+          </div>
+          <p class="hint" id="theme-hint"></p>
+          <h3>Track location — for the auto switch</h3>
+          <div class="form-grid">
+            <label>Latitude <input id="theme-lat" type="number" step="any" /></label>
+            <label>Longitude <input id="theme-lon" type="number" step="any" /></label>
+          </div>
+          <p class="hint help">
+            AUTO switches to dark 30 min before sunset and back to light 1 h after sunrise,
+            computed from the sun times at this location (default: Circuit Zolder).
+            The theme choice is saved on this PC only — each screen picks its own.
+          </p>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay hidden" id="plan-overlay">
+    <div class="modal wide">
+      <div class="modal-head">
+        <h2><i data-icon="clipboard"></i> STINT PLAN</h2>
+        <button id="btn-plan-close"><i data-icon="x"></i> CLOSE</button>
+      </div>
+      <div class="modal-body">
+        <h3 style="margin-top:12px">Plan timeline</h3>
+        <div class="form-grid">
+          <label>Race length (hours) <input id="plan-duration" type="number" min="0.1" step="any" style="width:90px" /></label>
+          <label>Race start <input id="plan-start" type="datetime-local" style="width:190px" /></label>
+          <label><button id="btn-plan-use-race" title="Refill both fields from the current session settings">USE SESSION SETTINGS</button></label>
+        </div>
+        <p class="hint help">
+          The plan is built for THIS timeline, not necessarily the running session — so a
+          full 24 h race plan can be prepared while a 30-minute practice session is on.
+          Both fields prefill from the current session; change them to plan a different
+          race. The start time drives which stints count as night.
+        </p>
+        <div class="modal-actions">
+          <button class="primary" id="btn-plan-generate"><i data-icon="gear"></i> GENERATE FROM DRIVER SETTINGS</button>
+          <button id="btn-plan-replan" title="Keep the driven stints as they happened and regenerate the rest of the race from the live state"><i data-icon="refresh"></i> REPLAN REST FROM NOW</button>
+        </div>
+        <p class="hint help">
+          Built from the DRIVERS table: stint length = min(max stint, full tank at the
+          driver's dry burn); <i data-icon="moon"></i> night stints (21:00–06:00) only go to night-capable
+          drivers; <i data-icon="ff"></i> double-stint drivers run two stints back-to-back; seat time is
+          balanced across the crew. Regenerate after changing driver settings, or
+          REPLAN to rebuild only the remainder around what has actually been driven
+          (REPLAN always follows the live session clock, not the timeline above).
+        </p>
+        <div id="plan-out"></div>
+        <h3 style="margin-top:18px">Saved plans</h3>
+        <div class="preset-save">
+          <input id="plan-name" type="text" placeholder="plan name, e.g. 24H race plan A" />
+          <button class="primary" id="btn-plan-save"><i data-icon="save"></i> SAVE CURRENT PLAN</button>
+        </div>
+        <div id="plan-saved-list"><p class="hint">No plans saved yet.</p></div>
+        <p class="hint help">
+          Saved plans live on the pit wall PC with the race state, so every station sees
+          the same list and they survive restarts. LOAD makes a saved plan the active
+          shared plan for this car — generate a plan for the real race, save it, run the
+          short session, and load it back when the race starts.
+        </p>
+        <h3 style="margin-top:18px">Stint sheet — as driven</h3>
+        <div id="sheet-out"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay hidden" id="rc-overlay">
+    <div class="modal">
+      <div class="modal-head">
+        <h2><i data-icon="flag"></i> RACE CONTROL — MESSAGES</h2>
+        <button id="btn-rc-close"><i data-icon="x"></i> CLOSE</button>
+      </div>
+      <div class="modal-body">
+        <p class="hint" id="rc-count"></p>
+        <table class="rc-table">
+          <thead><tr><th style="width:140px">TIME</th><th>MESSAGE</th></tr></thead>
+          <tbody id="rc-history"></tbody>
+        </table>
       </div>
     </div>
   </div>

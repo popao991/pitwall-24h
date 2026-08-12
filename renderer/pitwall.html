@@ -6,47 +6,321 @@
   <link rel="stylesheet" href="css/app.css" />
 </head>
 <body class="app-screen">
-  <div class="topbar">
-    <div class="title">PIT<span>WALL</span></div>
-    <div class="clock num"><small>ELAPSED</small><span id="clock-elapsed">00:00:00</span></div>
-    <div class="clock num"><small>REMAINING</small><span id="clock-remaining">24:00:00</span></div>
-    <button class="primary" id="btn-start">START RACE</button>
-    <button class="fcybtn" id="btn-fcy">🟡 START FCY</button>
-    <div class="spacer"></div>
-    <span class="conn" id="server-ips">starting server…</span>
-    <span class="conn" id="conn">connecting…</span>
-    <button id="btn-settings" title="Race settings">⚙ SETTINGS</button>
-    <button class="danger" id="btn-reset" title="Reset race (keeps car setups)">RESET</button>
-    <button id="btn-back" title="Back to role selection">⏏</button>
+  <div class="topbar pwbar" id="topbar">
+    <div class="tb-left">
+      <button id="btn-back" title="Back to role selection"><i data-icon="back"></i></button>
+      <span class="brand"><span class="mono">PW</span><span class="montitle" id="bar-title">24H</span></span>
+      <span class="tb-vr"></span>
+      <div class="viewtabs" id="view-tabs">
+        <button data-view="wall" class="on">WALL</button>
+        <button data-view="tracker"><i data-icon="track"></i> TRACKER</button>
+      </div>
+    </div>
+    <div class="tb-center">
+      <div class="clockstack">
+        <div class="clock num"><small id="clock-label">TO GO</small><span id="clock-remaining">24:00:00</span></div>
+        <div class="clocksub num" id="clock-sub">WAITING FOR START</div>
+      </div>
+      <button class="primary" id="btn-start">START RACE</button>
+    </div>
+    <div class="tb-right">
+      <div class="tb-pop">
+        <button class="healthpill" id="health-pill" title="Server, stations and timing feed — click for detail">
+          <span class="dot"></span><span id="health-text">starting…</span>
+        </button>
+        <div class="healthpop hidden" id="health-pop">
+          <div class="hrow"><span class="hlab">SERVER</span><span class="conn" id="server-ips">starting server…</span></div>
+          <div class="hrow"><span class="hlab">LINK</span><span class="conn" id="conn">connecting…</span></div>
+          <div class="hrow"><span class="hlab">TIMING</span><span class="conn ltchip" id="lt-chip" title="Live timing feed">feed off</span></div>
+          <div class="hrow"><span class="hlab">STATIONS</span><span class="hstations" id="health-stations">—</span></div>
+        </div>
+      </div>
+      <div class="tb-pop">
+        <button id="btn-menu" title="Settings · Reset race"><i data-icon="kebab"></i></button>
+        <div class="menupop hidden" id="menu-pop">
+          <button id="btn-settings" title="Race settings"><i data-icon="gear"></i> SETTINGS</button>
+          <button class="danger" id="btn-reset" title="Reset race (keeps car setups)"><i data-icon="warn"></i> RESET RACE</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- The feed is showing a different session than the race on screen. Until
+       this is answered the feed drives nothing (laps, clock and flags held). -->
+  <div class="sessionstrip hidden" id="session-strip">
+    <span class="ss-title"><i data-icon="warn"></i> WHICH SESSION?</span>
+    <div class="ss-body">
+      <div class="ss-line" id="session-line"></div>
+      <div class="ss-sub" id="session-sub"></div>
+    </div>
+    <button class="primary" id="btn-session-new">START FRESH RACE</button>
+    <button id="btn-session-keep">KEEP THIS RACE</button>
+  </div>
+
+  <div class="condstrip hidden" id="cond-strip">
+    <div class="condblock" id="cond-block"></div>
+  </div>
+
+  <div class="rcstrip hidden" id="rc-strip">
+    <span class="rc-title"><i data-icon="flag"></i> RACE CONTROL</span>
+    <div class="rc-lines" id="rc-lines"></div>
+    <button id="btn-rc-history" title="Full race control message history with timestamps">HISTORY</button>
   </div>
 
   <div class="wall" id="wall"></div>
+  <div class="trkview hidden" id="trkview"></div>
 
   <div class="overlay hidden" id="settings-overlay">
     <div class="modal">
       <div class="modal-head">
-        <h2>⚙ RACE SETTINGS</h2>
-        <button id="btn-settings-close">✕ CLOSE</button>
+        <h2><i data-icon="gear"></i> RACE SETTINGS</h2>
+        <button id="btn-settings-close"><i data-icon="x"></i> CLOSE</button>
+      </div>
+      <div class="tabbar" id="settings-tabs">
+        <button data-tab="race" class="on">RACE</button>
+        <button data-tab="timing">LIVE TIMING</button>
+        <button data-tab="replays">REPLAYS</button>
+        <button data-tab="backup">BACKUPS</button>
+        <button data-tab="display">DISPLAY</button>
       </div>
       <div class="modal-body">
-        <section>
+        <section data-pane="race">
           <h3>Race</h3>
           <div class="form-grid">
             <label>Race name <input id="race-name" type="text" /></label>
-            <label>Duration (hours) <input id="race-duration" type="number" min="1" step="1" /></label>
+            <label>Duration (hours) <input id="race-duration" type="number" min="0.1" step="any" /></label>
             <label>Start date &amp; time <input id="race-start" type="datetime-local" style="width:190px" /></label>
           </div>
           <div class="modal-actions">
             <button class="primary" id="btn-apply-start">SET START TIME</button>
             <button class="danger" id="btn-clear-start">CLEAR START</button>
+            <button id="btn-sync-lt-clock"><i data-icon="timer"></i> SYNC FROM LIVE TIMING</button>
+            <label class="hint" style="display:flex;align-items:center;gap:6px">
+              <input id="lt-follow" type="checkbox" /> keep locked to the feed
+            </label>
           </div>
           <p class="hint" id="race-hint"></p>
-          <p class="hint">
+          <p class="hint help">
             Set a start time in the future and every screen counts down to it; the race
             clock and all stints start automatically at that moment. START RACE in the
-            top bar always starts the clock immediately instead.
+            top bar always starts the clock immediately instead. While the timing feed
+            is connected, the session length follows the feed and the race clock starts
+            by itself when the feed's session goes live — the values set here only
+            apply without a feed.
+            SYNC FROM LIVE TIMING aligns elapsed/remaining once with the feed's session
+            clock; "keep locked" re-aligns continuously (the clock freezes with the
+            official clock under red flags).
+          </p>
+          <h3>Car names</h3>
+          <div id="car-names"></div>
+          <p class="hint help">
+            The name each car shows on every screen and in the car pickers (the
+            start screen and each station's CONNECTION tab). Leave a name empty
+            to go back to the default "Car #&lt;number&gt;". The race number,
+            make and model are set on each car's own station (SETTINGS → CAR),
+            and a station can rename its own car there too — last edit wins.
+          </p>
+          <h3>Event settings — shared by all cars</h3>
+          <div class="form-grid">
+            <label>Track length (km) <input data-ev="trackKm" type="number" step="any" /></label>
+            <label>FCY / Code-60 speed (km/h) <input data-ev="fcySpeedKmh" type="number" step="any" /></label>
+            <label>Safety-Car speed (km/h, 0 = from SC lap time) <input data-ev="scSpeedKmh" type="number" step="any" min="0" /></label>
+            <label>Pit lane speed limit (km/h) <input data-ev="pitSpeedKmh" type="number" step="any" /></label>
+            <label>Pit lane length (km) <input data-ev="pitLaneKm" type="number" step="any" /></label>
+            <label>Pit lane loss (s) <input data-ev="pitLossSec" type="number" step="any" /></label>
+            <label title="Time to drive the pit lane without stopping — tells a drive-through from a real stop. 0 = work it out from lane length and speed limit.">Drive-through time (s, 0 = derive) <input data-ev="driveThroughSec" type="number" step="any" min="0" /></label>
+            <label>Refuel pump speed (L/s) <input data-ev="refuelLps" type="number" step="any" /></label>
+            <label>Max stint (min) <input data-ev="maxStintMin" type="number" step="1" /></label>
+            <label>Max drive per 6 h (min, 0 = off) <input data-ev="reg6hMin" type="number" step="1" min="0" /></label>
+            <label>Max drive total (min, 0 = off) <input data-ev="regTotalMin" type="number" step="1" min="0" /></label>
+            <label>Min rest between stints (min, 0 = off) <input data-ev="regRestMin" type="number" step="1" min="0" /></label>
+          </div>
+          <h3>Pit arrival estimate — track geometry</h3>
+          <div class="form-grid">
+            <label>Sector 1 ends at (km from S/F) <input data-ev="s1EndKm" type="number" step="any" min="0" /></label>
+            <label>Sector 2 ends at (km from S/F) <input data-ev="s2EndKm" type="number" step="any" min="0" /></label>
+            <label>Sector 3 ends at (km, 0 = at S/F) <input data-ev="s3EndKm" type="number" step="any" min="0" /></label>
+            <label>Pit entry at (km from S/F, 0 = at S/F) <input data-ev="pitInKm" type="number" step="any" min="0" /></label>
+          </div>
+          <p class="hint" id="event-derived"></p>
+          <p class="hint help">
+            Track properties and event regulations that are the same for every car:
+            they are set once here and pushed to all four cars immediately — the car
+            stations show them read-only. Car-specific values (tank, burn rates, lap
+            times, tyre &amp; brake life, tyre-change time) stay on each station.
+            Pit lane length ÷ speed limit gives the time spent driving the lane; the
+            pit lane loss on top of that is the entry/exit braking and the detour
+            versus staying on track.
+            The sector distances place a car on track by the sector it last completed
+            (the wall's PIT ENTRY countdown); with the pit entry point set, the
+            countdown runs to the actual entry instead of the S/F line. 0 on any
+            distance falls back to the timing feed's own loop positions.
+            The countdown formula:
+            <b>position now</b> = last S1/S2/S3 crossing + green speed × time up to the
+            flag + FCY/SC speed × time since the flag;
+            <b>time to pit entry</b> = distance left to the entry ÷ current speed;
+            <b>time at box</b> = that + (pit lane length ÷ 2) ÷ pit lane speed limit.
+            Green speed is the car's own live average lap (car-specific); the FCY and
+            Safety-Car speeds are the event settings above.
+          </p>
+          <h3>Saved race setups</h3>
+          <div class="preset-save">
+            <input id="racesetup-name" type="text" placeholder="setup name, e.g. Zolder 24H" />
+            <button class="primary" id="btn-racesetup-save"><i data-icon="save"></i> SAVE CURRENT SETUP</button>
+          </div>
+          <div id="racesetup-list"><p class="hint">No race setups saved yet.</p></div>
+          <p class="hint help">
+            A race setup stores the race name, duration and all event settings on
+            this pit wall PC (car names travel with the cars themselves, not the
+            setup). Prepare the real event during a test
+            or practice session, save it, and load it back when the race weekend starts:
+            LOAD applies the values immediately on every screen. The start time is not
+            part of a setup; set it above when the schedule is known.
           </p>
         </section>
+        <section data-pane="timing">
+          <h3>Live timing feed</h3>
+          <div class="form-grid">
+            <label>Source
+              <select id="lt-mode" style="width:290px">
+                <option value="url">Timing page URL (getraceresults / Al Kamel)</option>
+                <option value="teamstream">Direct connector — TeamStream (TCP / SSL)</option>
+              </select>
+            </label>
+          </div>
+          <div class="form-grid" id="lt-url-row">
+            <label>Live timing URL
+              <input id="lt-url" type="text" style="width:340px"
+                     placeholder="https://livetiming.getraceresults.com/…" />
+            </label>
+          </div>
+          <div class="form-grid" id="lt-ts-rows" style="display:none">
+            <label>Host <input id="lt-host" type="text" style="width:200px" placeholder="timekeeper server / IP" /></label>
+            <label>Port <input id="lt-port" type="number" style="width:90px" placeholder="12922" /></label>
+            <label>Key <input id="lt-key" type="text" style="width:170px" placeholder="team stream key" /></label>
+            <label>SSL / TLS <input id="lt-ssl" type="checkbox" checked /></label>
+            <label>Accept self-signed cert <input id="lt-selfsigned" type="checkbox" /></label>
+          </div>
+          <div class="form-grid" id="lt-session-row" style="display:none">
+            <label>Session <select id="lt-session" style="width:300px"></select></label>
+          </div>
+          <div class="form-grid">
+            <label>Flag check URL
+              <input id="lt-watch" type="text" style="width:340px"
+                     placeholder="optional — public livetiming page of this event" />
+            </label>
+          </div>
+          <div class="modal-actions">
+            <button class="primary" id="btn-lt-connect"><i data-icon="play"></i> CONNECT</button>
+            <button class="danger" id="btn-lt-disconnect"><i data-icon="stop"></i> DISCONNECT</button>
+          </div>
+          <p class="hint" id="lt-status">Feed off.</p>
+          <p class="hint help">
+            The connection is made from this pit wall PC only; every station receives the
+            decoded standings automatically, including feed errors and reconnect status.
+            The URL source works with getraceresults and Al Kamel public pages; the direct
+            connector is the paid Time Service TeamStream feed — the key comes from the
+            timekeeper. Standard ports: 12921 plain / 12922 SSL (getraceresults.com uses
+            12961 / 12962). For known ports the plain-vs-SSL choice is applied
+            automatically, whatever the checkbox says.
+            The flag check URL is the event's public getraceresults page: its explicit
+            flag state (the coloured box on the website) is the only source of
+            safety car / FCY / Code 60 / red on a direct TeamStream connection — the
+            direct feed carries no flag element, and race-control messages are shown
+            as text but never change the flag. Without it the flag only shows green
+            (running) and finish from the session clock. Connecting via the URL
+            source instead of the direct feed carries the board flag already.
+          </p>
+          <h3>Car links</h3>
+          <div id="lt-links"></div>
+          <p class="hint help">
+            Each car follows the timing entry with its own race number unless a different
+            number is set here. AUTO is on by default: completed laps (and pit in/out) from
+            the feed drive that car's lap counter, tyre wear and pit state — the station's
+            manual lap logging hides while the feed is live and returns if it drops.
+            Turn AUTO off to keep a car on manual lap logging.
+            AUTO only counts laps while the race clock runs.
+          </p>
+        </section>
+        <section data-pane="replays">
+          <h3>Session replays</h3>
+          <div class="replay-ctl hidden" id="lt-replay-ctl">
+            <button id="btn-replay-toggle"><i data-icon="play"></i> PLAY</button>
+            <select id="replay-speed" title="Playback speed">
+              <option value="1">1×</option>
+              <option value="5">5×</option>
+              <option value="20">20×</option>
+              <option value="60">60×</option>
+              <option value="300">300×</option>
+            </select>
+            <input id="replay-seek" type="range" min="0" max="1000" value="0" step="1" />
+            <span class="mono" id="replay-pos">0:00 / 0:00</span>
+            <button class="danger" id="btn-replay-close"><i data-icon="x"></i> CLOSE</button>
+          </div>
+          <div class="modal-actions">
+            <button id="btn-replay-refresh"><i data-icon="refresh"></i> REFRESH LIST</button>
+          </div>
+          <div id="lt-replays"><p class="hint">No replays yet.</p></div>
+          <p class="hint help">
+            Every live session is recorded automatically — one file per session, so a new
+            session never spills into the previous one's replay. Opening a replay stops the
+            live feed and re-simulates the recorded feed on every screen: play, fast-forward
+            or scrub with the slider. Close the replay and reconnect the feed
+            (LIVE TIMING tab) when done.
+          </p>
+        </section>
+        <section data-pane="backup">
+          <h3>Automatic backups</h3>
+          <div class="form-grid">
+            <label>Backup every (min, 0 = off) <input id="backup-interval" type="number" min="0" step="1" /></label>
+          </div>
+          <p class="hint help">
+            The live state is already saved after every change. On top of that, a timestamped
+            snapshot is written on this interval (newest 100 kept) on this PC. If the pit wall
+            PC crashes, restore the latest snapshot below and only the last few minutes need
+            re-entering.
+          </p>
+          <div class="modal-actions">
+            <button class="primary" id="btn-backup-now"><i data-icon="save"></i> SAVE SNAPSHOT NOW</button>
+            <button id="btn-backup-refresh"><i data-icon="refresh"></i> REFRESH LIST</button>
+          </div>
+          <div id="backup-list"></div>
+        </section>
+        <section data-pane="display">
+          <h3>Theme</h3>
+          <div class="condrow" id="theme-row" style="max-width:440px">
+            <button data-theme="auto"><i data-icon="timer"></i> AUTO</button>
+            <button data-theme="light"><i data-icon="sun"></i> LIGHT</button>
+            <button data-theme="dark"><i data-icon="moon"></i> DARK</button>
+          </div>
+          <p class="hint" id="theme-hint"></p>
+          <h3>Track location — for the auto switch</h3>
+          <div class="form-grid">
+            <label>Latitude <input id="theme-lat" type="number" step="any" /></label>
+            <label>Longitude <input id="theme-lon" type="number" step="any" /></label>
+          </div>
+          <p class="hint help">
+            AUTO switches to dark 30 min before sunset and back to light 1 h after sunrise,
+            computed from the sun times at this location (default: Circuit Zolder).
+            The theme choice is saved on this PC only — each screen picks its own.
+          </p>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay hidden" id="rc-overlay">
+    <div class="modal">
+      <div class="modal-head">
+        <h2><i data-icon="flag"></i> RACE CONTROL — MESSAGES</h2>
+        <button id="btn-rc-close"><i data-icon="x"></i> CLOSE</button>
+      </div>
+      <div class="modal-body">
+        <p class="hint" id="rc-count"></p>
+        <table class="rc-table">
+          <thead><tr><th style="width:140px">TIME</th><th>MESSAGE</th></tr></thead>
+          <tbody id="rc-history"></tbody>
+        </table>
       </div>
     </div>
   </div>
