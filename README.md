@@ -406,6 +406,19 @@ internet. Configure it under **⚙ SETTINGS → LIVE TIMING** on the pit wall:
   local yellows) as a ticker line. A new session on the same connection resets
   the board, exactly like a session change on the web feed does.
 
+  Some timekeepers export more of the underlying timing record than the feed
+  we first met did. Where they do, it is used in preference to the
+  reconstruction above: an explicit **session status**
+  (`GREEN`/`YELLOW`/`RED`/`CODE60`/`FINISH`) becomes the flag outright instead
+  of being inferred from the clock — a race held under red past its scheduled
+  end then stays red rather than turning chequered; a **heat type** (`R`/`Q`)
+  decides race-vs-qualifying scoring instead of guessing from the session
+  name; and a per-loop **allow-fastest** flag says which crossings may score a
+  best lap. Any of these may arrive as an XML attribute rather than an
+  element, and both are read. Whatever else a timekeeper sends that the app
+  does not use is named once in the connection log, so an unfamiliar export
+  can be spotted from the log rather than a packet capture.
+
 The feed status is visible everywhere: a flag/remaining-time chip in the pit
 wall top bar, a summary line on every wall card, and a **Live timing** panel
 on each station (position, class position, last/best lap, gap/interval,

@@ -2194,11 +2194,21 @@ export function fmtLapUs(us) {
 // magnitude guess would turn a 0.086 s gap into 86000 "seconds"); numeric
 // strings are feed display text (plain seconds unless µs-sized); other text
 // ("2 laps") passes through unchanged.
+//
+// A NEGATIVE number is not a negative time: the vendor's "Time" type carries
+// a difference in LAPS when it goes below zero (Timing Data Protocol v1.34,
+// general data structure). Lapped cars are the normal case for that, and
+// blanking the cell — what a plain sign test does — hides exactly the number
+// a pit wall reads first.
 export function fmtGapUs(v) {
   if (v == null || v === '') return '—';
   const n = Number(v);
   if (isNaN(n)) return String(v);
-  if (n <= 0) return '—';
+  if (n < 0) {
+    const laps = Math.round(-n);
+    return `${laps} lap${laps === 1 ? '' : 's'}`;
+  }
+  if (n === 0) return '—';
   const sec = typeof v === 'number' || n >= 1e6 ? n / 1e6 : n;
   if (sec >= 60) {
     const m = Math.floor(sec / 60);

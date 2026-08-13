@@ -429,8 +429,15 @@ function numToUs(v) {
 }
 
 // ── minimal XML (TeamStream messages) ────────────────────────────────────────
-// Machine-generated feed: elements, text, self-closing tags. Attributes are
-// parsed past but discarded, matching the pitmanager relay's ElementTree use.
+// Machine-generated feed: elements, text, self-closing tags and attributes.
+//
+// Attributes used to be parsed past and discarded (matching the pitmanager
+// relay's ElementTree use). They are kept now because the same record can be
+// exported either way: the Timing Data Protocol (v1.34) documents fields like
+// Heat.Status that we have never seen as a child element, and an export that
+// writes them as `<session status="GREEN">` would have been invisible. Child
+// elements still win on a name collision, so nothing that already decoded can
+// change value.
 
 function decodeEntities(s) {
   return s.replace(/&(#x?[0-9a-fA-F]+|[a-z]+);/g, (m, e) => {
@@ -440,6 +447,20 @@ function decodeEntities(s) {
     }
     return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[e] ?? m;
   });
+}
+
+// key="value" | key='value' | key=bare, in a start tag's attribute section.
+const ATTR_RE = /([A-Za-z_:][-\w:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/g;
+
+function parseAttrs(s) {
+  if (!s || !s.includes('=')) return null;
+  let attrs = null;
+  let m;
+  ATTR_RE.lastIndex = 0;
+  while ((m = ATTR_RE.exec(s)) !== null) {
+    (attrs ??= {})[m[1]] = decodeEntities(m[2] ?? m[3] ?? m[4] ?? '');
+  }
+  return attrs;
 }
 
 export function parseXmlFragment(text) {
@@ -490,7 +511,7 @@ export function parseXmlFragment(text) {
     const sp = inner.search(/[\s]/);
     const tag = sp === -1 ? inner : inner.slice(0, sp);
     if (!tag) continue;
-    const el = { tag, children: [], text: '' };
+    const el = { tag, children: [], text: '', attrs: sp === -1 ? null : parseAttrs(inner.slice(sp + 1)) };
     stack[stack.length - 1].children.push(el);
     if (!selfClose) stack.push(el);
   }
@@ -501,12 +522,28 @@ export function parseXmlFragment(text) {
 const TS_ALWAYS_LIST = new Set(['loop', 'section', 'speedtrap', 'enrollment', 'teammember']);
 
 export function xmlToObj(el) {
-  if (!el.children.length) return decodeEntities(el.text);
-  const out = {};
+  if (!el.children.length) {
+    const text = decodeEntities(el.text);
+    // A leaf whose content is in its attributes (`<loop id="111" pos="0"/>`)
+    // rather than in child elements. Text still wins where there is any, so
+    // `<text lang="en">RED FLAG</text>` stays the plain string its consumers
+    // expect — only the previously useless empty string becomes an object.
+    if (el.attrs && !text.trim()) return { ...el.attrs };
+    return text;
+  }
+  const out = el.attrs ? { ...el.attrs } : {};
+  // Names still held by an attribute. The first child element of that name
+  // replaces it outright instead of being appended to it — a child element is
+  // always the more specific value, and pairing the two into an array would
+  // change what every existing consumer reads.
+  const fromAttrs = el.attrs ? new Set(Object.keys(el.attrs)) : null;
   for (const child of el.children) {
     const val = xmlToObj(child);
     if (TS_ALWAYS_LIST.has(child.tag)) {
-      (out[child.tag] ??= []).push(val);
+      if (!Array.isArray(out[child.tag])) out[child.tag] = [];
+      out[child.tag].push(val);
+    } else if (fromAttrs?.delete(child.tag)) {
+      out[child.tag] = val;
     } else if (child.tag in out) {
       if (!Array.isArray(out[child.tag])) out[child.tag] = [out[child.tag]];
       out[child.tag].push(val);
@@ -1196,6 +1233,55 @@ const TS_COLMAP = {
 // shared/model.js: 2 red, 3 SC, 4 code60, 5 finish, 6 green, 7 FCY).
 const AK_FLAG_MAP = { GF: 6, YF: 7, FCY: 7, RF: 2, SC: 3, C60: 4, CODE60: 4, CHK: 5 };
 
+// Heat data `Status` (Timing Data Protocol v1.34, DataID 5) → the same flag
+// enum. The TeamStream <session> element serializes that Heat record, so a
+// timekeeper who exports Status hands the direct socket the one thing it
+// otherwise lacks: an EXPLICIT flag, no text parsing (see applyWatchFlag).
+// Only these documented values are honoured — ACTIVE means "this is the
+// current heat" and says nothing about the track, and anything unrecognised
+// leaves the flag alone.
+//
+// Note the protocol has no SAFETY CAR state: an SC period is published as
+// YELLOW, so the public board watch stays the finer-grained source and keeps
+// outranking this (applyWatchFlag runs over the finished snapshot).
+const TS_STATUS_FLAGS = {
+  GREEN: 6, YELLOW: 7, RED: 2, CODE60: 4, FINISH: 5, COMPLETED: 5
+};
+
+// Heat data `HeatType`: Q=qualification, R=Race, RLY=Rally. The timekeeper's
+// own answer to race-vs-qualifying, which beats guessing from the session
+// name — a race called "Course 1", "Wedstrijd" or "Manche 2" defeats the
+// keyword test that has to stand in for it.
+const TS_HEAT_TYPE_RACE = { R: true, RLY: true, Q: false };
+
+// A protocol Boolean: 1 or 0 on the wire, absent while still at its default.
+// null = "the feed did not say", which is not the same as false.
+function tsBool(v) {
+  if (v == null || v === '') return null;
+  const s = String(v).trim().toLowerCase();
+  if (s === '1' || s === 'true') return true;
+  if (s === '0' || s === 'false') return false;
+  return null;
+}
+
+// Read a field by any of several lowercase names, case-insensitively: the
+// protocol documents "Status"/"AllowFastest", the wire we captured is all
+// lowercase, and the same value can arrive as an element or an attribute.
+function tsGet(obj, ...names) {
+  if (!obj || typeof obj !== 'object') return undefined;
+  for (const n of names) {
+    const v = obj[n];
+    if (v != null && typeof v !== 'object') return v;
+  }
+  for (const k of Object.keys(obj)) {
+    const v = obj[k];
+    if (v == null || typeof v === 'object') continue;
+    const lk = k.toLowerCase();
+    for (const n of names) if (lk === n) return v;
+  }
+  return undefined;
+}
+
 function norm(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9#]+/g, ' ').trim();
 }
@@ -1231,6 +1317,20 @@ function tsField(obj, key) {
   }
   return null;
 }
+
+// Everything we consume off <session> and its <loop> children. Whatever a real
+// timekeeper sends beyond these is logged once (_tsNote) — the Timing Data
+// Protocol defines plenty on the records these serialize (Heat Status and
+// HeatType, the Loop booleans AllowFastest / IsCountAsLap / IsTankIn, Lap
+// State) and this is how a live session tells us which of them actually
+// arrive, instead of another capture-and-grep round afterwards.
+const TS_SESSION_KNOWN = new Set([
+  'event', 'group', 'name', 'sessionname', 'session', 'laps', 'start', 'end',
+  'mode', 'type', 'heattype', 'sessiontype', 'status', 'state'
+]);
+const TS_LOOP_KNOWN = new Set([
+  'id', 'name', 'pos', 'pit', 'func', 'allowfastest', 'allowfast'
+]);
 
 // TeamStream datetimes ("01.08.2026 10:30:00", local track time) → µs on the
 // same 2000-epoch local clock the `ms` pass field uses. Computed with UTC
@@ -1292,6 +1392,8 @@ export class TimingEngine {
     this.tsGreenUs = null; // when the clock really started ("Green Flag" smsg)
     this.tsStartTrigUs = null; // race start trigger (field's lap-0 S/F crossing)
     this.tsFinishInferred = false; // heat.f=5 came from the clock, not race control
+    this.tsStatusFlag = null; // flag from an explicit <session> Status, if exported
+    this.tsNoted = new Set(); // feed fields already reported by _tsNote
     this.tsGroup = null; // raw <session> group/name — matches flag smsg branding
     this.tsName = null;
     this.tsRace = false; // race (gaps on track) vs qualifying (gaps on best)
@@ -1841,6 +1943,24 @@ export class TimingEngine {
     return c;
   }
 
+  // Report scalar fields a real feed sends that we do not consume — once each,
+  // to the connection log. Protocol archaeology without a capture-and-grep
+  // round: the records these elements serialize carry a lot more than the
+  // export we have seen (Heat Status/HeatType, the Loop booleans, Lap State),
+  // and this says which of it a given timekeeper actually publishes.
+  _tsNote(kind, obj, known) {
+    if (!obj || typeof obj !== 'object' || this.tsNoted.size > 200) return;
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      if (v == null || typeof v === 'object') continue;
+      if (known.has(k.toLowerCase())) continue;
+      const tag = kind + '.' + k;
+      if (this.tsNoted.has(tag)) continue;
+      this.tsNoted.add(tag);
+      this.onLog(`feed sends an unused <${kind}> field: ${k}="${String(v).slice(0, 40)}"`);
+    }
+  }
+
   _tsSession(payload) {
     if (!payload || typeof payload !== 'object') return;
     const name = [payload.group, payload.name || payload.sessionname || payload.session]
@@ -1861,6 +1981,7 @@ export class TimingEngine {
       this.tsGreenUs = null;
       this.tsStartTrigUs = null;
       this.tsFinishInferred = false;
+      this.tsStatusFlag = null;
       this.tsRc = null;
       this.tsPendingMsgs = [];
       this.rcLog = [];
@@ -1883,8 +2004,35 @@ export class TimingEngine {
       this.tsSchedEndUs = endUs;
       this._tsApplyWindow();
     }
+    // Race vs qualifying decides the whole scoring model (order by laps at the
+    // line vs by best lap) and which clock anchor applies, so prefer the
+    // feed's own HeatType over the keyword test whenever it is exported.
+    const heatType = String(tsGet(payload, 'type', 'heattype', 'sessiontype') ?? '').trim().toUpperCase();
+    const typedRace = TS_HEAT_TYPE_RACE[heatType];
     const lapsPlanned = parseInt(payload.laps, 10) || 0;
-    this.tsRace = lapsPlanned > 0 || /race|heat|final|endur/i.test(String(payload.name || ''));
+    this.tsRace = typedRace != null
+      ? typedRace
+      : lapsPlanned > 0 || /race|heat|final|endur/i.test(String(payload.name || ''));
+
+    // Explicit Heat Status — the only flag source on this socket that is not
+    // an inference. Race-control text still never touches the flag.
+    const status = String(tsGet(payload, 'status', 'state') ?? '')
+      .trim().toUpperCase().replace(/[\s_-]+/g, '');
+    if (status) {
+      const f = TS_STATUS_FLAGS[status];
+      if (f != null) {
+        if (this.tsStatusFlag !== f) {
+          this.onLog(`session status: ${status} — flag from the feed, not inferred`);
+        }
+        this.tsStatusFlag = f;
+        this.heat.f = f;
+        this.tsFinishInferred = false;
+      } else if (status !== 'ACTIVE' && !this.tsNoted.has('status:' + status)) {
+        this.tsNoted.add('status:' + status);
+        this.onLog(`session status "${status}" is not a known flag state — ignored`);
+      }
+    }
+    this._tsNote('session', payload, TS_SESSION_KNOWN);
 
     // Timing loops and the sections they delimit → sector columns. A loop can
     // both complete one sector and begin the next (Int1 ends S1, starts S2).
@@ -1900,8 +2048,14 @@ export class TimingEngine {
           name: String(l.name || ''),
           posMm: parseInt(l.pos, 10) || 0,
           pit: String(l.pit).trim() === '1',
-          func
+          func,
+          // Loop Data `AllowFastest` (DataID 12): whether a lap ending on this
+          // loop may score a best time at all. That is exactly the rule the
+          // pit-lane test in _tsPasses has to approximate, straight from the
+          // timekeeper. null when not exported — then the test stands.
+          allowFastest: tsBool(tsGet(l, 'allowfastest', 'allowfast'))
         });
+        this._tsNote('loop', l, TS_LOOP_KNOWN);
         if (func.startsWith('SF')) this.tsSfLoop = id;
       }
     }
@@ -2061,7 +2215,13 @@ export class TimingEngine {
         // (out-laps — lap 1 runs from the Pit Out crossing and is not even a
         // full lap). The official board excludes them the same way (verified
         // at Assen: a 5:23 pit-lane "lap" left the web board's BEST blank).
-        if (!cancelled && !isNaN(lap) && !loop?.pit && !wasOutLap) {
+        //
+        // AllowFastest, where the loop table exports it, replaces the
+        // pit-lane guess for the loop the lap ENDED on. It cannot replace the
+        // out-lap test: that is a property of where the lap began, which no
+        // per-loop flag can express.
+        const loopScores = loop?.allowFastest ?? !loop?.pit;
+        if (!cancelled && !isNaN(lap) && loopScores && !wasOutLap) {
           car.lapUs.set(lap, lapUs);
           if (car.lapUs.size > 200) car.lapUs.delete(Math.min(...car.lapUs.keys()));
           this._tsBest(r, car, changes);
@@ -2336,6 +2496,12 @@ export class TimingEngine {
     this.heat._sampleMs = Date.now();
     this.heat._sampleServerUs = serverUs;
     delete this.heat._remainOnly;
+    // An explicit Heat Status outranks anything the window can imply: a race
+    // held under red past its scheduled end is still red, not finished.
+    if (this.tsStatusFlag != null) {
+      this.heat.f = this.tsStatusFlag;
+      return;
+    }
     if (serverUs >= this.tsSessEndUs) {
       if (this.heat.f !== 5) {
         this.onLog('session time elapsed — finish');
@@ -2503,9 +2669,16 @@ export class TimingEngine {
       // The vendor writes Long.MAX_VALUE (9223372036854775807) into numeric
       // fields it has no value for yet — an unset best time, a class position
       // on a board without classes. That is an empty cell, not data.
+      //
+      // Int32.MAX_VALUE is the other half of the same convention (Timing Data
+      // Protocol v1.34, appendix 1: the default for Pos, PIC, PID, GridPos,
+      // Points — and for FastLap, where it would otherwise pass every sanity
+      // check and display as a plausible 35:47.483 best lap).
       const cell = key => {
         const v = cells[this._ci(key)];
-        return v != null && v !== '' && Math.abs(Number(v)) > 9e18 ? undefined : v;
+        if (v == null || v === '') return v;
+        const n = Math.abs(Number(v));
+        return n > 9e18 || n === 2147483647 ? undefined : v;
       };
       const num = key => {
         const v = parseInt(cell(key), 10);

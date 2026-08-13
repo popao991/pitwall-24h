@@ -1043,6 +1043,9 @@ check('watch keeps the flag across heat frames without f', svcW.flagWatch.flag =
 // "+1433:20.0"), feed strings are seconds, lap counts pass through
 check('gap format µs vs strings', fmtGapUs(86000) === '+0.086' && fmtGapUs(2822000) === '+2.8' &&
   fmtGapUs('2.822') === '+2.8' && fmtGapUs('2 laps') === '2 laps' && fmtGapUs(75.5e6) === '+1:15.5');
+// a negative value is the vendor's "difference in laps", not a negative time
+check('gap negative is laps down', fmtGapUs(-1) === '1 lap' && fmtGapUs(-3) === '3 laps' &&
+  fmtGapUs('-2') === '2 laps' && fmtGapUs(0) === '—');
 
 // ---- TeamStream: late session start (captured live at Assen, IoM CSB Q2) ----
 // The <session> window is only the SCHEDULE and is never updated when a
@@ -1169,6 +1172,92 @@ check('ts race clock anchors on the lap-0 crossing',
   engRace.snapshot().session.totalUs === 20 * 60e6);
 check('ts later lap-0 crossings keep the first anchor',
   engRace.tsStartTrigUs === parseTsDateUs('01.08.2026 16:27:30'));
+
+// ---- Timing Data Protocol v1.34 fields on the TeamStream elements ----
+// <session> serializes the Heat record, so an export can carry Status and
+// HeatType — and can carry them as attributes, which the XML decoder used to
+// throw away. Child elements still win, and a leaf's text still beats its own
+// attributes so <text lang="en">…</text> stays the string its consumers read.
+const attrObj = xmlToObj(parseXmlFragment(
+  '<session status="GREEN" type="R" name="attr"><name>Race 1</name>' +
+  '<loop id="111" name="S/F" pos="0" pit="0" func="SFAL" allowfastest="1"/></session>')[0]);
+check('xml attributes decoded', attrObj.status === 'GREEN' && attrObj.type === 'R');
+check('xml child element outranks the attribute', attrObj.name === 'Race 1');
+check('xml attribute-only leaf becomes an object', attrObj.loop.length === 1 &&
+  attrObj.loop[0].id === '111' && attrObj.loop[0].allowfastest === '1');
+const txtObj = xmlToObj(parseXmlFragment('<smsg id="9"><text lang="en">RED FLAG</text></smsg>')[0]);
+check('xml leaf text still wins over its attributes', txtObj.text === 'RED FLAG' && txtObj.id === '9');
+
+// Heat Status is the one flag source on this socket that is not an inference.
+const engSt = new TimingEngine({ onEvent: () => {}, onLog: () => {} });
+engSt.applyFrame({ handle: 'ts_session', payload: { ...assenSession, status: 'GREEN' }, ts: Date.now() });
+check('ts explicit heat status sets the flag', engSt.snapshot().session.flag === 6);
+engSt.applyFrame({ handle: 'ts_session', payload: { ...assenSession, status: 'RED' }, ts: Date.now() });
+const SE = parseTsDateUs('01.08.2026 11:30:00') / 1000; // well past the 11:05 scheduled end
+engSt.applyFrame({ handle: 'ts_pass', payload: { passes: [
+  { enr: 'st1', nr: '14', lap: '9', pos: '1', laptime: '1:38.000', ms: String(SE), loopid: '111', dnr: '1', status: '' }
+] }, ts: Date.now() });
+check('ts red status outranks the elapsed-window finish', engSt.snapshot().session.flag === 2);
+engSt.applyFrame({ handle: 'ts_session', payload: { ...assenSession, status: 'CODE 60' }, ts: Date.now() });
+check('ts code60 status normalised', engSt.snapshot().session.flag === 4);
+engSt.applyFrame({ handle: 'ts_session', payload: { ...assenSession, status: 'WHATEVER' }, ts: Date.now() });
+check('ts unrecognised status leaves the flag alone', engSt.snapshot().session.flag === 4);
+
+// HeatType beats the session-name keyword test in both directions.
+const engQ = new TimingEngine({ onEvent: () => {}, onLog: () => {} });
+engQ.applyFrame({ handle: 'ts_session', payload: { ...assenSession, name: 'Final', type: 'Q' }, ts: Date.now() });
+check('ts HeatType Q outranks a race-sounding name', engQ.tsRace === false);
+const engR = new TimingEngine({ onEvent: () => {}, onLog: () => {} });
+engR.applyFrame({ handle: 'ts_session', payload: { ...assenSession, name: 'Course 1', type: 'R' }, ts: Date.now() });
+check('ts HeatType R rescues a name the keywords miss', engR.tsRace === true);
+
+// Loop AllowFastest replaces the pit-lane guess for the loop a lap ENDED on —
+// but never the out-lap test, which is about where the lap began.
+const A0 = parseTsDateUs('01.08.2026 10:40:00') / 1000;
+const engAF = new TimingEngine({ onEvent: () => {}, onLog: () => {} });
+engAF.applyFrame({ handle: 'ts_session', payload: { ...assenSession, loop: [
+  { id: '111', name: 'S/F', pos: '0', pit: '0', func: 'SFAL', allowfastest: '0' },
+  { id: '103', name: 'Pit In', pos: '-39220', pit: '1', func: 'I' },
+  { id: '110', name: 'Pit Out', pos: '286080', pit: '1', func: 'SO' }
+] }, ts: Date.now() });
+engAF.applyFrame({ handle: 'ts_pass', payload: { passes: [
+  { enr: 'a1', nr: '14', lap: '4', pos: '1', laptime: '1:38.500', ms: String(A0), loopid: '111', dnr: '1', status: '' }
+] }, ts: Date.now() });
+const eAF = engAF.snapshot().entries.find(e => e.nr === '14');
+check('ts AllowFastest=0 blocks the best on the S/F loop itself',
+  eAF.lastUs === 98500000 && eAF.bestUs == null);
+const engAF2 = new TimingEngine({ onEvent: () => {}, onLog: () => {} });
+engAF2.applyFrame({ handle: 'ts_session', payload: { ...assenSession, loop: [
+  ...assenSession.loop, { id: '104', name: 'Pit SF', pos: '0', pit: '1', func: 'FL', allowfastest: '1' }
+] }, ts: Date.now() });
+engAF2.applyFrame({ handle: 'ts_pass', payload: { passes: [
+  { enr: 'b1', nr: '14', lap: '4', pos: '1', laptime: '1:38.500', ms: String(A0), loopid: '104', dnr: '1', status: '' }
+] }, ts: Date.now() });
+check('ts AllowFastest=1 lets a pit-lane loop score after all',
+  engAF2.snapshot().entries.find(e => e.nr === '14').bestUs === 98500000);
+
+// Int32.MAX_VALUE is the vendor's other "no value" default (appendix 1) — as a
+// best lap it would otherwise read as a perfectly plausible 35:47.483.
+const engSent = new TimingEngine({ onEvent: () => {}, onLog: () => {} });
+engSent.applyFrame({ handle: 'r_i', payload: { l: {
+  h: [{ n: 'Position', c: 'Pos' }, { n: 'StartNumber', c: 'Nr' },
+      { n: 'FastestRoundTime', c: 'Best' }, { n: 'LastRoundTime', c: 'Last' }],
+  d: [['2147483647', '17', '2147483647', '105300000']]
+} }, ts: Date.now() });
+const sent = engSent.snapshot().entries[0];
+check('int32 sentinel is an empty cell, not a 35:47 best lap',
+  sent.bestUs == null && sent.pos == null && sent.lastUs === 105300000);
+
+// Fields a real feed sends that we do not consume are reported once each, so a
+// live session settles what a timekeeper actually exports.
+const noteLogs = [];
+const engNote = new TimingEngine({ onEvent: () => {}, onLog: m => noteLogs.push(m) });
+const noted = { ...assenSession, weather: 'DRY', airtemp: '21' };
+engNote.applyFrame({ handle: 'ts_session', payload: noted, ts: Date.now() });
+engNote.applyFrame({ handle: 'ts_session', payload: noted, ts: Date.now() });
+check('unused feed fields are reported once each',
+  noteLogs.filter(m => m.includes('unused <session> field')).length === 2 &&
+  noteLogs.some(m => m.includes('weather')) && noteLogs.some(m => m.includes('airtemp')));
 
 // ---- replay recording + playback ----
 // One session = one file: the recorder rotates on session change so a new
