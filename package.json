@@ -1,7 +1,7 @@
 {
   "name": "pitwall-24h",
   "productName": "PitWall 24H",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "24h endurance race strategy stations + pit wall display for a 4-car team",
   "author": "IO Refuge <iorefuge@gmail.com>",
   "main": "main.js",
