@@ -718,6 +718,15 @@ tabbar.addEventListener('click', e => {
 });
 showTab('car');
 
+// A setting is only really set once the pit wall echoes it back: the state on
+// screen is the wall's, and every render writes it back over these fields. So
+// an edit is held here until the echo arrives — that way a render mid-edit
+// cannot undo it, and an edit that never lands (a station whose link died) is
+// marked instead of quietly snapping back to the old number, which reads as
+// "this PC won't let me type".
+const SETTING_ACK_MS = 6000;
+const pendingSettings = new Map(); // data-path -> { value, sentMs }
+
 // Every input/select with data-path patches that field on the car when changed.
 for (const inp of overlay.querySelectorAll('input[data-path], select[data-path]')) {
   inp.addEventListener('change', () => {
@@ -728,6 +737,8 @@ for (const inp of overlay.querySelectorAll('input[data-path], select[data-path]'
     let node = patch;
     for (let i = 0; i < parts.length - 1; i++) node = node[parts[i]] = {};
     node[parts[parts.length - 1]] = val;
+    inp.classList.remove('unsent');
+    pendingSettings.set(inp.dataset.path, { value: val, sentMs: Date.now() });
     patchCar(patch);
   });
 }
@@ -1097,7 +1108,22 @@ function renderFuelModelStatus(car, c) {
 
 function renderSettings(car, c) {
   for (const inp of overlay.querySelectorAll('input[data-path], select[data-path]')) {
-    setInput(inp, getPath(car, inp.dataset.path) ?? '');
+    const live = getPath(car, inp.dataset.path) ?? '';
+    const sent = pendingSettings.get(inp.dataset.path);
+    if (sent) {
+      if (String(live) === String(sent.value)) {
+        pendingSettings.delete(inp.dataset.path);   // the wall has it
+        inp.classList.remove('pending');
+      } else if (Date.now() - sent.sentMs < SETTING_ACK_MS) {
+        inp.classList.add('pending');
+        continue;                                    // still in flight: hands off
+      } else {
+        pendingSettings.delete(inp.dataset.path);
+        inp.classList.remove('pending');
+        inp.classList.add('unsent');                 // never arrived — say so
+      }
+    }
+    setInput(inp, live);
   }
   if (builtDriverCount !== car.drivers.length) buildDriverTable(car);
   // Tyre life is entered in km; say what that is in laps here so the setting
@@ -2025,6 +2051,34 @@ function render() {
     fcyBanner.innerHTML = `${icon(cond.id === 'red' ? 'redflag' : 'chequered')} ${cond.label} — FUEL BURN PAUSED`;
   }
 
+  // ---- under green: what the next flag would be worth, before it flies.
+  // The banner above only exists during a neutralisation, which is the moment
+  // the crew has no time left to work anything out. This is the same maths
+  // read forward: if a board went out on this lap, what does the stop become?
+  const preview = $('fcy-preview');
+  const showPreview = cond.id === 'green' && c.clock.running && fs && !fs.noStopNeeded;
+  preview.classList.toggle('hidden', !showPreview);
+  if (showPreview) {
+    const fillL = Math.max(0, fs.fillTargetL - car.state.fuelLiters);
+    const rig = refuelTimeSec(car.config, fillL);
+    const tyreSec = car.config.tyreChangeSec || 0;
+    const leg = key => {
+      const cost = pitCostSec(car, key, { refuelSec: rig });
+      // Same comparison the verdict makes: an open window costs nothing extra,
+      // a shut one buys a whole pit loss that the discount has to cover.
+      const net = (fs.windowOpen ? 0 : (car.config.pitLossSec || 0)) - cost.gainSec;
+      const withT = pitCostSec(car, key, { refuelSec: rig, boxWorkSec: tyreSec });
+      const tyreNow = withT.lossNeutral - cost.lossNeutral;
+      const label = key === 'fcy' ? 'CODE 60' : 'SAFETY CAR';
+      return `<span class="${net <= 0 ? 'good' : 'no'}">${label} ` +
+        (net <= 0 ? `save ~${Math.abs(net).toFixed(0)} s` : `lose ~${net.toFixed(0)} s`) +
+        `</span>` + (tyreSec > 0 ? ` <small>(tyres +${tyreNow.toFixed(0)} s)</small>` : '');
+    };
+    preview.innerHTML = `${icon('flag')} <b>IF A FLAG DROPS NOW</b> ` +
+      `<small>fill ${fillL.toFixed(0)} L · window ${fs.windowOpen ? 'open' : 'shut'}</small> ` +
+      leg('fcy') + ' <i>·</i> ' + leg('sc');
+  }
+
   // fuel
   const fuelPct = car.state.fuelLiters / car.config.tankLiters;
   $('fuel-now').textContent = car.state.fuelLiters.toFixed(1) + ' L';
@@ -2073,27 +2127,26 @@ function render() {
   // the fill is big enough to cover it, and that threshold never moves during
   // the race. So the crew can be told now what the next Code 60 is worth.
   const beEl = $('fuel-breakeven');
-  const be = fs?.breakEven?.fcy || fuelBreakEven(car, 'fcy');
-  if (!be) {
-    beEl.textContent = '—';
-    beEl.className = 'v';
-  } else if (fs && fs.windowOpen && !fs.noStopNeeded) {
-    beEl.textContent = 'any stop — the window is already open';
-    beEl.className = 'v good';
-  } else if (be.rule === 'always') {
-    beEl.textContent = `any fill — ${Math.round(be.discount * 100)}% of the lane is free`;
-    beEl.className = 'v good';
-  } else if (be.rule === 'never') {
-    beEl.textContent = `never — even a full tank only covers ${
-      Math.round(be.discount * 100)}% of the extra stop`;
-    beEl.className = 'v';
-  } else {
-    const need = fs && !fs.noStopNeeded ? Math.max(0, fs.fillTargetL - car.state.fuelLiters) : 0;
-    const met = fs?.breakEvenMet?.fcy;
-    beEl.textContent = `${be.litersL.toFixed(0)} L` +
-      (fs && !fs.noStopNeeded ? ` · need ${need.toFixed(0)} L now` : '');
-    beEl.className = 'v' + (met ? ' good' : '');
-  }
+  const windowOpen = !!fs && fs.windowOpen && !fs.noStopNeeded;
+  const needL = fs && !fs.noStopNeeded ? Math.max(0, fs.fillTargetL - car.state.fuelLiters) : null;
+  // Both flags, always — the Safety Car is the harder call of the two and the
+  // engineer has no time to work it out once the board is out. The one that is
+  // actually flying is marked so the eye lands on it first.
+  const beCell = key => {
+    const be = fs?.breakEven?.[key] || fuelBreakEven(car, key === 'fcy' ? 'fcy' : 'sc');
+    const label = key === 'fcy' ? 'C60' : 'SC';
+    if (!be) return `<span class="dim">${label} —</span>`;
+    const live = cond.pace === key;
+    const met = windowOpen || (be.rule === 'always') ||
+      (be.rule !== 'never' && needL != null && needL >= be.litersL);
+    const text = windowOpen || be.rule === 'always' ? 'any'
+      : be.rule === 'never' ? 'never'
+      : `${be.litersL.toFixed(0)} L`;
+    return `<span class="${met ? 'good' : ''}${live ? ' live' : ''}">${label} ${text}</span>`;
+  };
+  beEl.innerHTML = beCell('fcy') + ' <i>·</i> ' + beCell('sc') +
+    (needL != null ? ` <small>need ${needL.toFixed(0)} L</small>` : '');
+  beEl.className = 'v bethresh' + (windowOpen ? ' good' : '');
 
   // Low-fuel banner: flashes once the tank is down to the warning laps. Muted
   // while the car is already in the pit lane (the stop is happening) and when

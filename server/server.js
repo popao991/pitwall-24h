@@ -822,7 +822,39 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
     }
   }
 
+  // ---- link heartbeat ----------------------------------------------------
+  // A station on WiFi can lose its link without the TCP socket ever closing:
+  // the wall keeps sending into a dead pipe, the station keeps showing
+  // CONNECTED, and every setting typed on it is silently thrown away. Nothing
+  // else on this connection is reliably periodic — a quiet race with no feed
+  // sends nothing for minutes — so the link needs a pulse of its own. The
+  // protocol ping prunes the dead socket here, which also stops the wall
+  // showing that car's station as live; the application-level one is traffic
+  // the browser can actually see, so the station notices the silence and
+  // reconnects instead of pretending.
+  const HEARTBEAT_MS = 4000;
+  setInterval(() => {
+    const beat = JSON.stringify({ type: 'ping' });
+    for (const client of wss.clients) {
+      if (client.readyState !== 1) continue;
+      // No pong since the last beat: the far end is gone, not just quiet.
+      if (client.isAlive === false) {
+        client.terminate();
+        continue;
+      }
+      client.isAlive = false;
+      try {
+        client.ping();
+        client.send(beat);
+      } catch {
+        client.terminate();
+      }
+    }
+  }, HEARTBEAT_MS);
+
   wss.on('connection', ws => {
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
     ws.send(JSON.stringify({ type: 'state', state }));
     ws.send(JSON.stringify({ type: 'timing', timing: timing.snapshot() }));
     ws.send(JSON.stringify({ type: 'stations', online: stationsOnline() }));

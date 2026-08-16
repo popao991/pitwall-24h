@@ -30,6 +30,7 @@
 
   <div class="station">
     <div class="fcybanner hidden" id="fcy-banner"></div>
+    <div class="fcypreview hidden" id="fcy-preview"></div>
     <div class="fuelwarnbanner hidden" id="fuel-warn"></div>
     <div class="setdecision hidden" id="pit-visit"></div>
     <div class="setdecision hidden" id="set-decision"></div>
@@ -70,7 +71,7 @@
             <div class="kv"><span class="k">To finish (+margin)</span><span class="v" id="fuel-to-end">0 L</span></div>
             <div class="kv"><span class="k">Fuel stops still needed</span><span class="v" id="fuel-stops">—</span></div>
             <div class="kv" title="Open = refuelling now costs no extra time (same total stops); closed = pitting now wastes one extra pit-lane loss"><span class="k">Pit window</span><span class="v" id="fuel-window">—</span></div>
-            <div class="kv" title="With the window shut, a stop under a neutralisation buys an extra stop later — it only pays if the fill is big enough to cover it. This threshold is fixed for the track, so it is the standing call for the next flag."><span class="k">Box under yellow from</span><span class="v" id="fuel-breakeven">—</span></div>
+            <div class="kv" title="With the window shut, a stop under a neutralisation buys an extra stop later — it only pays if the fill is big enough to cover it. Both flags are shown because they differ a lot: the Safety Car circulates far closer to green pace, so it discounts a stop much less than Code 60 does. The thresholds are fixed for the track, so they are the standing call for the next flag; the one that is flying is outlined. Green = the fill this stop would take already clears it."><span class="k">Box under yellow from</span><span class="v" id="fuel-breakeven">—</span></div>
             <div class="kv">
               <span class="k">Correct reading</span>
               <span><input id="fuel-correct" type="number" step="0.5" style="width:70px" title="Set actual fuel on board (L)" />

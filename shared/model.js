@@ -1254,8 +1254,15 @@ export function neutralSpeedKmh(car, pace) {
 export function pitSegments(cfg) {
   const entryToPump = Math.max(0, cfg.pitEntryToPumpSec || 0);
   const pumpToBox = Math.max(0, cfg.pumpToBoxSec || 0);
-  const boxToExit = Math.max(0, cfg.boxToExitSec || 0);
   const driveThrough = Math.max(0, cfg.driveThroughSec || 0);
+  // Every leg falls back to "whatever is left of the through-lane", so that a
+  // lane with nothing measured still costs one full drive-through however the
+  // stop is shaped. Deriving only some of them would make a tyre change look
+  // like it SHORTENS the lane, which is how the marginal cost of box work went
+  // to nearly zero on an unconfigured event.
+  const boxToExit = cfg.boxToExitSec > 0
+    ? cfg.boxToExitSec
+    : Math.max(0, driveThrough - entryToPump - pumpToBox);
   // Rejoining from the rig: whatever is left of the through-lane after the
   // entry leg, unless it is measured separately (a rig off the through-path).
   const pumpToExit = cfg.pumpToExitSec > 0

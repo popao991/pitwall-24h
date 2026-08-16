@@ -69,7 +69,19 @@ mid-race loses nothing.
   panel. It is the standing call for a flag that has not flown yet: *"window
   shut? box under Code 60 only if we need 34 L or more."* With the window open
   the threshold does not apply — the stop was being made anyway and the whole
-  discount is profit.
+  discount is profit. **Both flags are shown**, because they differ far more
+  than people expect: the Safety Car circulates much closer to green pace than
+  Code 60 does, so it discounts a stop far less and its threshold is several
+  times higher. The flag actually flying is outlined; a threshold the current
+  fill already clears turns green.
+- **IF A FLAG DROPS NOW** (automatic, green only): the same maths read forward.
+  A neutralisation gives the crew seconds to decide, and until now the numbers
+  only appeared once the board was already out — exactly when there is no time
+  to read them. Under green a calm strip above the panels answers the question
+  in advance: for this lap's fill, what would a Code 60 and a Safety Car each
+  be worth, and what would tyres cost on top of it. It states the pit window
+  with it, because that is what decides whether the discount is profit or is
+  paying off an extra stop.
 - **Low fuel warning**: once the tank is down to the warning threshold
   (SETTINGS → FUEL → *Low-fuel warning (laps)*, default 5, 0 = off) a banner
   appears with the laps and time left above the safety level — amber first,
@@ -385,6 +397,10 @@ approval — waiting on the engineer*. The tick is set on the car station; the
 wall only reports it. So the crew can lay parts out long before anything is
 called, and knows exactly how much of it is committed.
 
+Nothing on a card scrolls or ends in an ellipsis: the verdict line, the
+station warnings and the crew's note for the stop wrap onto a second line
+instead, because the crew glances up once and has to have the whole answer.
+
 Once a stop is sent the card collapses to that one work order, goes amber
 ("NEXT STOP — PREPARE") and then red ("CAR COMING IN"). A blue card means the
 car is in the pit lane (fuel burn paused); when the stop completes the card
@@ -438,6 +454,20 @@ writes one on demand — e.g. right before experimenting with settings. After a
 crash or a bad mistake, open the list and **RESTORE** a snapshot — every
 connected screen updates instantly and only the minutes since that snapshot
 need re-entering.
+
+**DISPLAY** holds the light/dark theme (as on a station) and the **board
+size** — how large the four cards, the flag strip, the race-control strip and
+the tracker are drawn on this screen. A 4K TV does not make the board more
+readable by itself: it draws the same design in smaller millimetres. The whole
+board scales as one, so a larger setting is the same card seen from closer,
+not the same card with the type swapped, and it resizes while the slider
+moves — set it by standing where the crew stands and dragging until it reads.
+**AUTO** (default) blows the board up to fill the window, which is the right
+start for a TV in the box; a laptop at the desk wants 100%. The slider stops
+where four whole cards stop fitting on this screen, and a board scaled near
+that limit gives back its padding, then the detail lines under each
+instruction, rather than clipping the bottom of a work order. Saved per PC,
+like the theme.
 
 **RESET** (double confirmation) clears the race but keeps every car's setup.
 

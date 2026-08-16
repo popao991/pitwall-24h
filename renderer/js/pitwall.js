@@ -14,18 +14,27 @@ import {
 import { connect } from './net.js';
 import { renderConditionBar } from './condition.js';
 import { icon, applyIcons } from './icons.js';
-import { initTheme, mountThemeSettings } from './theme.js';
+import { initTheme, mountThemeSettings, initWallZoom, mountWallSizeSettings, gradeBoard } from './theme.js';
 import { initHelpToggles } from './help.js';
 import { createTracker } from './trackmap.js';
 import { createRcPanel } from './rcmsg.js';
-import { setMarquee } from './marquee.js';
 
 applyIcons();
 initTheme();
 mountThemeSettings();
+initWallZoom();
+mountWallSizeSettings();
 initHelpToggles();
 
 const $ = id => document.getElementById(id);
+// The verdict lines are written straight in; they wrap when they are long
+// (see .verdict in app.css), so nothing on the board has to travel to be read.
+// The guard keeps an unchanged line's nodes alive across the 1 s render tick.
+const setLine = (el, html) => {
+  if (!el || el.__html === html) return;
+  el.__html = html;
+  el.innerHTML = html;
+};
 const esc = s => String(s).replace(/</g, '&lt;');
 let state = null;
 let timing = null;
@@ -1179,7 +1188,7 @@ function render() {
       stationEl.innerHTML = `${icon('monitor')} no station connected for this car`;
       f('v-sub').style.display = 'none';
       f('verdict').className = 'verdict calm';
-      setMarquee(f('v-main'), '— NO CAR RUNNING —');
+      setLine(f('v-main'), '— NO CAR RUNNING —');
       f('lt').style.display = 'none';
       f('tiles').style.display = 'none';
       f('extra').style.display = 'none';
@@ -1190,11 +1199,11 @@ function render() {
       if (feedWaiting) {
         stationEl.className = 'stationline';
         stationEl.innerHTML = `${icon('timer')} no car #${esc(ltNr)} in the feed yet — check the timing number if this stays`;
-        setMarquee(f('v-main'), '— WAITING ON LIVE TIMING —');
+        setLine(f('v-main'), '— WAITING ON LIVE TIMING —');
       } else {
         stationEl.className = 'stationline lost';
         stationEl.innerHTML = `${icon('warn')} check the car's timing number — Settings → LIVE TIMING`;
-        setMarquee(f('v-main'), `— NO CAR #${esc(ltNr)} IN LIVE TIMING —`);
+        setLine(f('v-main'), `— NO CAR #${esc(ltNr)} IN LIVE TIMING —`);
       }
       f('v-sub').style.display = 'none';
       f('verdict').className = 'verdict calm';
@@ -1264,7 +1273,7 @@ function render() {
       vCls += ' ' + fs.warn.level;
     }
     f('verdict').className = 'verdict ' + vCls;
-    setMarquee(f('v-main'), vHtml);
+    setLine(f('v-main'), vHtml);
 
     // Sub-line: the pit-arrival estimate while it matters, else the fuel
     // window countdown — the band always says when something is next due.
@@ -1273,12 +1282,12 @@ function render() {
     if (etaLine) {
       sub.style.display = '';
       sub.className = 'vsub' + (etaLine.cls ? ' ' + etaLine.cls : '');
-      setMarquee(sub, etaLine.html);
+      setLine(sub, etaLine.html);
     } else if (!inPit && stop.status === 'draft' && clock.running &&
                fs && !fs.noStopNeeded && !fs.windowOpen && !neutralised) {
       sub.style.display = '';
       sub.className = 'vsub';
-      setMarquee(sub, `${icon('fuel')} fuel window in ${fs.lapsToWindow} laps <small>~${fmtMinSec(fs.msToWindow)}</small>`);
+      setLine(sub, `${icon('fuel')} fuel window in ${fs.lapsToWindow} laps <small>~${fmtMinSec(fs.msToWindow)}</small>`);
     } else {
       sub.style.display = 'none';
     }
@@ -1307,6 +1316,9 @@ function render() {
   }
 
   renderTimingCards();
+  // What the cards ended up carrying decides how tight the board has to be
+  // drawn — a stop going live adds a note and two buttons to one card.
+  gradeBoard();
 }
 
 setInterval(render, 1000);

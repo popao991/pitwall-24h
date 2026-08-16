@@ -5,7 +5,7 @@
   <title>PitWall 24H — Pit Wall</title>
   <link rel="stylesheet" href="css/app.css" />
 </head>
-<body class="app-screen">
+<body class="app-screen pw">
   <div class="topbar pwbar" id="topbar">
     <div class="tb-left">
       <button id="btn-back" title="Back to role selection"><i data-icon="back"></i></button>
@@ -305,6 +305,24 @@
           <div id="backup-list"></div>
         </section>
         <section data-pane="display">
+          <h3>Board size — reading the wall from across the garage</h3>
+          <div class="wallsize">
+            <button id="wallsize-auto">AUTO</button>
+            <input id="wallsize-range" type="range" />
+            <span class="num" id="wallsize-val">100%</span>
+          </div>
+          <p class="hint" id="wallsize-hint"></p>
+          <p class="hint help">
+            How large the four cards, the flag strip and the race-control strip are
+            drawn on this screen. The whole board scales together, so a bigger
+            setting is the same card seen from closer, not the same card with the
+            type swapped — the board resizes while the slider moves, so set it by
+            walking to where the crew stands and dragging until it reads. AUTO
+            blows the board up to fill the window, which is the right start for a
+            TV in the box; a laptop at the desk wants 100%. Saved on this PC only,
+            like the theme — the top bar and this settings window stay at desk size
+            either way.
+          </p>
           <h3>Theme</h3>
           <div class="condrow" id="theme-row" style="max-width:440px">
             <button data-theme="auto"><i data-icon="timer"></i> AUTO</button>

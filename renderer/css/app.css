@@ -1328,6 +1328,15 @@ body.app-screen .topbar { flex: 0 0 auto; }
   color: var(--dim);
 }
 .form-grid input { width: 130px; }
+
+/* A setting on its way to the pit wall, and one that never got there: on a
+   station whose link has dropped the edit would otherwise just reappear as the
+   old number a second later, with nothing to say why. */
+.form-grid input.pending, .form-grid select.pending { border-color: var(--amber); }
+.form-grid input.unsent, .form-grid select.unsent {
+  border-color: var(--red);
+  color: var(--red);
+}
 .modal-actions { display: flex; gap: 10px; margin-top: 12px; }
 .hint { color: var(--dim); font-size: 13px; margin-top: 10px; line-height: 1.5; }
 .hint.warn { color: var(--amber); }
@@ -1544,6 +1553,43 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
 @keyframes fcypulse {
   50% { opacity: .6; }
 }
+/* Under green: what the next flag would be worth. Deliberately calm — it is a
+   standing readout, not a call to act, and it must never be mistaken for a
+   neutralisation actually being out. */
+.fcypreview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--dim);
+  border-radius: 10px;
+  padding: 7px 14px;
+  font-size: 14px;
+  font-family: var(--font-num);
+  letter-spacing: 1px;
+}
+.fcypreview.hidden { display: none; }
+.fcypreview b { color: var(--text); letter-spacing: 2px; }
+.fcypreview small { color: var(--dim); letter-spacing: 0; }
+.fcypreview i { color: var(--line); font-style: normal; }
+.fcypreview .ico { width: 15px; height: 15px; flex: none; }
+.fcypreview .good { color: var(--green); font-weight: 700; }
+.fcypreview .no { color: var(--amber); font-weight: 700; }
+/* Both break-even thresholds on one line; the flag that is actually flying is
+   boxed so the eye lands on it without reading the labels. */
+.kv .v.bethresh { font-size: 15px; }
+.kv .v.bethresh .good { color: var(--green); }
+.kv .v.bethresh .dim { color: var(--dim); }
+.kv .v.bethresh i { color: var(--line); font-style: normal; }
+.kv .v.bethresh small { color: var(--dim); font-size: 12px; letter-spacing: 0; }
+.kv .v.bethresh .live {
+  outline: 1px solid var(--amber);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
 /* Low fuel: amber while there is still slack, red + flashing once the stop is
    due within a couple of laps. Same shape as the FCY banner so the eye reads
    both as "act now" strips. */
@@ -1653,6 +1699,25 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
 
 /* ---------- pit wall ---------- */
 
+/* Board size. The cards are read from across the garage, so the whole board
+   is drawn at a scale the crew picks (SETTINGS → DISPLAY, theme.js): zoom
+   takes padding, borders and icons up with the words, so a bigger board is
+   the same card seen closer, not a card with the type swapped. The strips
+   above it carry the flag and race control, which are read from the same
+   distance, so they scale with it; the top bar and the settings modal stay
+   at desk size because they are read by whoever is sitting at the PC. */
+body.pw .condstrip,
+body.pw .rcstrip,
+body.pw .wall,
+body.pw .trkview { zoom: var(--wallzoom, 1); }
+
+/* SETTINGS → DISPLAY → board size: AUTO, or drag until it reads. */
+.wallsize { display: flex; align-items: center; gap: 12px; max-width: 620px; }
+.wallsize button { font-weight: 700; letter-spacing: 1px; }
+.wallsize button.on { background: var(--accent); color: #04121c; border-color: var(--accent); }
+.wallsize input[type="range"] { flex: 1; min-width: 160px; accent-color: var(--accent); }
+.wallsize .num { font-size: 17px; font-weight: 700; min-width: 62px; text-align: right; }
+
 .wall {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -1677,6 +1742,24 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
   min-width: 0;
   overflow: hidden;
 }
+/* Scaled right up on a big board a card ends up with fewer CSS pixels to lay
+   out in, and a live stop (verdict, work order, crew note and both buttons)
+   is the tallest thing it ever carries. Rather than clip the bottom row — the
+   crew would simply never see that brake set — a squeezed card gives back its
+   padding first, then the detail underneath each instruction: at that size
+   the board is read from a distance where "PADS F PF2" is the whole message
+   and "rig +40 L · 28 s" was never going to be read anyway. The engineer's
+   station keeps every figure. theme.js measures the card and sets the class. */
+body.board-tight .wallcard .verdict { padding: 5px 8px; }
+body.board-tight .grabtable th { padding-bottom: 3px; }
+body.board-tight .grabtable td { padding: 2px 8px; }
+body.board-tight .grabtable tfoot td { padding-top: 3px; }
+body.board-tight .wallcard .foot .done,
+body.board-tight .wallcard .foot .inpit { padding: 6px 4px; }
+body.board-min .grabtable td .n { display: none; }
+body.board-min .grabtable tfoot { display: none; }
+body.board-min .wallcard .carid .makemodel { display: none; }
+
 .wallcard.sent { border-color: var(--amber); }
 .wallcard.box { border-color: var(--red); animation: boxflash 0.8s steps(2, start) infinite; }
 .wallcard.inpit { border-color: var(--accent); }
@@ -1695,68 +1778,33 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
 }
 .wallcard .carid { display: flex; flex-direction: column; min-width: 0; }
 .wallcard .carid .carname {
-  font-size: 15px;
+  font-size: 17px;
   font-weight: 700;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .wallcard .carid .makemodel {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .wallcard .incar { margin-left: auto; text-align: right; min-width: 0; }
-.wallcard .incar .lab { font-size: 12px; letter-spacing: 2px; color: var(--dim); }
+.wallcard .incar .lab { font-size: 12.5px; letter-spacing: 2px; color: var(--dim); }
 .wallcard .incar b {
   display: block;
-  font-size: 17px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-size: 20px;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
 }
 
-/* marquee — a nowrap line that scrolls its own content when it overflows
-   instead of clipping the answer. JS (marquee.js) measures the line, adds
-   .mq-on and sets the travel distance; the duration it sets keeps every
-   scrolling line on the page at the same pixels per second. */
-.marquee { overflow: hidden; }
-.marquee .mq-track {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  gap: inherit; /* the line's own gap, so a fitting line lays out unchanged */
-}
-.marquee .mq-item {
-  display: inline-flex;
-  align-items: center;
-  gap: inherit;
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-/* blank run before the text comes round again */
-.marquee .mq-item + .mq-item { margin-left: 48px; }
-.marquee.mq-on { justify-content: flex-start; }
-.marquee.mq-on .mq-track {
-  animation: mq-scroll var(--mq-dur, 8s) linear infinite;
-  will-change: transform;
-}
-@keyframes mq-scroll {
-  from { transform: translateX(0); }
-  to { transform: translateX(var(--mq-shift, 0)); }
-}
-/* No motion: read from the start rather than from the middle of a centred
-   line, and drop the repeat that only exists to make the loop seamless. */
-@media (prefers-reduced-motion: reduce) {
-  .marquee.mq-on .mq-track { animation: none; }
-  .marquee.mq-on .mq-item + .mq-item { display: none; }
-}
-
-/* verdict band — one line that answers "what now?": the stop status, the
-   pit-window verdict or the countdown to the next stop (replaces the old
-   stack of status / strategy / E.T.A. banners) */
+/* verdict band — the line that answers "what now?": the stop status, the
+   pit-window verdict or the countdown to the next stop. It wraps onto a
+   second row when the answer is long — the crew glances up once from the far
+   side of the garage, so nothing here may scroll, be clipped or hide behind
+   an ellipsis, and the grab table below has the height to give. */
 .verdict {
   display: flex;
   flex-direction: column;
@@ -1767,19 +1815,16 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
   border: 1px solid transparent;
 }
 .verdict .vmain {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
+  text-align: center;
+  line-height: 1.25;
   min-width: 0;
-  font-size: 16px;
+  font-size: 18px;
   font-weight: 900;
   letter-spacing: 1px;
-  white-space: nowrap;
   overflow: hidden;
 }
-.verdict .vmain b { font-family: var(--font-num); font-size: 17px; }
-.verdict .vmain small { font-weight: 600; font-size: 12px; letter-spacing: 0.5px; color: var(--dim); }
+.verdict .vmain b { font-family: var(--font-num); font-size: 19px; }
+.verdict .vmain small { font-weight: 600; font-size: 13px; letter-spacing: 0.5px; color: var(--dim); }
 .verdict.calm { color: var(--dim); }
 .verdict.calm .vmain b { color: var(--text); }
 .verdict.good { color: var(--green); }
@@ -1798,19 +1843,16 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
 .verdict .lowfuel { color: var(--red); }
 .verdict.go .lowfuel, .verdict.box .lowfuel { color: #7a0000; }
 .verdict .vsub {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
+  text-align: center;
+  line-height: 1.3;
   min-width: 0;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
   font-family: var(--font-num);
   letter-spacing: 0.5px;
-  white-space: nowrap;
   overflow: hidden;
 }
-.verdict .vsub b { font-size: 15px; }
+.verdict .vsub b { font-size: 16px; }
 .verdict .vsub small { font-weight: 400; color: var(--dim); }
 .verdict .vsub.fcy { color: var(--accent); }
 .verdict .vsub.stale { color: var(--dim); }
@@ -1820,21 +1862,23 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
   .verdict.go { animation: none; }
 }
 
+/* The words sit off their icons by more than the space between them. */
+.verdict .ico { margin-right: 3px; }
+
 /* station link line — no car on this entry, or its laptop dropped mid-race */
 .wallcard.nocar { opacity: 0.6; border-style: dashed; }
 .wallcard.nocar .foot { display: none; }
 .stationline {
   text-align: center;
-  font-size: 14px;
+  font-size: 15.5px;
   font-weight: 700;
   letter-spacing: 1px;
+  line-height: 1.25;
   padding: 6px 8px;
   border-radius: 8px;
   color: var(--dim);
   background: var(--panel-2);
-  white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 .stationline.lost { color: var(--amber); border: 1px solid var(--amber); }
 
@@ -1885,13 +1929,13 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
   border: 1px solid currentColor;
   border-radius: 4px;
 }
-.grabtable th .sit .ico { width: 12px; height: 12px; flex: none; }
+.grabtable th .sit .ico { width: 14px; height: 14px; flex: none; }
 /* Three situations on one card leaves a narrow column, so the name wraps
    inside its badge rather than spilling past the border into the column next
    to it — but only ever at a space: SAFETY / CAR reads, SAFET / Y CAR does not. */
 .grabtable th .sit b {
   min-width: 0;
-  font-size: 10px;
+  font-size: 12px;
   letter-spacing: 0;
   line-height: 1.2;
   overflow-wrap: break-word;
@@ -1899,7 +1943,7 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
 .grabtable th .when {
   display: block;
   margin-top: 3px;
-  font-size: 10px;
+  font-size: 11.5px;
   letter-spacing: .5px;
   color: var(--dim);
   text-transform: none;
@@ -1918,36 +1962,36 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
 .grabtable td.cat {
   color: var(--text);
   font-family: var(--font-num);
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 700;
   letter-spacing: 1px;
   white-space: nowrap;
   border-right: 1px solid var(--line);
 }
-.grabtable td.cat .ico { width: 17px; height: 17px; vertical-align: -4px; margin-right: 6px; }
+.grabtable td.cat .ico { width: 19px; height: 19px; vertical-align: -4px; margin-right: 6px; }
 /* A long driver name must wrap inside its own cell, never run over the
    column next to it. */
 .grabtable td .v {
   display: block;
-  font-size: 19px;
+  font-size: 23px;
   font-weight: 800;
   line-height: 1.15;
   overflow-wrap: anywhere;
 }
-.grabtable td .n { display: block; font-family: var(--font-num); font-size: 11px; color: var(--dim); }
+.grabtable td .n { display: block; font-family: var(--font-num); font-size: 13px; color: var(--dim); }
 .grabtable td.act { background: var(--fcy-bg); }
 .grabtable td.act .v { color: var(--amber); }
 .grabtable td.crit { background: var(--flash-bg); }
 .grabtable td.crit .v { color: var(--red); }
-.grabtable td.ok .v { color: var(--dim); font-weight: 700; font-size: 16px; }
+.grabtable td.ok .v { color: var(--dim); font-weight: 700; font-size: 20px; }
 /* Same instruction as the column beside it: said in full, said quietly. */
-.grabtable td.echo .v { color: var(--dim); font-weight: 700; font-size: 16px; opacity: .75; }
+.grabtable td.echo .v { color: var(--dim); font-weight: 700; font-size: 20px; opacity: .75; }
 .grabtable tr.lim td.cat { color: var(--red); }
 .grabtable tfoot td {
   border-top: 1px solid var(--line);
   border-bottom: none;
   font-family: var(--font-num);
-  font-size: 11px;
+  font-size: 12.5px;
   color: var(--dim);
   padding-top: 6px;
 }
@@ -1955,7 +1999,7 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
 /* Read-only on the wall: the tick is set by the engineer on the station. */
 .wapprove {
   font-family: var(--font-num);
-  font-size: 11.5px;
+  font-size: 13px;
   letter-spacing: 1px;
   color: var(--dim);
   padding: 5px 8px;
@@ -2053,16 +2097,17 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
   text-align: center;
 }
 
-/* under the tiles: stationary estimate + crew notes while a stop is live */
+/* under the tiles: stationary estimate + crew notes while a stop is live.
+   A note the crew wrote for this stop wraps rather than ending in an
+   ellipsis — "check FL wheel …" is worse than no note at all. */
 .wallcard .extra {
   color: var(--amber);
   font-size: 14px;
   font-weight: 700;
   letter-spacing: 0.5px;
   font-family: var(--font-num);
-  white-space: nowrap;
+  line-height: 1.3;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .wallcard .foot { display: flex; gap: 8px; }
@@ -2121,7 +2166,7 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
 /* one-line feed summary on each wall card (sits just above the foot) */
 .ltline {
   padding: 4px 2px 0;
-  font-size: 14px;
+  font-size: 15px;
   font-family: var(--font-num);
   color: var(--dim);
   border-top: 1px solid var(--line);

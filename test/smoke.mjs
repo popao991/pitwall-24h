@@ -275,6 +275,24 @@ check('fcy gain can never exceed what the stop costs under green', fc.gainSec < 
   check('no work at all is a drive-through',
     Math.abs(pitLaneTimeSec(cfg, {}).totalSec - 24) < 0.01);
 
+  // An event with nothing but a drive-through time measured must still charge
+  // one full lane whatever the stop does. Deriving only some legs made the box
+  // path free, so adding a tyre change looked like it SHORTENED the pit lane
+  // and the marginal cost of box work collapsed to about a second.
+  const bare = { driveThroughSec: 24 };
+  for (const [what, opts] of [
+    ['fuel only', { refuelSec: 30 }],
+    ['fuel plus work', { refuelSec: 30, boxWorkSec: 25 }],
+    ['work only', { boxWorkSec: 25 }],
+    ['drive-through', {}]
+  ]) {
+    check(`an unmeasured lane still costs a full drive-through: ${what}`,
+      Math.abs(pitLaneTimeSec(bare, opts).driveSec - 24) < 0.01);
+  }
+  check('box work on an unmeasured lane costs its own time, not less',
+    Math.abs(pitLaneTimeSec(bare, { refuelSec: 30, boxWorkSec: 25 }).totalSec -
+             pitLaneTimeSec(bare, { refuelSec: 30 }).totalSec - 25) < 0.01);
+
   // A series minimum stop time is a floor on the whole visit, so work that
   // fits inside it is free.
   const min = pitLaneTimeSec({ ...cfg, minStopSec: 90 }, { refuelSec: 30 });

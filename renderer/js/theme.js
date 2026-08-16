@@ -137,3 +137,157 @@ export function mountThemeSettings() {
   refresh();
   setInterval(refresh, 30e3);
 }
+
+// ---------------------------------------------------------------------------
+// Board size — how big the pit wall draws itself
+// ---------------------------------------------------------------------------
+// The wall is read from across the garage, so what matters is not how many
+// pixels the TV has but how large the words come out on it. The card layout
+// was drawn for a ~1500×900 window; a 4K panel does not make it more readable,
+// it just draws the same design in smaller millimetres. So the whole board is
+// scaled as one block (zoom carries padding, borders and icons with it, which
+// keeps the hierarchy the card was designed with) and the crew picks the
+// factor that reads from where they stand. AUTO takes the board up to the
+// window's own size — the design at 1500×900 blown up to fill the panel.
+// Saved per screen like the theme: the TV in the box and a laptop showing the
+// same wall want different numbers.
+
+const WALL_KEY = 'wallZoom';
+const WALL_DESIGN_W = 1500;
+const WALL_DESIGN_H = 900;
+export const WALL_ZOOM_MIN = 1;
+// Absolute ceiling, and the least a card may be left with. Below roughly this
+// many CSS pixels a card cannot hold a live stop whatever it gives back, and a
+// board that quietly drops the bottom of the work order is worse than a small
+// one — so the slider stops before that, wherever this screen's limit falls.
+export const WALL_ZOOM_MAX = 2.5;
+const MIN_CARD_PX = 660;
+
+// Stored value: 'auto', or a factor as a string. Anything else reads as auto.
+export function getWallZoom() {
+  const raw = localStorage.getItem(WALL_KEY);
+  if (raw === 'auto' || raw == null) return 'auto';
+  const z = parseFloat(raw);
+  return isFinite(z) ? String(round20(z)) : 'auto';
+}
+export function setWallZoom(z) {
+  localStorage.setItem(WALL_KEY, z === 'auto' ? 'auto' : String(round20(parseFloat(z))));
+}
+
+const round20 = z => Math.round(z * 20) / 20;
+const clampZoom = z => Math.min(maxWallZoom(), Math.max(WALL_ZOOM_MIN, round20(z)));
+
+// The most this screen can be scaled and still show four whole cards.
+export function maxWallZoom() {
+  const wall = document.getElementById('wall');
+  // Screen pixels, not board pixels: the rectangle is unaffected by the zoom
+  // it is being used to choose.
+  const h = wall ? wall.getBoundingClientRect().height : window.innerHeight - 120;
+  return Math.min(WALL_ZOOM_MAX, Math.max(WALL_ZOOM_MIN, round20(h / MIN_CARD_PX)));
+}
+
+// The factor AUTO settles on for this window: the design size blown up to fill
+// it, never below 1 (a small window keeps the design as drawn).
+export function autoWallZoom(w = window.innerWidth, h = window.innerHeight) {
+  return clampZoom(Math.min(w / WALL_DESIGN_W, h / WALL_DESIGN_H));
+}
+
+export function wallZoomFactor() {
+  const z = getWallZoom();
+  return z === 'auto' ? autoWallZoom() : clampZoom(parseFloat(z));
+}
+
+export function applyWallZoom() {
+  document.documentElement.style.setProperty('--wallzoom', String(wallZoomFactor()));
+  gradeBoard();
+}
+
+// Whether the board still fits. Scaled up for a TV a card is left with fewer
+// CSS pixels than the design assumes, and a live stop — verdict, work order,
+// crew note and both buttons — is the tallest thing it ever carries. Rather
+// than clip the bottom of the work order, where the crew would simply never
+// see that brake set, the card gives back its padding first (.board-tight)
+// and then the detail lines under each instruction (.board-min): at that size
+// the board is read from a distance where "PADS F PF2" is the whole message
+// and "rig +40 L · 28 s" was never going to be read anyway. The engineer's
+// station keeps every figure.
+//
+// Measured rather than derived from the zoom factor, because what a card
+// actually gets also depends on the window, on which strips are out and on
+// how much this particular stop has to say. Decided from scratch each time —
+// the classes come off before measuring — so the board cannot oscillate
+// between two levels.
+const SLACK_PX = 2;
+
+function overflowing() {
+  for (const card of document.querySelectorAll('.wallcard')) {
+    if (card.scrollHeight - card.clientHeight > SLACK_PX) return true;
+    const grab = card.querySelector('.grab');
+    if (grab && grab.scrollHeight - grab.clientHeight > SLACK_PX) return true;
+  }
+  return false;
+}
+
+export function gradeBoard() {
+  if (!document.querySelector('.wallcard')) return;
+  const cl = document.body.classList;
+  cl.remove('board-tight', 'board-min');
+  if (!overflowing()) return;
+  cl.add('board-tight');
+  if (overflowing()) cl.add('board-min');
+}
+
+// Pit wall only: the board scales, the top bar and settings do not.
+export function initWallZoom() {
+  applyWallZoom();
+  window.addEventListener('resize', applyWallZoom);
+  // The cards arrive after the first state, and the strips above them come
+  // and go with the flag — both change what a card is left with, and the
+  // strips also change the height the ceiling is worked out from. Re-applying
+  // settles at once: the factor is read from the board's size on screen,
+  // which the zoom it sets does not move.
+  const wall = document.getElementById('wall');
+  if (wall && typeof ResizeObserver === 'function') {
+    new ResizeObserver(() => applyWallZoom()).observe(wall);
+  }
+}
+
+// Wires SETTINGS → DISPLAY → board size: AUTO, or the slider the crew drags
+// until the far side of the garage can read it. The board resizes under the
+// hand, so the setting is judged the only way it can be — by looking at it.
+// Pages without the row do nothing.
+export function mountWallSizeSettings() {
+  const auto = document.getElementById('wallsize-auto');
+  const range = document.getElementById('wallsize-range');
+  const val = document.getElementById('wallsize-val');
+  const hint = document.getElementById('wallsize-hint');
+  if (!auto || !range || !val || !hint) return;
+
+  range.min = String(Math.round(WALL_ZOOM_MIN * 100));
+  range.step = '5';
+
+  const refresh = () => {
+    const isAuto = getWallZoom() === 'auto';
+    const f = wallZoomFactor();
+    const max = maxWallZoom();
+    // The slider stops where four whole cards stop fitting, so it cannot be
+    // dragged into a board that hides the bottom of a work order.
+    range.max = String(Math.round(max * 100));
+    auto.classList.toggle('on', isAuto);
+    if (document.activeElement !== range) range.value = String(Math.round(f * 100));
+    val.textContent = `${Math.round(f * 100)}%`;
+    hint.textContent = (isAuto
+      ? `AUTO — ${Math.round(f * 100)}% fills this ${window.innerWidth}×${window.innerHeight} screen.`
+      : `Held at ${Math.round(f * 100)}% (AUTO would use ${Math.round(autoWallZoom() * 100)}%).`) +
+      ` This screen carries four cards up to ${Math.round(max * 100)}%.`;
+  };
+
+  auto.addEventListener('click', () => { setWallZoom('auto'); applyWallZoom(); refresh(); });
+  range.addEventListener('input', () => {
+    setWallZoom(parseInt(range.value, 10) / 100);
+    applyWallZoom();
+    refresh();
+  });
+  window.addEventListener('resize', refresh);
+  refresh();
+}
