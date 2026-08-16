@@ -291,3 +291,109 @@ export function mountWallSizeSettings() {
   window.addEventListener('resize', refresh);
   refresh();
 }
+
+// ---------------------------------------------------------------------------
+// Page size — how large a station draws itself
+// ---------------------------------------------------------------------------
+// A station has the wall's problem from the other side. The wall is read from
+// across the garage and had to be made bigger; a station is read by one
+// engineer sitting in front of it, so its trouble is not distance but density.
+// The strategy view carries every figure for the car at once, and the page was
+// shrunk until all of it fitted the window, whatever that did to the type: 77%
+// on a 1920×1080 screen, so the 15 px base came out at 11.6 px, and 62% on a
+// 1600×900 laptop, which is under 9 px. Nobody reads that at 03:00, and a
+// number nobody reads is not on the screen in any sense that matters.
+//
+// So the shrink now stops at a floor and what is left over scrolls, and the
+// crew can set the size outright instead. AUTO fills the window in both
+// directions — it also grows the page, which the old ceiling of 100% refused
+// to do, so a 4K panel was being handed the design at 1:1 and drawing it in
+// the same small millimetres the wall was. Saved per screen, like the theme.
+
+const UI_KEY = 'uiZoom';
+// The bottom of the slider is roughly what auto-fit used to do on its own, so
+// a crew that wants the whole page on screen at any size can still have it.
+export const UI_ZOOM_MIN = 0.6;
+export const UI_ZOOM_MAX = 2.5;
+// AUTO will not shrink past this. 90% is the point where the 11 px labels
+// (POS, DRIVER, STINT) are still words rather than texture.
+export const UI_AUTO_FLOOR = 0.9;
+// ...and it is only scaled up while the design still has room across: the
+// layout is a 1fr column beside a 370 px stop card, and below this it starts
+// squeezing the left column instead of enlarging it.
+const MIN_LAYOUT_W = 1180;
+
+// Stored value: 'auto', or a factor as a string. Anything else reads as auto.
+export function getUiZoom() {
+  const raw = localStorage.getItem(UI_KEY);
+  if (raw === 'auto' || raw == null) return 'auto';
+  const z = parseFloat(raw);
+  return isFinite(z) ? String(round20(z)) : 'auto';
+}
+export function setUiZoom(z) {
+  localStorage.setItem(UI_KEY, z === 'auto' ? 'auto' : String(round20(parseFloat(z))));
+}
+
+// The most this screen can be scaled and still have room across.
+export function maxUiZoom(w = window.innerWidth) {
+  return Math.min(UI_ZOOM_MAX, Math.max(UI_ZOOM_MIN, round20(w / MIN_LAYOUT_W)));
+}
+export function clampUiZoom(z) {
+  return Math.min(maxUiZoom(), Math.max(UI_ZOOM_MIN, round20(z)));
+}
+
+// station.js measures the page after every render and reports what it settled
+// on. The settings row reads those numbers back, so the hint can say what AUTO
+// is actually doing on this screen and what it would take to fit everything —
+// the two things the crew needs to choose between size and scrolling.
+let lastFit = null;
+let refreshUiSize = null;
+export function noteUiFit(fit) {
+  lastFit = fit;
+  if (refreshUiSize) refreshUiSize();
+}
+
+// Wires SETTINGS → DISPLAY → page size. `apply` is the page's own fit pass
+// (station.js autofit), called so the page resizes under the hand — the same
+// way the board size is judged. Pages without the row do nothing.
+export function mountUiSizeSettings(apply = () => {}) {
+  const auto = document.getElementById('uisize-auto');
+  const range = document.getElementById('uisize-range');
+  const val = document.getElementById('uisize-val');
+  const hint = document.getElementById('uisize-hint');
+  if (!auto || !range || !val || !hint) return;
+
+  range.min = String(Math.round(UI_ZOOM_MIN * 100));
+  range.step = '5';
+
+  refreshUiSize = () => {
+    const stored = getUiZoom();
+    const isAuto = stored === 'auto';
+    // What is on the screen right now, which under AUTO is the only place the
+    // factor exists — the fit pass owns it, this row only reports it.
+    const f = lastFit ? lastFit.applied : (isAuto ? 1 : clampUiZoom(parseFloat(stored)));
+    const pct = Math.round(f * 100);
+    range.max = String(Math.round(maxUiZoom() * 100));
+    auto.classList.toggle('on', isAuto);
+    if (document.activeElement !== range) range.value = String(pct);
+    val.textContent = `${pct}%`;
+
+    const over = lastFit ? lastFit.over : 0;
+    hint.textContent = (isAuto
+      ? `AUTO — ${pct}% on this ${window.innerWidth}×${window.innerHeight} screen` +
+        (f <= UI_AUTO_FLOOR ? ', which is as small as AUTO goes' : '')
+      : `Held at ${pct}%`) +
+      (over > 2
+        ? `. ${over} px of a column is below the fold and scrolls — it all fits on screen at ${lastFit.fitsAt}%.`
+        : '. Everything is on screen.');
+  };
+
+  auto.addEventListener('click', () => { setUiZoom('auto'); apply(); refreshUiSize(); });
+  range.addEventListener('input', () => {
+    setUiZoom(parseInt(range.value, 10) / 100);
+    apply();
+    refreshUiSize();
+  });
+  window.addEventListener('resize', refreshUiSize);
+  refreshUiSize();
+}

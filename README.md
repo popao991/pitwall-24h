@@ -356,8 +356,20 @@ mid-race loses nothing.
     only ever talks to the address configured here; it never switches to
     another server by itself.
   All of it can be tuned live during the race — projections update immediately.
-- The station screen **never scrolls**: on small laptop screens it switches to
-  a compact layout and auto-zooms so everything always fits the window.
+- **Page size** (SETTINGS → DISPLAY, on the station): how large this station
+  draws itself. The strategy view holds every figure for the car at once and
+  used to be shrunk until all of it fitted the window whatever that did to the
+  type — 77% on a 1920×1080 screen, 62% on a 1600×900 laptop, which puts the
+  small labels under 9 px. **AUTO** (default) now stops shrinking at 90% and
+  lets whatever is left over scroll, and it enlarges the page on a screen with
+  room to spare (a 4K panel gets ~155%, where the old 100% ceiling just drew
+  the same design in smaller millimetres). Only the two columns scroll, and
+  each on its own: the flag bar, the race-control strip, the FCY and low-fuel
+  banners and the NOW row stay put, and a long left column never pushes the
+  stop card off the bottom. Drag the slider until it reads from where you sit —
+  the hint says how much is below the fold and at what size it all fits, so
+  drag down if you would rather have the whole page on screen. Small laptop
+  screens also switch to a compact layout. Saved per PC, like the theme.
 - **Light / dark theme** (SETTINGS → DISPLAY, on the station and the pit wall):
   AUTO (default) switches to dark 30 min before sunset and back to light 1 h
   after sunrise, computed from the track's latitude/longitude (default: Circuit

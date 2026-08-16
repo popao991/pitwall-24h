@@ -18,7 +18,10 @@ import {
 import { connect } from './net.js';
 import { renderConditionBar, initConditionControls, renderConditionControls } from './condition.js';
 import { icon, applyIcons } from './icons.js';
-import { initTheme, mountThemeSettings } from './theme.js';
+import {
+  initTheme, mountThemeSettings, mountUiSizeSettings,
+  getUiZoom, clampUiZoom, maxUiZoom, noteUiFit, UI_AUTO_FLOOR
+} from './theme.js';
 import { initHelpToggles } from './help.js';
 import { createTracker } from './trackmap.js';
 import { createRcPanel } from './rcmsg.js';
@@ -26,6 +29,7 @@ import { createRcPanel } from './rcmsg.js';
 applyIcons();
 initTheme();
 mountThemeSettings();
+mountUiSizeSettings(() => autofit());
 initHelpToggles();
 
 const esc = s => String(s).replace(/</g, '&lt;');
@@ -2224,8 +2228,6 @@ function render() {
   autofit();
 }
 
-// ---- auto-fit: shrink the whole page so the station never needs scrolling ----
-
 // ---- the stop panel -------------------------------------------------------
 
 const PLAN_TABS = [['green', 'GREEN'], ['fcy', 'CODE 60'], ['sc', 'SAFETY CAR']];
@@ -2634,7 +2636,30 @@ function tyrePicker(car, selectedId) {
     : ''}</div>`;
 }
 
-function autofit() {
+// How the page is sized. AUTO fits the window between UI_AUTO_FLOOR and what
+// this screen has room for across; a factor set in SETTINGS → DISPLAY is used
+// as given. Either way, anything the window cannot hold scrolls (page-scroll)
+// instead of being shrunk away or clipped.
+const FIT_SLACK = 34;   // breathing room AUTO leaves under the last panel
+const SLACK_MAX = 54;   // ...and how far that may drift before it re-fits
+const SCROLL_ON = 2;    // clipped by more than this -> the columns scroll
+const SCROLL_OFF = 24;  // ...and only stop once there is this much to spare
+const SETTLE_MAX = 3;   // deferred passes allowed after a factor change
+let settlePasses = 0;
+
+// The exact drop below the fold, for the settings hint. Read off the columns
+// rather than worked out from the fit, which rounds a grid's worth of padding
+// and gaps in its own favour and would quote the crew a number they cannot
+// find on the screen.
+function columnOverflow(cols) {
+  return Math.max(0, ...cols.map(c => c.scrollHeight - c.clientHeight));
+}
+
+// `deferred` marks a pass this function asked for itself, so a factor that
+// refuses to converge (each change re-wraps text, which moves the height that
+// chose the factor) strobes for three frames rather than for ever.
+function autofit(deferred = false) {
+  if (!deferred) settlePasses = 0;
   const station = document.querySelector('.station');
   if (!station || !station.children.length) return;
   // Hidden while the scoreboard tab is up — offsetHeights read 0 then, so a
@@ -2666,21 +2691,53 @@ function autofit() {
         (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
     }, 0);
   const need = Math.max(...cols.map(colNeed)) + aboveMain + chromeH + 26; // grid padding + gap
-  // Dead-band control, in real px: re-zoom only when the current zoom clips
-  // the bottom or leaves >40px of slack. Content height jitters a little on
-  // every render (race-control lines wrap and unwrap, values change width),
-  // and reacting to each wiggle makes the whole app visibly resize once a
-  // second — worse, a zoom change re-wraps text, feeding the next wiggle.
-  // Re-zooming onto ~20px of slack keeps that jitter inside the band.
   const cur = Number(document.body.style.zoom) || 1;
   const innerH = window.innerHeight;
-  const realH = need * cur; // need is layout px; × zoom gives real px
-  if (realH - innerH > 2 || innerH - realH > 40) {
-    const z = Math.max(0.55, Math.min(1, (innerH - 20) / need));
-    if (z !== cur) document.body.style.zoom = z;
+  const picked = getUiZoom();
+
+  let z = cur;
+  if (picked === 'auto') {
+    // Dead-band control, in real px: re-fit only when the current factor clips
+    // the bottom or leaves more than SLACK_MAX. Content height jitters a little
+    // on every render (race-control lines wrap and unwrap, values change
+    // width), and reacting to each wiggle makes the whole app visibly resize
+    // once a second — worse, a factor change re-wraps text, feeding the next
+    // wiggle. Fitting onto FIT_SLACK keeps that jitter inside the band.
+    const realH = need * cur; // need is layout px; × zoom gives real px
+    if (realH - innerH > SCROLL_ON || innerH - realH > SLACK_MAX) {
+      z = Math.max(UI_AUTO_FLOOR, Math.min(maxUiZoom(), (innerH - FIT_SLACK) / need));
+    }
+  } else {
+    z = clampUiZoom(parseFloat(picked));
   }
+  z = Math.round(z * 1000) / 1000; // or the last digit alone re-triggers a pass
+
+  if (z !== cur) {
+    document.body.style.zoom = z;
+    // Whether the leftover scrolls is decided on a pass that changed nothing:
+    // mid-settle the height still belongs to the old factor, and acting on it
+    // would flash a scrollbar in and out on the way to a factor that fits.
+    if (settlePasses < SETTLE_MAX) {
+      settlePasses++;
+      requestAnimationFrame(() => autofit(true));
+    }
+  } else {
+    // Hysteresis: the scrollbar itself narrows the columns and re-wraps their
+    // text, so a single threshold lets the bar appear and disappear on a loop.
+    // AUTO aims at FIT_SLACK, which sits clear of SCROLL_OFF, so a page that
+    // fits is never left claiming it scrolls.
+    const spare = innerH - need * z;
+    const cl = document.body.classList;
+    if (spare < -SCROLL_ON) cl.add('page-scroll');
+    else if (spare > SCROLL_OFF) cl.remove('page-scroll');
+  }
+  noteUiFit({
+    applied: z,
+    fitsAt: Math.floor(((innerH - FIT_SLACK) / need) * 100),
+    over: document.body.classList.contains('page-scroll') ? columnOverflow(cols) : 0
+  });
 }
-window.addEventListener('resize', autofit);
+window.addEventListener('resize', () => autofit());
 
 // Meters read like a fuel gauge: the bar shows what is LEFT and drains as the
 // resource is consumed. `left` is the remaining fraction (1 = full, 0 = empty).

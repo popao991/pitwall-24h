@@ -498,6 +498,27 @@
           </p>
         </section>
         <section data-pane="display">
+          <h3>Page size — how large this station draws itself</h3>
+          <div class="sizerow">
+            <button id="uisize-auto">AUTO</button>
+            <input id="uisize-range" type="range" />
+            <span class="num" id="uisize-val">100%</span>
+          </div>
+          <p class="hint" id="uisize-hint"></p>
+          <p class="hint help">
+            The strategy view carries every figure for the car at once, and it
+            used to be shrunk until all of it fitted the window whatever that did
+            to the type — 77% on a 1920&times;1080 screen, 62% on a 1600&times;900
+            laptop, which puts the small labels under 9 px. It now stops at 90%,
+            and whatever is left over scrolls in the columns; the flag bar, the
+            race-control strip, the banners and the NOW row stay put, and the
+            stop card on the right scrolls on its own, so it is never pushed off
+            by the left column. AUTO also enlarges the page on a screen with room
+            to spare, which the old ceiling of 100% refused to do — a 4K panel was
+            being handed the same design in smaller millimetres. Drag until it
+            reads from where you sit; drag down if you would rather have the whole
+            page on screen than a larger one. Saved on this PC only, like the theme.
+          </p>
           <h3>Theme</h3>
           <div class="condrow" id="theme-row" style="max-width:440px">
             <button data-theme="auto"><i data-icon="timer"></i> AUTO</button>
