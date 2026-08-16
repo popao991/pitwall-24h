@@ -600,23 +600,42 @@ function renderLtLinks() {
   }
 }
 
-// Car names: editable on the wall so the whole team's labels can be fixed in
-// one place. The name is a plain car patch, exactly as if the station's own
-// CAR tab had sent it; number, make and model stay on each station.
+// Car numbers and names: editable on the wall so the whole team's labels can
+// be fixed in one place, and so a car whose station is offline can still be
+// given its race number — the number is what the board shows and what the
+// timing feed is matched on, so it cannot wait for a laptop to come back.
+// Both are plain car patches, exactly as if the station's own CAR tab had
+// sent them; make and model stay on each station.
 let carNamesKey = '';
 function renderCarNames() {
   const wrap = $('car-names');
-  const key = sortedCarIds().map(id => id + ':' + state.cars[id].number).join('|');
+  // Slot order, not board order: these rows are where the numbers are typed,
+  // and a list that re-sorts itself under the cursor as a number is entered
+  // is a list you cannot fill in. The board itself still runs in number order.
+  const slots = Object.keys(state.cars)
+    .sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
+  const key = slots.join('|');
   if (key !== carNamesKey) {
     carNamesKey = key;
-    wrap.innerHTML = sortedCarIds().map(id => `
+    wrap.innerHTML = slots.map(id => `
       <div class="preset-row">
-        <span class="nm">CAR ${esc(id)} · #${esc(state.cars[id].number)}</span>
-        <span class="meta">name
-          <input data-car-name="${esc(id)}" type="text" style="width:220px"
-                 placeholder="Car #${esc(state.cars[id].number)}" />
+        <span class="nm">CAR ${esc(id)}</span>
+        <span class="meta">number
+          <input data-car-nr="${esc(id)}" type="text" style="width:70px"
+                 title="The number on the car's door — shown on the board, and what live timing is matched on unless the LIVE TIMING tab links this car to another number" />
+          &nbsp;name
+          <input data-car-name="${esc(id)}" type="text" style="width:220px" />
         </span>
       </div>`).join('');
+    for (const inp of wrap.querySelectorAll('input[data-car-nr]')) {
+      inp.addEventListener('change', () => {
+        const id = inp.dataset.carNr;
+        // Never blank: the board, the pickers and the feed matching all read
+        // this, so an emptied box falls back to the car's slot number.
+        const number = inp.value.trim() || id;
+        net.send({ type: 'update', carId: id, patch: { number } });
+      });
+    }
     for (const inp of wrap.querySelectorAll('input[data-car-name]')) {
       inp.addEventListener('change', () => {
         const id = inp.dataset.carName;
@@ -625,12 +644,18 @@ function renderCarNames() {
       });
     }
   }
-  for (const id of sortedCarIds()) {
-    const inp = wrap.querySelector(`input[data-car-name="${CSS.escape(id)}"]`);
-    if (!inp || document.activeElement === inp) continue;
+  for (const id of slots) {
     const c = state.cars[id];
+    const nrInp = wrap.querySelector(`input[data-car-nr="${CSS.escape(id)}"]`);
+    if (nrInp && document.activeElement !== nrInp) nrInp.value = c.number;
+    const inp = wrap.querySelector(`input[data-car-name="${CSS.escape(id)}"]`);
+    if (!inp) continue;
     // The default name lives in the placeholder, so the box reads empty until
-    // the team actually names the car.
+    // the team actually names the car — and follows the number when it changes,
+    // including while the box itself is being typed into (tabbing straight from
+    // the number is the normal way to fill a row in).
+    inp.placeholder = `Car #${c.number}`;
+    if (document.activeElement === inp) continue;
     inp.value = c.name && c.name !== `Car #${c.number}` ? c.name : '';
   }
 }

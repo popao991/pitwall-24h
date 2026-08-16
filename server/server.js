@@ -900,7 +900,17 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
           if (typeof m.patch.condition === 'string' && m.patch.condition !== car.condition) {
             dirtyFuelRef(car);
           }
+          // A car that has never been named carries "Car #<number>", so a new
+          // race number has to take the name with it — otherwise the board
+          // reads "#27 Car #2" for the rest of the weekend. A car with a real
+          // name keeps it, and a patch that sets both is taken as it stands.
+          const renumbered = m.patch.number != null &&
+            String(m.patch.number) !== String(car.number);
+          const namedByDefault = car.name === `Car #${car.number}`;
           deepMerge(car, m.patch);
+          if (renumbered && namedByDefault && m.patch.name == null) {
+            car.name = `Car #${car.number}`;
+          }
           if (fuelReading) learnFuelReading(car, car.state.fuelLiters, Date.now());
           // A stray patch can never fork a car away from the event settings.
           if (m.patch.config) syncEventConfig(state);

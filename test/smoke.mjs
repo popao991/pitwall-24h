@@ -12,7 +12,7 @@ import {
   driverLapTimes, paceWindowStats, paceWindowLaps, PACE_WINDOW_DEFAULT, PACE_WINDOW_MAX,
   carPickLabel, driverAbbrev, matchTimingDriver, createFeedSeen, wallShowsPlan,
   pitCostSec, pitSegments, pitLaneTimeSec, refuelTimeSec, fuelBreakEven, recommendedStop,
-  greenSpeedKmh, neutralSpeedKmh
+  greenSpeedKmh, neutralSpeedKmh, timingNrOf
 } from '../shared/model.js';
 import WebSocket from 'ws';
 import fs from 'node:fs';
@@ -2520,6 +2520,35 @@ check('stintStats filters outliers', (() => {
   info.timing.engine.reset();
   send4({ type: 'resetRace' });
   await wait(200);
+}
+
+// ---- race numbers, set from the pit wall ----
+// The number heads the car's card and is what live timing is matched on, so
+// the wall can set it without waiting for that car's station to come back.
+// A car still carrying its default name has to follow the new number.
+{
+  // Car 2 was named earlier in this run; put it back to a car nobody has
+  // named, which is the case the default name has to follow.
+  send({ type: 'update', carId: '2', patch: { name: `Car #${state.cars['2'].number}` } });
+  await until(() => state.cars['2'].name === `Car #${state.cars['2'].number}`);
+  send({ type: 'update', carId: '2', patch: { number: '27' } });
+  await until(() => state.cars['2'].number === '27');
+  check('the wall can set a car race number', state.cars['2'].number === '27');
+  check('a default name follows the number', state.cars['2'].name === 'Car #27');
+  check('the renumbered car is matched on its new number',
+    timingNrOf({}, state.cars['2']) === '27');
+
+  send({ type: 'update', carId: '3', patch: { name: 'Zolder Cup' } });
+  await until(() => state.cars['3'].name === 'Zolder Cup');
+  send({ type: 'update', carId: '3', patch: { number: '9728' } });
+  await until(() => state.cars['3'].number === '9728');
+  check('a named car keeps its name when renumbered',
+    state.cars['3'].name === 'Zolder Cup' && state.cars['3'].number === '9728');
+
+  send({ type: 'update', carId: '4', patch: { number: '5', name: 'Five' } });
+  await until(() => state.cars['4'].number === '5');
+  check('a patch setting number and name together is taken as it stands',
+    state.cars['4'].name === 'Five' && state.cars['4'].number === '5');
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);
