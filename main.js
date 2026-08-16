@@ -14,6 +14,19 @@ let win = null;
 
 // ---- auto-update from GitHub releases (installed builds only) ----
 
+// electron-updater's HttpError message carries the whole response header block,
+// which is useless on a pit wall and unreadable on the launcher. Keep the first
+// line and translate the one failure that actually happens in the field: the
+// releases feed 404s when the repo is private or has no published release yet.
+function updateErrorText(e) {
+  const raw = String(e?.message || e || 'unknown error');
+  if (/404/.test(raw) && /releases\.atom|Cannot find/i.test(raw)) {
+    return 'No published release found — check the GitHub repo is public and a release exists.';
+  }
+  const firstLine = raw.split('\n')[0].trim();
+  return firstLine.length > 120 ? firstLine.slice(0, 117) + '…' : firstLine;
+}
+
 function setupUpdater() {
   if (!app.isPackaged) return null;
   try {
@@ -33,7 +46,7 @@ function setupUpdater() {
       });
       if (choice === 0) autoUpdater.quitAndInstall();
     });
-    autoUpdater.on('error', e => console.error('[updater]', e.message));
+    autoUpdater.on('error', e => console.error('[updater]', updateErrorText(e)));
     // quiet check a few seconds after launch
     setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 5000);
     return autoUpdater;
@@ -63,7 +76,7 @@ app.whenReady().then(() => {
       }
       return { status: 'uptodate', message: `You are on the latest version (${app.getVersion()}).` };
     } catch (e) {
-      return { status: 'error', message: 'Update check failed: ' + e.message };
+      return { status: 'error', message: 'Update check failed: ' + updateErrorText(e) };
     }
   });
 
