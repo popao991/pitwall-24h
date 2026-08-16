@@ -779,6 +779,42 @@ body.app-screen .topbar { flex: 0 0 auto; }
 .plantabs button.mk-approved::after { background: var(--green); }
 .plantabs button.mk-stale::after { background: var(--red); }
 
+/* A tab whose situation the wall carries no column for: dashed edge, so the
+   state is visible without opening the tab. */
+.plantabs button.offwall { outline: 1px dashed var(--dim); outline-offset: -2px; }
+.plantabs button.offwall.on { outline-color: #04121c; }
+
+/* Whether the wall carries a column for the situation on screen. Quiet while
+   it does — that is the normal state and needs no shouting — amber once the
+   engineer has taken it down, because a missing column is worth noticing. */
+.planwall {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: -4px 0 8px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 1.3;
+}
+.planwall span { flex: 1; }
+.planwall b { color: var(--text); }
+.planwall .ico { width: 15px; height: 15px; flex: none; }
+.planwall button {
+  flex: none;
+  padding: 3px 8px;
+  font-family: var(--font-num);
+  font-size: 10px;
+  letter-spacing: 1px;
+  border-radius: 5px;
+}
+/* Off the wall is a setting, not an alarm — it takes the amber, but not the
+   fill, so the hold bar under it stays the louder of the two. */
+.planwall.off { border-color: var(--amber); color: var(--amber); }
+.planwall.off b { color: var(--amber); }
+
 /* The card has stopped following the race — said plainly, with the way back. */
 .planhold {
   display: flex;
@@ -1807,8 +1843,11 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
    quiet = nothing to do. LIMIT marks the category forcing the next stop. */
 /* The crew's grab list: parts down the side, one column per situation. The
    yellow column is first because it is the one they can never prepare for
-   once it happens; matching cells collapse to "same" so only the differences
-   pull the eye. */
+   once it happens. Every cell writes its instruction out in full — a column
+   must read on its own from across the garage — and cells that only repeat
+   their neighbour go dim, so colour is spent on the differences alone. Each
+   column is headed by its own flag chip in the condition's own colour, so
+   "this is the code 60 plan, that is the green one" reads before the words. */
 .grab { flex: 1; min-height: 0; overflow: hidden; }
 .grabempty {
   height: 100%;
@@ -1827,21 +1866,65 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
   color: var(--dim);
   text-align: left;
   font-weight: 700;
-  padding: 2px 8px 6px;
+  padding: 2px 6px 6px;
   border-bottom: 1px solid var(--line);
+  vertical-align: bottom;
 }
-.grabtable th.hot { color: var(--amber); }
+/* The parts column carries the shortest words on the card, so it gives the
+   width back to the situations, which have the longest. */
+.grabtable th:first-child { width: 86px; }
+/* The situation badge: flag icon + name, in a box carrying that situation's
+   own colour. The line under it says when the column applies, never what it
+   is. Its own class, not the shared .chip — that one is nowrap, which is
+   exactly wrong in a column this narrow. */
+.grabtable th .sit {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 5px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+}
+.grabtable th .sit .ico { width: 12px; height: 12px; flex: none; }
+/* Three situations on one card leaves a narrow column, so the name wraps
+   inside its badge rather than spilling past the border into the column next
+   to it — but only ever at a space: SAFETY / CAR reads, SAFET / Y CAR does not. */
+.grabtable th .sit b {
+  min-width: 0;
+  font-size: 10px;
+  letter-spacing: 0;
+  line-height: 1.2;
+  overflow-wrap: break-word;
+}
+.grabtable th .when {
+  display: block;
+  margin-top: 3px;
+  font-size: 10px;
+  letter-spacing: .5px;
+  color: var(--dim);
+  text-transform: none;
+}
+/* One colour per situation, the same ones the condition bar uses. */
+.grabtable th.sc-fcy { color: var(--cond-yellow); }
+.grabtable th.sc-fcy .sit { background: var(--fcy-bg); }
+.grabtable th.sc-sc { color: var(--text); }
+.grabtable th.sc-sc .sit { background: color-mix(in srgb, var(--text) 10%, transparent); }
+.grabtable th.sc-green { color: var(--green); }
+.grabtable th.sc-green .sit { background: color-mix(in srgb, var(--green) 12%, transparent); }
+.grabtable th.sc-now { color: var(--red); }
+.grabtable th.sc-now .sit { background: var(--flash-bg); }
 .grabtable td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 .grabtable tbody tr:last-child td { border-bottom: none; }
 .grabtable td.cat {
-  width: 86px;
-  color: var(--dim);
+  color: var(--text);
   font-family: var(--font-num);
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 700;
   letter-spacing: 1px;
   white-space: nowrap;
+  border-right: 1px solid var(--line);
 }
-.grabtable td.cat .ico { width: 14px; height: 14px; vertical-align: -3px; margin-right: 5px; }
+.grabtable td.cat .ico { width: 17px; height: 17px; vertical-align: -4px; margin-right: 6px; }
 /* A long driver name must wrap inside its own cell, never run over the
    column next to it. */
 .grabtable td .v {
@@ -1856,7 +1939,9 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
 .grabtable td.act .v { color: var(--amber); }
 .grabtable td.crit { background: var(--flash-bg); }
 .grabtable td.crit .v { color: var(--red); }
-.grabtable td.ok .v, .grabtable td.same .v { color: var(--dim); font-weight: 700; font-size: 16px; }
+.grabtable td.ok .v { color: var(--dim); font-weight: 700; font-size: 16px; }
+/* Same instruction as the column beside it: said in full, said quietly. */
+.grabtable td.echo .v { color: var(--dim); font-weight: 700; font-size: 16px; opacity: .75; }
 .grabtable tr.lim td.cat { color: var(--red); }
 .grabtable tfoot td {
   border-top: 1px solid var(--line);

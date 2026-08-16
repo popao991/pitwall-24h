@@ -48,6 +48,28 @@ mid-race loses nothing.
   time before the tank hits the safety level, same total time, with the level
   to fill to. The projection always runs on green pace, even during a
   neutralisation, so the window never jumps when a flag flies.
+- **What a neutralisation is worth** (automatic): a stop takes the same seconds
+  whatever is flying — the car drives the same pit lane and stands still for the
+  same fuel. What changes is how much track those seconds buy the *rivals*. So
+  the discount on a stop is simply the time it occupies the pit lane multiplied
+  by how much slower the field is going: at Code 60 (60 km/h) against a
+  140 km/h green average, every second in the lane is handed back at 57%. The
+  entry and exit braking is credited on top — under Code 60 the car is already
+  at the pit limit, so it costs nothing. This is *not* the per-lap time the
+  field drops under yellow: everybody loses that whether they stop or not.
+  Because the discount scales with the length of the stop, a splash and a full
+  tank get different answers, and **tyres and a driver change are discounted by
+  exactly the same factor** — which is why a neutralisation is when to do
+  everything at once. The station banner prices the tyre change both ways.
+- **Box under yellow from N litres** (automatic): when the pit window is
+  *closed*, boxing under a neutralisation buys a whole extra stop later, so it
+  only pays if the fill is big enough for the discount to cover that stop. Every
+  term in that comparison is track geometry and two speeds — none of it moves
+  during a race — so the answer is a **fixed litre figure**, shown in the fuel
+  panel. It is the standing call for a flag that has not flown yet: *"window
+  shut? box under Code 60 only if we need 34 L or more."* With the window open
+  the threshold does not apply — the stop was being made anyway and the whole
+  discount is profit.
 - **Low fuel warning**: once the tank is down to the warning threshold
   (SETTINGS → FUEL → *Low-fuel warning (laps)*, default 5, 0 = off) a banner
   appears with the laps and time left above the safety level — amber first,
@@ -180,6 +202,12 @@ mid-race loses nothing.
     dot on each tab says how far that plan has been written: amber for lines
     pinned, green for approved, red for approved-then-moved.
     **CLEAR** wipes only the plan on screen; the other two stand.
+    A crew that will never split its safety car plan from its code 60 one can
+    **take a situation off the wall** — a line under the tabs says whether the
+    wall carries a column for the plan on screen, and takes it down or puts it
+    back in one tap (the planned green stop always shows; it is what the card
+    is built around). Only the column goes: the plan still stands, still
+    approves, and the wall shows it the moment that flag is actually out.
   - **The call, then the reason**: BOX NOW / BOX WITHIN N LAPS / STAY OUT /
     NO STOP NEEDED, with the arithmetic behind it in a line of plain English
     ("boxing now would add a whole extra stop (+55 s); the window opens in 6
@@ -299,10 +327,12 @@ mid-race loses nothing.
     planned stop (fuel ÷ refuel pump speed + tyre change, sequential) plus the
     total pit time including pit-lane loss. The PIT & FCY tab also shows the
     shared event settings read-only.
-  - **FCY / Code-60 calculator**: shows the FCY lap time, the time gained per
-    FCY lap versus green average pace, and the net pit-lane loss when pitting
-    under FCY (a "free stop" when the gain exceeds the pit-lane loss) — from
-    the track length and FCY speed in the event settings.
+  - **FCY / Code-60 calculator**: shows the FCY lap time, the per-lap time the
+    whole field drops under it, the discount an actual stop earns, and what the
+    stop nets out at — from the track length, the FCY speed and the pit lane
+    legs in the event settings. The per-lap delta and the discount are separate
+    figures on purpose: the first is what the neutralisation does to the race,
+    the second is what pitting under it does for you.
   - **Setup presets**: save the car's complete setup (car info, fuel model,
     wear, pit timing, driver table) under a name and load it back instantly —
     on any car. Presets are stored in the shared state on the pit wall PC, so
@@ -330,13 +360,19 @@ the car stations or the live timing feed.
 
 Each card is a **grab list**: the parts down the side (fuel, tyres, driver,
 brakes) and one column per situation — **what this car needs if a yellow drops
-this second**, against the **planned green stop** and when it is due. Under
-green the code 60 and safety car plans get a column each as soon as the
-engineer has made them say different things (while they agree they share one
-column, *if a yellow now*); under an actual neutralisation only the flag that
-is flying gets a column. Cells that match say *same*, so the only thing that
-stands out is where the columns differ: under a splash-and-dash that is the
-whole message. Figures are the ones
+this second**, against the **planned green stop** and when it is due. Every
+column is headed by its own flag badge in its own colour — amber **CODE 60**,
+white **SAFETY CAR**, green **GREEN** — with the line under it saying when the
+column applies (*if it drops*, *planned · 45:30*), so which plan a column
+answers for reads before the words do. Under green the code 60 and safety car
+plans get a column each as soon as the engineer has made them say different
+things (while they agree they share one column, *code 60 · sc*); under an
+actual neutralisation only the flag that is flying gets a column. Every cell
+always states its own instruction in full — nobody reading one column has to
+look sideways to learn what it asks for — and a cell that only repeats the
+column beside it is simply dimmed, so where the columns *differ* is the only
+thing carrying colour: under a splash-and-dash that is the whole message.
+Figures are the ones
 a mechanic acts on — FULL rather than a litre count that keeps moving, the rig
 figure and seconds, the set number with its mileage, the driver's name, which
 brake parts and the number of each. The row that forces the next stop is marked.
@@ -363,7 +399,7 @@ first stints start automatically at that moment. **START RACE** in the top bar
 always starts immediately instead. Each car's make/model set on its station
 appears on the wall cards automatically. The RACE tab also holds the **event
 settings** — track length, FCY / Code-60 speed, pit lane speed limit, pit lane
-length, pit-lane loss, refuel pump speed, max stint, and the **drive-time
+length, pit-lane loss, refuel pump speed, rig dead time, max stint, and the **drive-time
 regulations** (max drive per rolling 6 h, max drive total, min rest between
 stints; 0 = not enforced) — values that are by nature the same for every car:
 change one here and it is pushed to all four cars instantly (presets and
@@ -372,6 +408,20 @@ PIT & FCY). From the pit lane length and speed limit
 it shows how long the lane takes to drive at the limit, and how much of the
 pit-lane loss that leaves for entry/exit braking and the detour — a quick sanity
 check on the loss figure every other calculation depends on.
+
+Below it, **pit lane legs** breaks the lane into the parts a stop actually
+drives, timed at the pit speed limit: *pit entry → fuel rig*, *rig → box* and
+*box → pit exit*. Two more derive from those unless the lane makes them differ
+(*rig → exit*, for a stop that rejoins without going to the box, and *entry →
+box*, for a stop that takes no fuel), and a **minimum stop time** applies a
+series rule that holds the car between the pit-in and pit-out lines — work that
+fits inside it is free. A worked example under the fields shows what a full fill
+occupies the lane for, with and without a tyre change. Leave every leg at 0 and
+a stop is priced as its stationary work alone, exactly as before.
+
+Each car's **average green speed** (station SETTINGS → FUEL, 0 = derive it from
+that car's average lap) is the yardstick all of this is measured against: it is
+a property of the car's pace rather than the track, so it lives per car.
 
 The RACE tab also holds **saved race setups**: save the race name, duration and
 all event settings under a name and load them back later. Prepare the real

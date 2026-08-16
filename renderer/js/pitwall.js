@@ -6,9 +6,10 @@
 import {
   PORT, carCalcs, raceClock, stopServiceTime, fuelStrategy, pitLaneCalc, pitEta, fmtClock, fmtMinSec,
   stopTyreSet, tyreSetMileage, isNightAt, BRAKE_COMPONENTS, brakeSetsOf, stopBrakeSet,
-  recommendedStops, resolveStop, PIT_SERVICE_MARGIN_SEC, PLAN_LABEL, activePlanKey,
+  recommendedStops, resolveStop, PIT_SERVICE_MARGIN_SEC, PLAN_LABEL, activePlanKey, wallShowsPlan,
   TIMING_FLAGS, fmtLapUs, fmtGapUs, timingNrOf, createFeedSeen, carPickLabel,
-  driverAbbrev, matchTimingDriver
+  driverAbbrev, matchTimingDriver, pitSegments, pitLaneTimeSec, refuelTimeSec,
+  fuelBreakEven
 } from '../../shared/model.js';
 import { connect } from './net.js';
 import { renderConditionBar } from './condition.js';
@@ -774,6 +775,35 @@ function renderSettings() {
           `(${dt > 0 ? 'measured' : 'derived'} drive-through ${usedDt.toFixed(1)} s + ${PIT_SERVICE_MARGIN_SEC} s); ` +
           `anything quicker applies no service.`
         : 'With no drive-through time and no lane geometry, a visit counts as a stop from 25 s.');
+
+    // The legs composed into the stops the crew actually makes. A worked
+    // example beats six raw numbers: it shows what derived, and it shows the
+    // minimum stop time swallowing work when one is set.
+    const seg = pitSegments(state.event);
+    const anyLeg = seg.entryToPump || seg.pumpToBox || seg.boxToExit ||
+      +state.event.pumpToExitSec || +state.event.pitEntryToBoxSec || +state.event.minStopSec;
+    const legsEl = $('pit-legs-derived');
+    if (!anyLeg) {
+      legsEl.textContent = 'No legs set — a stop is priced as its stationary work alone ' +
+        '(refuelling, then tyres), with the pit lane loss added on top.';
+    } else {
+      // Reference fill: a full tank on car 1, the stop the crew pictures.
+      const car1 = state.cars?.['1'];
+      const fillL = car1?.config?.tankLiters || 0;
+      const rig = refuelTimeSec(state.event, fillL);
+      const tyreSec = car1?.config?.tyreChangeSec || 0;
+      const fuelOnly = pitLaneTimeSec(state.event, { refuelSec: rig });
+      const both = pitLaneTimeSec(state.event, { refuelSec: rig, boxWorkSec: tyreSec });
+      const held = both.heldSec > 0
+        ? ` The ${(+state.event.minStopSec || 0).toFixed(0)} s minimum stop still holds the car ` +
+          `${both.heldSec.toFixed(0)} s beyond that, so that much work is free.`
+        : '';
+      legsEl.textContent =
+        `Rejoin from the rig derives to ${seg.pumpToExit.toFixed(1)} s, entry to box to ` +
+        `${seg.entryToBox.toFixed(1)} s. A ${fillL} L fill (${rig.toFixed(1)} s on the rig) ` +
+        `occupies the lane for ${fuelOnly.totalSec.toFixed(1)} s fuel-only, or ` +
+        `${both.totalSec.toFixed(1)} s with a ${tyreSec} s tyre change at the box.${held}`;
+    }
   }
   $('race-hint').textContent = state.race.startMs
     ? (Date.now() < state.race.startMs
@@ -908,11 +938,16 @@ function setTag(set) {
 
 // The crew's grab list. Parts down the side, one column per situation: what
 // this car needs IF A YELLOW DROPS THIS SECOND, and what the planned green
-// stop takes. Cells that match say "same", so the differences are the only
-// thing that stands out — under a splash-and-dash that is the whole message.
+// stop takes. Every cell always states its own instruction in full — somebody
+// reading one column across the garage must never have to look sideways to
+// learn what their column asks for. Cells that only repeat what the column
+// beside them says are dimmed and left unhighlighted, so the differences are
+// still the only thing that pulls the eye.
+// Each column is headed by its own flag chip in its own colour, so which
+// situation a column answers for reads before the words do.
 // The engineer keeps a separate plan per situation, so under green the code 60
 // and safety car plans get a column each — unless they say exactly the same
-// thing, in which case they share one and the card stays wide.
+// thing (they share one then), or the engineer has taken one off the wall.
 // Once the engineer sends a stop the card collapses to that one work order.
 function renderGrab(card, car, c, plans, now) {
   const wrap = card.querySelector('[data-f="tiles"]');
@@ -956,30 +991,41 @@ function renderGrab(card, car, c, plans, now) {
   const cats = [['fuel', 'FUEL'], ['tyre', 'TYRES'], ['driver', 'DRIVER'], ['brake', 'BRAKES']];
   let cols;
   if (live) {
-    cols = [{ head: stop.status === 'box' || car.state.inPit ? 'THIS STOP — NOW' : 'THIS STOP', hot: true, rows: rowsOf(stop), foot: `${Math.round(stopServiceTime(car, stop).totalSec)} s stationary` }];
+    cols = [{
+      tone: 'now', ico: 'boxin', lab: 'THIS STOP',
+      when: stop.status === 'box' || car.state.inPit ? 'now' : 'sent to the crew',
+      rows: rowsOf(stop),
+      foot: `${Math.round(stopServiceTime(car, stop).totalSec)} s stationary`
+    }];
   } else {
     // A neutralisation column is what the crew would grab if the flag were out
     // now; under an actual neutralisation only the flag that is flying counts.
-    const neutralCol = (key, head) => {
+    const neutralCol = (key, when) => {
       const r = resolveStop(car, plans[key]);
       return {
-        head, hot: true, rows: rowsOf(r),
+        tone: key, ico: key === 'sc' ? 'safetycar' : 'flag', lab: PLAN_LABEL[key], when,
+        rows: rowsOf(r),
         foot: `${Math.round(stopServiceTime(car, r).totalSec)} s stationary`
       };
     };
     if (plans.live === 'fcy' || plans.live === 'sc') {
-      cols = [neutralCol(plans.live, plans.live === 'fcy' ? 'CODE 60 — NOW' : 'SAFETY CAR — NOW')];
+      // The flag is out: this IS the work order, whatever the engineer chooses
+      // to carry on the wall the rest of the time.
+      cols = [neutralCol(plans.live, 'flying now')];
     } else {
-      const fcy = neutralCol('fcy', 'IF CODE 60');
-      const sc = neutralCol('sc', 'IF SAFETY CAR');
+      // Only the situations this car keeps on the wall. A plan taken down
+      // still stands — it just stops spending a column of the crew's width
+      // saying what the column next to it already says.
+      const shown = ['fcy', 'sc'].filter(k => wallShowsPlan(car, k)).map(k => neutralCol(k, 'if it drops'));
       // Two identical columns teach nothing and cost the width the crew reads
       // from across the garage — they only split once the plans do.
-      const same = fcy.rows.every((cell, i) => cell.v === sc.rows[i].v);
-      cols = same ? [{ ...fcy, head: 'IF A YELLOW NOW' }] : [fcy, sc];
+      const same = shown.length === 2 && shown[0].rows.every((cell, i) => cell.v === shown[1].rows[i].v);
+      cols = same ? [{ ...shown[0], lab: 'CODE 60 · SC', when: 'if either drops' }] : shown;
     }
     const greenR = resolveStop(car, plans.green);
     cols.push({
-      head: `PLANNED · ${plans.green.dueMs != null ? fmtMinSec(Math.max(0, plans.green.dueMs)) : '—'}`,
+      tone: 'green', ico: 'flag', lab: 'GREEN',
+      when: `planned · ${plans.green.dueMs != null ? fmtMinSec(Math.max(0, plans.green.dueMs)) : '—'}`,
       rows: rowsOf(greenR),
       foot: `${Math.round(stopServiceTime(car, greenR).totalSec + (car.config.pitLossSec || 0))} s total`
     });
@@ -989,15 +1035,20 @@ function renderGrab(card, car, c, plans, now) {
   const limIdx = ['fuel', 'tyre', 'driver', 'brake'].indexOf(limRow === 'tyres' ? 'tyre' : limRow);
 
   wrap.innerHTML = `<table class="grabtable">
-    <thead><tr><th></th>${cols.map(col => `<th class="${col.hot ? 'hot' : ''}">${col.head}</th>`).join('')}</tr></thead>
+    <thead><tr><th></th>${cols.map(col => `<th class="sc-${col.tone}">
+      <span class="sit">${icon(col.ico)}<b>${col.lab}</b></span>
+      <span class="when">${col.when}</span></th>`).join('')}</tr></thead>
     <tbody>${cats.map(([ic, label], i) => `
       <tr class="${i === limIdx ? 'lim' : ''}">
         <td class="cat">${icon(ic)}<span>${label}</span></td>
         ${cols.map((col, ci) => {
           const cell = col.rows[i];
-          const same = ci > 0 && cell.v === cols[0].rows[i].v;
-          return `<td class="${same ? 'same' : cell.crit ? 'crit' : cell.act ? 'act' : 'ok'}">
-            <span class="v">${same ? 'same' : cell.v}</span>${!same && cell.n ? `<span class="n">${cell.n}</span>` : ''}</td>`;
+          // Only repeating the column beside it: written out in full all the
+          // same — a column has to be readable on its own — but dimmed and
+          // unhighlighted so colour stays reserved for the differences.
+          const echo = ci > 0 && cell.v === cols[0].rows[i].v;
+          return `<td class="${echo ? 'echo' : cell.crit ? 'crit' : cell.act ? 'act' : 'ok'}">
+            <span class="v">${cell.v}</span>${!echo && cell.n ? `<span class="n">${cell.n}</span>` : ''}</td>`;
         }).join('')}
       </tr>`).join('')}
     </tbody>

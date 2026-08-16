@@ -10,10 +10,10 @@ import {
   currentTyreSet, stopTyreSet, replanFromNow, planVsActual, stintStats, learnedOf,
   tyreSetMileage, tyreLifeLapsOf, tyreKmLeft,
   brakeSetsOf, usableBrakeSets, brakeSetHours,
-  recommendedStops, resolveStop, PLAN_KEYS, PLAN_LABEL, activePlanKey, stopPins,
+  recommendedStops, resolveStop, PLAN_KEYS, PLAN_LABEL, activePlanKey, stopPins, wallShowsPlan,
   fmtClock, fmtMinSec, fmtLap, fmtH,
   TIMING_FLAGS, fmtLapUs, fmtGapUs, timingNrOf, ourTimingNrs, createFeedSeen, carPickLabel,
-  driverAbbrev, matchTimingDriver
+  driverAbbrev, matchTimingDriver, fuelBreakEven, pitCostSec, refuelTimeSec
 } from '../../shared/model.js';
 import { connect } from './net.js';
 import { renderConditionBar, initConditionControls, renderConditionControls } from './condition.js';
@@ -522,6 +522,15 @@ $('plan-tabs').addEventListener('click', e => {
   // it follows whatever is flying again. Same tap in, same tap out.
   const held = state.cars[carId].nextStop.plan;
   send({ type: 'stopPlan', plan: held === b.dataset.plan ? null : b.dataset.plan });
+});
+
+// Take the situation on screen off the wall's grab list, or put it back. The
+// plan is untouched either way — this is only about whether the crew carries a
+// column for a flag that is not flying.
+$('plan-wall').addEventListener('click', e => {
+  const b = e.target.closest('button[data-wall]');
+  if (!b || !state) return;
+  send({ type: 'wallPlan', plan: planTab, show: b.dataset.wall === 'show' });
 });
 
 // "Follow the race again" — the way out of a held tab that does not require
@@ -1977,6 +1986,22 @@ function render() {
           : ` · pit now: net ${fc.netPitLossSec.toFixed(0)} s <small>(vs ${car.config.pitLossSec || 0} s green)</small>`;
       }
     }
+    // Everything in the lane is discounted by the same factor, so a
+    // neutralisation is when to do the work as well as the fuel. Say what a
+    // tyre change actually costs on top while the field is crawling.
+    const tyreSec = car.config.tyreChangeSec || 0;
+    if (tyreSec > 0) {
+      const rig = refuelTimeSec(car.config, fs && !fs.noStopNeeded
+        ? Math.max(0, fs.fillTargetL - car.state.fuelLiters) : 0);
+      const fuelOnly = pitCostSec(car, cond.pace, { refuelSec: rig });
+      const withWork = pitCostSec(car, cond.pace, { refuelSec: rig, boxWorkSec: tyreSec });
+      const nowSec = withWork.lossNeutral - fuelOnly.lossNeutral;
+      const greenSec = withWork.lossGreen - fuelOnly.lossGreen;
+      if (greenSec > nowSec + 0.5) {
+        boxHint += ` · tyres cost <b>${nowSec.toFixed(0)} s</b> extra now ` +
+          `<small>(${greenSec.toFixed(0)} s under green)</small>`;
+      }
+    }
     // Where the car actually is: time to the pit entry from the last timing
     // loop crossing (green pace to the flag, neutralised pace after) — the
     // number the crew needs the moment BOX is called.
@@ -2041,6 +2066,33 @@ function render() {
       winEl.textContent = `opens in ${fs.lapsToWindow} laps (~${fmtMinSec(fs.msToWindow)})`;
       winEl.className = 'v';
     }
+  }
+
+  // The standing call for a flag that has not flown yet. With the window shut,
+  // a stop under a neutralisation buys an extra stop later — it only pays if
+  // the fill is big enough to cover it, and that threshold never moves during
+  // the race. So the crew can be told now what the next Code 60 is worth.
+  const beEl = $('fuel-breakeven');
+  const be = fs?.breakEven?.fcy || fuelBreakEven(car, 'fcy');
+  if (!be) {
+    beEl.textContent = '—';
+    beEl.className = 'v';
+  } else if (fs && fs.windowOpen && !fs.noStopNeeded) {
+    beEl.textContent = 'any stop — the window is already open';
+    beEl.className = 'v good';
+  } else if (be.rule === 'always') {
+    beEl.textContent = `any fill — ${Math.round(be.discount * 100)}% of the lane is free`;
+    beEl.className = 'v good';
+  } else if (be.rule === 'never') {
+    beEl.textContent = `never — even a full tank only covers ${
+      Math.round(be.discount * 100)}% of the extra stop`;
+    beEl.className = 'v';
+  } else {
+    const need = fs && !fs.noStopNeeded ? Math.max(0, fs.fillTargetL - car.state.fuelLiters) : 0;
+    const met = fs?.breakEvenMet?.fcy;
+    beEl.textContent = `${be.litersL.toFixed(0)} L` +
+      (fs && !fs.noStopNeeded ? ` · need ${need.toFixed(0)} L now` : '');
+    beEl.className = 'v' + (met ? ' good' : '');
   }
 
   // Low-fuel banner: flashes once the tank is down to the warning laps. Muted
@@ -2140,6 +2192,7 @@ function plannedBrakes(car) {
 
 let planLinesKey = '';
 let planHoldKey = '';
+let planWallKey = '';
 
 function renderPlanner(car, c, now) {
   const stop = car.nextStop;
@@ -2167,15 +2220,38 @@ function renderPlanner(car, c, now) {
     b.classList.toggle('mk-approved', !!ap && !ap.stale);
     b.classList.toggle('mk-stale', !!ap && !!ap.stale);
     b.classList.toggle('mk-custom', !ap && custom);
+    const onWall = wallShowsPlan(car, id);
+    b.classList.toggle('offwall', !onWall);
     b.title = (id === tab && held
       ? `Holding the ${PLAN_LABEL[id]} plan — tap again to follow the race. `
       : `Write the ${PLAN_LABEL[id]} plan. `) +
-      (custom ? 'Its own lines are pinned here.' : 'Every line follows the app here.');
+      (custom ? 'Its own lines are pinned here. ' : 'Every line follows the app here. ') +
+      (onWall ? '' : 'The wall carries no column for it until the flag is out.');
     b.querySelector('[data-when]').textContent =
       plans.live === id ? 'NOW'
         : p.dueMs != null && p.dueMs > 0 ? fmtMinSec(p.dueMs)
         : id === 'green' ? '—' : 'if it drops';
   }
+
+  // ---- does the wall carry a column for this situation? Two neutralisation
+  // columns that say the same thing are width the crew cannot spare, so the
+  // engineer can take one down. Green never offers the switch: the planned
+  // stop is what the whole card is built around.
+  const wallEl = $('plan-wall');
+  const onWall = wallShowsPlan(car, tab);
+  wallEl.classList.toggle('hidden', tab === 'green');
+  // Rebuilt only when the words change, for the same reason the hold bar is.
+  const wallKey = tab === 'green' ? '' : tab + '|' + onWall;
+  if (wallKey && wallKey !== planWallKey) {
+    wallEl.className = 'planwall' + (onWall ? '' : ' off');
+    wallEl.innerHTML = `${icon('monitor')} <span>` + (onWall
+      ? `The wall carries an <b>IF ${PLAN_LABEL[tab]}</b> column for this car`
+      : `<b>OFF THE WALL</b> — no ${PLAN_LABEL[tab]} column. The plan still stands, ` +
+        `and the wall shows it the moment the flag is out`) +
+      `</span><button data-wall="${onWall ? 'hide' : 'show'}">` +
+      `${onWall ? 'TAKE IT OFF THE WALL' : 'PUT IT BACK'}</button>`;
+  }
+  planWallKey = wallKey;
 
   // Holding a tab means the card has stopped following the race — and SEND
   // would ship this plan, not the one for what is flying. Say so, always.

@@ -128,7 +128,9 @@ export function raceCondition(race, timingFlag = null) {
 // strategy math keeps reading car.config.
 export const EVENT_FIELDS = [
   'trackKm', 'fcySpeedKmh', 'scSpeedKmh', 'pitSpeedKmh', 'pitLaneKm', 'pitLossSec',
-  'driveThroughSec', 'refuelLps', 'maxStintMin',
+  'driveThroughSec', 'refuelLps', 'refuelDeadSec', 'maxStintMin',
+  'pitEntryToPumpSec', 'pumpToExitSec', 'pumpToBoxSec', 'boxToExitSec',
+  'pitEntryToBoxSec', 'minStopSec',
   's1EndKm', 's2EndKm', 's3EndKm', 'pitInKm',
   'reg6hMin', 'regTotalMin', 'regRestMin'
 ];
@@ -146,7 +148,23 @@ export function defaultEvent() {
     // what tells a drive-through from a stop. 0 = derive it.
     driveThroughSec: 0,
     refuelLps: 2.5,
+    // Coupling and decoupling the rig: dead time that costs the same whether
+    // the splash is 5 L or 70 L. Charged once per stop that takes fuel.
+    refuelDeadSec: 0,
     maxStintMin: 65,
+    // Pit lane broken into the legs a stop actually drives, all at the pit
+    // speed limit (see pitSegments). The lane runs entry → rig → box → exit;
+    // a fuel-only stop rejoins from the rig, a stop that also works on the car
+    // carries on to the box. 0 = derive from the other legs.
+    pitEntryToPumpSec: 0, // entry line → fuel rig
+    pumpToExitSec: 0, // rig → exit line (0 = driveThrough − entryToPump)
+    pumpToBoxSec: 0, // rig → working box
+    boxToExitSec: 0, // box → exit line
+    pitEntryToBoxSec: 0, // entry line → box, no fuel (0 = entryToPump + pumpToBox)
+    // Series rulebooks sometimes set a minimum time between the pit-in and
+    // pit-out lines. It is a floor on the whole visit, so work done inside it
+    // is free. 0 = no such rule.
+    minStopSec: 0,
     // Track geometry for the pit-arrival estimate, measured from the S/F line
     // (km). Sector ends place a car by its last completed sector; the pit
     // entry point is where the E.T.A. counts to. 0 = not set (feed geometry
@@ -250,6 +268,18 @@ export function activePlanKey(car, plans) {
 // the app.
 export function stopPins(car, key) {
   return car?.nextStop?.pins?.[key] || {};
+}
+
+// Which of the three situations this car puts a column up for on the wall.
+// The green plan is the card's anchor and always shows — take that away and
+// the crew has no planned stop to read. The two neutralisation columns are the
+// engineer's call: a crew that will never split its safety car plan from its
+// code 60 one gets a column of repeats across the garage instead of
+// information, so they can take one off the wall. Only the column goes — the
+// plan itself stands, and the wall shows it the moment that flag is out.
+export function wallShowsPlan(car, key) {
+  if (key === 'green') return true;
+  return car?.wallPlans?.[key] !== false;
 }
 
 export function emptyStop() {
@@ -684,10 +714,22 @@ export function defaultCar(id, number) {
       brakeLifeH: { padsFront: 8, padsRear: 10, discsFront: 14, discsRear: 16 },
       // How many numbered sets of each are in the rack.
       brakeSets: { ...DEFAULT_BRAKE_SET_COUNT },
+      // The car's own average speed under green, in km/h — the yardstick every
+      // pit-cost comparison is measured against. Set per car because it is a
+      // property of this car's pace, not of the track. 0 = derive it from the
+      // configured average lap for whatever condition the car is running.
+      greenSpeedKmh: 0,
       maxStintMin: 65,
       pitLossSec: 55,
       driveThroughSec: 0, // event setting, mirrored here like the rest
       refuelLps: 2.5,
+      refuelDeadSec: 0,
+      pitEntryToPumpSec: 0,
+      pumpToExitSec: 0,
+      pumpToBoxSec: 0,
+      boxToExitSec: 0,
+      pitEntryToBoxSec: 0,
+      minStopSec: 0,
       tyreChangeSec: 25,
       trackKm: 4.0,
       fcySpeedKmh: 80,
@@ -731,6 +773,10 @@ export function defaultCar(id, number) {
       liveSeenMs: null
     },
     nextStop: emptyStop(),
+    // Which situation columns this car shows on the wall's grab list. Both
+    // neutralisation columns are up by default — the engineer takes one down
+    // when its plan will never differ from the other's.
+    wallPlans: { green: true, fcy: true, sc: true },
     stintHistory: []
   };
 }
@@ -1169,18 +1215,182 @@ export function pitCongestion(cars, race, now, { windowMs = 150e3, horizonMs = 3
   return { perCar, conflicts };
 }
 
+// ---------------------------------------------------------------------------
+// Speeds — the yardsticks every pit-cost comparison is measured against
+// ---------------------------------------------------------------------------
+// The car's average speed under green (km/h). The configured figure wins; with
+// none set it is derived from the average lap for the condition the car is
+// running, so a car left untuned still gets a sane number.
+export function greenSpeedKmh(car, cond = car.condition) {
+  const cfg = car.config;
+  if (cfg.greenSpeedKmh > 0) return cfg.greenSpeedKmh;
+  const lapSec = cfg.avgLapSec?.[cond === 'wet' ? 'wet' : 'dry'] || 0;
+  const trackKm = cfg.trackKm || 0;
+  return lapSec > 0 && trackKm > 0 ? (trackKm / lapSec) * 3600 : 0;
+}
+
+// The speed the FIELD circulates at under a neutralisation (km/h). Code 60 /
+// FCY is a regulated speed and is read as one; the Safety Car train has its own
+// event setting, falling back to the car's SC lap time when it is not set.
+// Returns 0 under green — nothing is neutralised, so there is no discount.
+export function neutralSpeedKmh(car, pace) {
+  const cfg = car.config;
+  if (pace === 'fcy') return cfg.fcySpeedKmh || 0;
+  if (pace !== 'sc') return 0;
+  if (cfg.scSpeedKmh > 0) return cfg.scSpeedKmh;
+  const trackKm = cfg.trackKm || 0;
+  const lapSec = cfg.avgLapSec?.sc || 0;
+  return lapSec > 0 && trackKm > 0 ? (trackKm / lapSec) * 3600 : 0;
+}
+
+// The pit lane as the legs a stop actually drives, all at the speed limit.
+// Three measured figures are enough — the other two derive from them, so the
+// engineer times entry→rig, rig→box and box→exit and the rest follows:
+//
+//   entry ──entryToPump──► RIG ──pumpToBox──► BOX ──boxToExit──► exit
+//         └────────────── pumpToExit (rejoin from the rig) ─────┘
+//         └────── entryToBox (straight past the rig, no fuel) ──┘
+//
+export function pitSegments(cfg) {
+  const entryToPump = Math.max(0, cfg.pitEntryToPumpSec || 0);
+  const pumpToBox = Math.max(0, cfg.pumpToBoxSec || 0);
+  const boxToExit = Math.max(0, cfg.boxToExitSec || 0);
+  const driveThrough = Math.max(0, cfg.driveThroughSec || 0);
+  // Rejoining from the rig: whatever is left of the through-lane after the
+  // entry leg, unless it is measured separately (a rig off the through-path).
+  const pumpToExit = cfg.pumpToExitSec > 0
+    ? cfg.pumpToExitSec
+    : Math.max(0, driveThrough - entryToPump);
+  // A stop with no fuel still drives past the rig to reach the box.
+  const entryToBox = cfg.pitEntryToBoxSec > 0
+    ? cfg.pitEntryToBoxSec
+    : entryToPump + pumpToBox;
+  return { entryToPump, pumpToExit, pumpToBox, boxToExit, entryToBox, driveThrough };
+}
+
+// Seconds the rig is connected for a given fill: the flow itself plus the
+// coupling dead time, which costs the same whether the splash is 5 L or 70 L.
+// No liters, no rig, no dead time.
+export function refuelTimeSec(cfg, addLiters) {
+  if (!(addLiters > 0)) return 0;
+  return addLiters / (cfg.refuelLps || 2.5) + Math.max(0, cfg.refuelDeadSec || 0);
+}
+
+// How long a stop occupies the pit lane, pit-in line to pit-out line: the legs
+// it drives plus the work done standing still. The shape follows what is being
+// done — a fuel-only stop rejoins from the rig, anything more carries on to the
+// box — and a series minimum stop time is a floor on the whole visit.
+//
+// With no segments configured this is just the stationary work, which is what
+// the app assumed before the lane was broken into legs.
+export function pitLaneTimeSec(cfg, { refuelSec = 0, boxWorkSec = 0 } = {}) {
+  const seg = pitSegments(cfg);
+  const fuel = refuelSec > 0;
+  const work = boxWorkSec > 0;
+  let driveSec;
+  if (fuel && work) driveSec = seg.entryToPump + seg.pumpToBox + seg.boxToExit;
+  else if (fuel) driveSec = seg.entryToPump + seg.pumpToExit;
+  else if (work) driveSec = seg.entryToBox + seg.boxToExit;
+  else driveSec = seg.driveThrough;
+  const workSec = refuelSec + boxWorkSec;
+  const rawSec = driveSec + workSec;
+  const minSec = Math.max(0, cfg.minStopSec || 0);
+  return {
+    driveSec, workSec, rawSec,
+    // A minimum stop time makes everything under the floor free: the visit
+    // takes the same time whether the crew stands idle or changes four tyres.
+    heldSec: Math.max(0, minSec - rawSec),
+    totalSec: Math.max(rawSec, minSec)
+  };
+}
+
+// ---------------------------------------------------------------------------
+// What a stop costs, and what a neutralisation discounts it by
+// ---------------------------------------------------------------------------
+// Measure against a rival who stays out. Over a pit visit of T seconds we cover
+// the pit lane — a fixed distance d, whatever is flying — while the rival covers
+// v × T of track at the field's speed v. Our track-position deficit is
+// (v × T − d), and in green-equivalent seconds (distance is the invariant; the
+// flag falls under green) that is (v × T − d) / vGreen. So:
+//
+//   lossGreen   = (vG × T − d) / vG
+//   lossNeutral = (vN × T − d) / vG
+//   gain        = lossGreen − lossNeutral = T × (1 − vN / vG)
+//
+// The lane distance cancels: the discount is simply the time spent in the lane
+// scaled by how much slower the field is going. Every second in there is
+// discounted equally, which is why a neutralisation is when to change tyres and
+// swap drivers as well as refuel.
+//
+// One term sits outside T: braking off the racing line into the lane and
+// rebuilding speed on exit. Under green that costs the slice of the configured
+// pit loss the lane transit does not explain; at Code 60 the car is already at
+// the limit, so it costs nothing. It scales with how far the field's speed sits
+// above the pit lane limit.
+//
+// `pace` is null for green (gain 0), 'fcy' or 'sc' otherwise.
+export function pitCostSec(car, pace, { refuelSec = 0, boxWorkSec = 0 } = {}) {
+  const cfg = car.config;
+  const vG = greenSpeedKmh(car);
+  const lane = pitLaneTimeSec(cfg, { refuelSec, boxWorkSec });
+  const T = lane.totalSec;
+  const laneSec = (cfg.pitLaneKm || 0) > 0 && vG > 0
+    ? ((cfg.pitLaneKm || 0) / vG) * 3600 // time the bypassed track would take at green pace
+    : 0;
+
+  // Entry/exit overhead: the part of the measured green pit loss that driving
+  // the lane at the limit does not account for. Falls out of the figures the
+  // engineer already enters, so it is never guessed at. The measured
+  // drive-through wins over the one derived from lane length and speed limit.
+  const derivedThrough = (cfg.pitLaneKm || 0) > 0 && (cfg.pitSpeedKmh || 0) > 0
+    ? ((cfg.pitLaneKm || 0) / (cfg.pitSpeedKmh || 0)) * 3600
+    : 0;
+  const throughSec = (cfg.driveThroughSec || 0) > 0 ? cfg.driveThroughSec : derivedThrough;
+  const deltaGreen = Math.max(0, (cfg.pitLossSec || 0) - Math.max(0, throughSec - laneSec));
+
+  const lossGreen = T - laneSec + deltaGreen;
+  const vN = neutralSpeedKmh(car, pace);
+  if (!(vG > 0) || !(vN > 0) || vN >= vG) {
+    return {
+      pace: pace || null, vG, vN, T, lane,
+      lossGreen, lossNeutral: lossGreen, gainSec: 0, deltaGreen, deltaNeutral: deltaGreen
+    };
+  }
+
+  const vP = cfg.pitSpeedKmh || 0;
+  // Already at (or below) the pit limit means no braking penalty at all.
+  const span = vG - vP;
+  const ratio = span > 0 ? Math.min(1, Math.max(0, (vN - vP) / span)) : 1;
+  const deltaNeutral = deltaGreen * ratio;
+
+  const lossNeutral = (vN * T) / vG - laneSec + deltaNeutral;
+  return {
+    pace: pace || null, vG, vN, T, lane,
+    lossGreen, lossNeutral,
+    gainSec: Math.max(0, lossGreen - lossNeutral),
+    deltaGreen, deltaNeutral
+  };
+}
+
 // Estimated stationary time for a planned stop, in seconds. The stop's fuel
 // figure is the level to leave with, so liters added = target − on board
 // (the on-board level freezes when the car enters the pit lane). Refuelling
-// and tyre work are assumed sequential (the safe assumption in most endurance
-// series, where no other work is allowed while fuel is flowing).
+// happens at the rig and tyre work at the box, so the two are sequential and
+// the lane legs between them are counted too (see pitLaneTimeSec).
 export function stopServiceTime(car, stop = car.nextStop) {
   const cfg = car.config;
   const target = Number(stop.fuelLiters) || 0;
   const addLiters = target > 0 ? Math.max(0, target - (car.state?.fuelLiters || 0)) : 0;
-  const refuelSec = addLiters / (cfg.refuelLps || 2.5);
+  const refuelSec = refuelTimeSec(cfg, addLiters);
   const tyreSec = stop.tyres ? (cfg.tyreChangeSec || 0) : 0;
-  return { addLiters, refuelSec, tyreSec, totalSec: refuelSec + tyreSec };
+  const lane = pitLaneTimeSec(cfg, { refuelSec, boxWorkSec: tyreSec });
+  return {
+    addLiters, refuelSec, tyreSec,
+    // Time in the lane driving between the legs this stop uses, and time the
+    // series minimum holds the car beyond the work it actually did.
+    laneSec: lane.driveSec, heldSec: lane.heldSec,
+    totalSec: lane.totalSec
+  };
 }
 
 // Time spent driving the pit lane at the speed limit, and how much of the
@@ -1258,14 +1468,23 @@ export function fcyCalc(car) {
   const fcyKmh = cfg.fcySpeedKmh || 0;
   if (!trackKm || !fcyKmh || !greenLapSec) return null;
   const fcyLapSec = (trackKm / fcyKmh) * 3600;
-  const gainSec = fcyLapSec - greenLapSec;
+  // A full tank's worth of fuel is the reference stop when nothing better is
+  // known — this is the fallback panel, shown before a fuel projection exists.
+  const refuelSec = refuelTimeSec(cfg, cfg.tankLiters || 0);
+  const cost = pitCostSec(car, 'fcy', { refuelSec });
   return {
     cond,
     greenLapSec,
-    greenSpeedKmh: (trackKm / greenLapSec) * 3600,
+    greenSpeedKmh: greenSpeedKmh(car),
     fcyLapSec,
-    gainSec,
-    netPitLossSec: (cfg.pitLossSec || 0) - gainSec
+    // Per-lap time every car in the field drops under FCY. It is what the
+    // neutralisation does to the race, NOT what pitting under it gains — the
+    // field loses it whether it stops or not. Kept for display only.
+    fcyLapDeltaSec: fcyLapSec - greenLapSec,
+    // What the stop is actually discounted by, and what it nets out at.
+    gainSec: cost.gainSec,
+    stopSec: cost.T,
+    netPitLossSec: cost.lossGreen - cost.gainSec
   };
 }
 
@@ -1514,10 +1733,27 @@ export function fuelStrategy(car, race, now, calcs = carCalcs(car, race, now)) {
     + calcs.finishMargin;
   const addNeededL = Math.max(0, fuelToEnd - fuelNow);
 
-  // Time discount on a stop taken under the current neutralisation: rivals
-  // lose (slow lap − green lap) every lap, the pitting car loses that anyway.
+  // Level to leave with when pitting now: full tank while more stops follow,
+  // else just enough to finish plus one green lap in hand.
+  const fillTargetL = Math.min(tank, Math.ceil(fuelToEnd + greenBurn));
+  // FUEL ONLY: the rig time this stop would actually take. Box work is priced
+  // separately by recommendedStop — the fuel window must answer the fuel
+  // question on its own.
+  const refuelNowSec = refuelTimeSec(cfg, Math.max(0, fillTargetL - fuelNow));
+
+  // Time discount on a stop taken under the current neutralisation: the pit
+  // visit costs the same seconds either way, but while the field crawls those
+  // seconds buy the rivals far less track. See pitCostSec.
   const pace = calcs.condition.pace;
-  const gainSec = neutralGainSec(car, pace);
+  const cost = pitCostSec(car, pace, { refuelSec: refuelNowSec });
+  const gainSec = cost.gainSec;
+
+  // The standing instruction for a flag that has not flown yet: how many liters
+  // the car must need before a closed-window stop under each neutralisation
+  // pays for the extra stop it buys. Fixed per track and pace, so both are
+  // worked out whatever is flying right now — under green this is what tells
+  // the crew in advance whether the next Code 60 is theirs to take.
+  const breakEven = { fcy: fuelBreakEven(car, 'fcy'), sc: fuelBreakEven(car, 'sc') };
 
   // Low-fuel warning thresholds. lapsToEmpty counts laps above the SAFETY
   // level, so "0 laps" still leaves the reserve. fuelWarnLaps = 0 disables.
@@ -1538,7 +1774,9 @@ export function fuelStrategy(car, race, now, calcs = carCalcs(car, race, now)) {
       fuelToEnd, addNeededL: 0, stopsMin: 0, stopsIfNow: 1,
       lapsToWindow: null, msToWindow: null, windowLapsLeft: null, windowMsLeft: null,
       fillTargetL: null, remainingPitTimeSec: 0,
-      gainSec, extraStopSec: pitLossSec, netPitNowSec: pitLossSec - gainSec,
+      gainSec, stopSec: cost.T, lossGreenSec: cost.lossGreen,
+      extraStopSec: pitLossSec, netPitNowSec: pitLossSec - gainSec,
+      breakEven, breakEvenMet: { fcy: false, sc: false },
       warn
     };
   }
@@ -1561,10 +1799,6 @@ export function fuelStrategy(car, race, now, calcs = carCalcs(car, race, now)) {
     msToWindow = lapsToWindow * calcs.lapMs;
   }
 
-  // Level to leave with when pitting now: full tank while more stops follow,
-  // else just enough to finish plus one green lap in hand.
-  const fillTargetL = Math.min(tank, Math.ceil(fuelToEnd + greenBurn));
-
   return {
     noStopNeeded: false,
     windowOpen,
@@ -1579,9 +1813,24 @@ export function fuelStrategy(car, race, now, calcs = carCalcs(car, race, now)) {
     windowLapsLeft: windowOpen ? calcs.lapsToEmpty : null,
     windowMsLeft: windowOpen ? calcs.msToEmpty : null,
     fillTargetL,
-    // Fewest seconds the rest of the race must spend on fuel stops.
-    remainingPitTimeSec: stopsMin * pitLossSec + addNeededL / refuelLps,
+    // Fewest seconds the rest of the race must spend on fuel stops: one pit
+    // loss per stop, the liters that have to go in, and the rig dead time each
+    // of those stops pays for coupling up.
+    remainingPitTimeSec: stopsMin * (pitLossSec + Math.max(0, cfg.refuelDeadSec || 0))
+      + addNeededL / refuelLps,
     gainSec,
+    // How long this fuel-only stop occupies the lane, and what it costs under
+    // green — the two figures the discount is built from.
+    stopSec: cost.T,
+    lossGreenSec: cost.lossGreen,
+    // The pre-armed call: the fixed litre threshold per neutralisation, and
+    // whether the fill this stop would take already clears it. With the window
+    // open the threshold does not apply — the stop is free money either way.
+    breakEven,
+    breakEvenMet: {
+      fcy: windowOpen || breakEvenMet(breakEven.fcy, fillTargetL - fuelNow),
+      sc: windowOpen || breakEvenMet(breakEven.sc, fillTargetL - fuelNow)
+    },
     extraStopSec: pitLossSec,
     // Net time cost of filling up THIS lap versus the optimal plan
     // (negative = pitting now actually saves time).
@@ -1601,14 +1850,92 @@ export function fuelStrategy(car, race, now, calcs = carCalcs(car, race, now)) {
 // to build a stop under pressure.
 
 // Seconds a stop is discounted by while the field circulates at a neutralised
-// pace: rivals lose (slow lap − green lap) every lap whether they pit or not.
-export function neutralGainSec(car, pace) {
+// pace. The discount is the time the stop occupies the pit lane scaled by how
+// much slower the field is going, so it depends on what the stop actually does
+// — see pitCostSec. `work` is the seconds of box work on top of the fuel.
+export function neutralGainSec(car, pace, { refuelSec = 0, boxWorkSec = 0 } = {}) {
   if (pace !== 'sc' && pace !== 'fcy') return 0;
+  return pitCostSec(car, pace, { refuelSec, boxWorkSec }).gainSec;
+}
+
+// ---------------------------------------------------------------------------
+// The break-even fill: the one number the flag call turns on
+// ---------------------------------------------------------------------------
+// When the fuel window is already open, boxing under a neutralisation always
+// wins — the stop was going to be made anyway and the discount is free money.
+// The call that needs deciding is the other one: the window is CLOSED, so
+// boxing now buys an extra stop later, and it is only worth it if the discount
+// covers that whole extra pit loss.
+//
+//   gain     = T × k + (δgreen − δneutral),  k = 1 − vNeutral / vGreen
+//   T        = laneDrive + refuelSec         (floored by any minimum stop time)
+//   worth it ⟺ gain ≥ pitLoss
+//   ⟺ refuelSec ≥ (pitLoss − Δδ) / k − laneDrive
+//
+// Nothing on the right-hand side moves during a race: it is all track geometry,
+// pit-lane figures and two speeds. So the answer is a FIXED litre figure — take
+// on at least this much and a stop under this neutralisation pays for itself,
+// whatever lap it is and whatever the tank happens to read. That is what makes
+// it usable as a standing instruction: "under Code 60 with a closed window, box
+// only if we need 34 L or more."
+//
+// Does a fill of `addL` liters clear the threshold? 'always' clears on any
+// stop, 'never' on none, otherwise it is the straight comparison.
+export function breakEvenMet(be, addL) {
+  if (!be) return false;
+  if (be.rule === 'always') return true;
+  if (be.rule === 'never') return false;
+  return addL >= be.litersL;
+}
+
+// Returns null when the speeds are not known well enough to answer.
+export function fuelBreakEven(car, pace) {
   const cfg = car.config;
-  const greenLapSec = cfg.avgLapSec[car.condition === 'wet' ? 'wet' : 'dry'] || 0;
-  const fc = fcyCalc(car);
-  const slowLapSec = pace === 'fcy' && fc ? fc.fcyLapSec : paceLapSec(car, pace);
-  return greenLapSec > 0 && slowLapSec > greenLapSec ? slowLapSec - greenLapSec : 0;
+  if (pace !== 'sc' && pace !== 'fcy') return null;
+  const vG = greenSpeedKmh(car);
+  const vN = neutralSpeedKmh(car, pace);
+  if (!(vG > 0) || !(vN > 0) || vN >= vG) return null;
+
+  const k = 1 - vN / vG;
+  const pitLoss = cfg.pitLossSec || 0;
+  const tank = cfg.tankLiters || 0;
+  const lps = cfg.refuelLps || 2.5;
+  const dead = Math.max(0, cfg.refuelDeadSec || 0);
+  const seg = pitSegments(cfg);
+  const laneDrive = seg.entryToPump + seg.pumpToExit;
+
+  // The entry/exit overhead is the same on both sides of the comparison except
+  // for how much of it the neutralisation cancels — price it through pitCostSec
+  // so this never drifts from the model the verdict actually uses.
+  const probe = pitCostSec(car, pace, { refuelSec: 0 });
+  const deltaGain = probe.deltaGreen - probe.deltaNeutral;
+
+  // Seconds in the lane the stop has to reach for the discount to cover an
+  // extra pit loss, then the rig time and liters that get it there.
+  const needSec = (pitLoss - deltaGain) / k;
+  const needRigSec = needSec - laneDrive;
+  const minStop = Math.max(0, cfg.minStopSec || 0);
+
+  // A series minimum stop time is lane time the car spends anyway, so it counts
+  // towards the threshold before a single litre goes in.
+  const freeSec = Math.max(0, minStop - (laneDrive + dead));
+  const litersRaw = (needRigSec - dead - freeSec) * lps;
+  const liters = Math.max(0, litersRaw);
+
+  return {
+    pace, vG, vN,
+    // Fraction of every pit-lane second the neutralisation hands back.
+    discount: k,
+    // Liters that must be needed before a closed-window stop pays for itself.
+    litersL: liters,
+    rigSec: Math.max(0, needRigSec),
+    // Standing instruction shortcuts:
+    //   'always' — even a splash pays (the lane time alone covers the loss)
+    //   'never'  — the tank cannot hold enough to ever cover it
+    //   'above'  — box when the fill needed is at or above litersL
+    rule: litersRaw <= 0 ? 'always' : liters > tank ? 'never' : 'above',
+    tankL: tank
+  };
 }
 
 // Who sits in the car after a stop taken now: a double-stint driver stays for
@@ -1653,7 +1980,6 @@ export function recommendedStop(car, race, now, opts = {}) {
   const fs = opts.fs !== undefined ? opts.fs : fuelStrategy(car, race, now, calcs);
   const pace = opts.pace === undefined ? calcs.condition.pace : opts.pace;
   const neutral = pace === 'sc' || pace === 'fcy';
-  const gainSec = neutralGainSec(car, pace);
   const pitLoss = cfg.pitLossSec || 0;
   const running = calcs.clock.running;
   const rem = calcs.clock.remainingMs;
@@ -1680,7 +2006,7 @@ export function recommendedStop(car, race, now, opts = {}) {
     const addL = Math.max(0, Math.ceil(liters - car.state.fuelLiters));
     fuel = {
       mode, liters, addL,
-      rigSec: Math.round(addL / (cfg.refuelLps || 2.5)),
+      rigSec: Math.round(refuelTimeSec(cfg, addL)),
       why: mode === 'full'
         ? 'more stops follow — nothing is gained by carrying less'
         : 'enough to reach the flag with the finish margin and a lap in hand'
@@ -1722,6 +2048,23 @@ export function recommendedStop(car, race, now, opts = {}) {
     if (leftMs >= rem && rem > 0) continue; // reaches the flag
     if (leftMs < stintMs) brakes.push(b.id);
   }
+
+  // ---- what this stop costs, and what the neutralisation takes off it.
+  // Priced twice: the fuel on its own, and the fuel with the box work bolted
+  // on. The difference is what tyres and a driver actually cost on top — and
+  // it is discounted by the same factor, which is why everything gets done at
+  // once under a neutralisation.
+  const refuelSec = refuelTimeSec(cfg, fuel.addL);
+  const boxWorkSec = tyres.change ? (cfg.tyreChangeSec || 0) : 0;
+  const costFuel = pitCostSec(car, pace, { refuelSec });
+  const costFull = pitCostSec(car, pace, { refuelSec, boxWorkSec });
+  const gainSec = costFull.gainSec;
+  const work = {
+    boxWorkSec,
+    // Marginal cost of the box work on top of a fuel-only stop.
+    greenSec: costFull.lossGreen - costFuel.lossGreen,
+    nowSec: costFull.lossNeutral - costFuel.lossNeutral
+  };
 
   // ---- when, and the call itself
   const warnCrit = fs?.warn?.level === 'crit' && !fs.noStopNeeded;
@@ -1804,7 +2147,8 @@ export function recommendedStop(car, race, now, opts = {}) {
     dueKey, dueMs, dueNote,
     fuel, tyres, driver, brakes,
     stintMs,
-    gainSec, netSec,
+    gainSec, netSec, work,
+    stopSec: costFull.T, lossGreenSec: costFull.lossGreen, lossNowSec: costFull.lossNeutral,
     est: { stationarySec: svc.totalSec, totalSec: svc.totalSec + pitLoss, addLiters: svc.addLiters },
     limit: { key: calcs.limit.key, label: calcs.limit.label, ms: calcs.limit.ms }
   };

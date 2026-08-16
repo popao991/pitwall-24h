@@ -130,11 +130,29 @@
             <label>Pit lane loss (s) <input data-ev="pitLossSec" type="number" step="any" /></label>
             <label title="Time to drive the pit lane without stopping — tells a drive-through from a real stop. 0 = work it out from lane length and speed limit.">Drive-through time (s, 0 = derive) <input data-ev="driveThroughSec" type="number" step="any" min="0" /></label>
             <label>Refuel pump speed (L/s) <input data-ev="refuelLps" type="number" step="any" /></label>
+            <label title="Coupling and decoupling the rig — dead time that costs the same whether the splash is 5 L or a full tank.">Rig dead time (s) <input data-ev="refuelDeadSec" type="number" step="any" min="0" /></label>
             <label>Max stint (min) <input data-ev="maxStintMin" type="number" step="1" /></label>
             <label>Max drive per 6 h (min, 0 = off) <input data-ev="reg6hMin" type="number" step="1" min="0" /></label>
             <label>Max drive total (min, 0 = off) <input data-ev="regTotalMin" type="number" step="1" min="0" /></label>
             <label>Min rest between stints (min, 0 = off) <input data-ev="regRestMin" type="number" step="1" min="0" /></label>
           </div>
+          <h3>Pit lane legs — how long a stop occupies the lane</h3>
+          <p class="hint">
+            Time each leg at the pit speed limit. Three figures are enough — rejoin-from-rig
+            and entry-to-box derive from the others unless the lane makes them differ.
+            A stop that only takes fuel rejoins from the rig; one that also works on the car
+            carries on to the box. Leave everything at 0 and a stop is priced as its
+            stationary work alone, exactly as before.
+          </p>
+          <div class="form-grid">
+            <label>Pit entry → fuel rig (s) <input data-ev="pitEntryToPumpSec" type="number" step="any" min="0" /></label>
+            <label>Fuel rig → box (s) <input data-ev="pumpToBoxSec" type="number" step="any" min="0" /></label>
+            <label>Box → pit exit (s) <input data-ev="boxToExitSec" type="number" step="any" min="0" /></label>
+            <label title="Rejoining straight from the rig without going to the box. 0 = drive-through time minus the entry leg.">Fuel rig → pit exit (s, 0 = derive) <input data-ev="pumpToExitSec" type="number" step="any" min="0" /></label>
+            <label title="A stop that takes no fuel still drives past the rig to reach the box. 0 = entry→rig + rig→box.">Pit entry → box (s, 0 = derive) <input data-ev="pitEntryToBoxSec" type="number" step="any" min="0" /></label>
+            <label title="Series minimum time between the pit-in and pit-out lines. Work done inside it is free. 0 = no such rule.">Minimum stop time (s, 0 = off) <input data-ev="minStopSec" type="number" step="any" min="0" /></label>
+          </div>
+          <p class="hint" id="pit-legs-derived"></p>
           <h3>Pit arrival estimate — track geometry</h3>
           <div class="form-grid">
             <label>Sector 1 ends at (km from S/F) <input data-ev="s1EndKm" type="number" step="any" min="0" /></label>

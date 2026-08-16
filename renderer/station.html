@@ -70,6 +70,7 @@
             <div class="kv"><span class="k">To finish (+margin)</span><span class="v" id="fuel-to-end">0 L</span></div>
             <div class="kv"><span class="k">Fuel stops still needed</span><span class="v" id="fuel-stops">—</span></div>
             <div class="kv" title="Open = refuelling now costs no extra time (same total stops); closed = pitting now wastes one extra pit-lane loss"><span class="k">Pit window</span><span class="v" id="fuel-window">—</span></div>
+            <div class="kv" title="With the window shut, a stop under a neutralisation buys an extra stop later — it only pays if the fill is big enough to cover it. This threshold is fixed for the track, so it is the standing call for the next flag."><span class="k">Box under yellow from</span><span class="v" id="fuel-breakeven">—</span></div>
             <div class="kv">
               <span class="k">Correct reading</span>
               <span><input id="fuel-correct" type="number" step="0.5" style="width:70px" title="Set actual fuel on board (L)" />
@@ -163,6 +164,9 @@
           <button data-plan="fcy"><b>CODE 60</b><span data-when>—</span></button>
           <button data-plan="sc"><b>SAFETY CAR</b><span data-when>—</span></button>
         </div>
+        <!-- Whether the wall carries a speculative column for the situation on
+             screen. Green is never here: the planned stop is the card's anchor. -->
+        <div class="planwall hidden" id="plan-wall"></div>
         <!-- Shown only while a tab is held: the card is no longer following
              the race, and SEND would ship this plan. -->
         <div class="planhold hidden" id="plan-hold"></div>
@@ -304,6 +308,7 @@
             <label>Avg lap wet (s) <input data-path="config.avgLapSec.wet" type="number" step="any" /></label>
             <label>Avg lap Safety Car (s) <input data-path="config.avgLapSec.sc" type="number" step="any" /></label>
             <label>Avg lap FCY / Code 60 (s) <input data-path="config.avgLapSec.fcy" type="number" step="any" /></label>
+            <label title="This car's average speed under green — the yardstick every pit-stop comparison is measured against. 0 = work it out from the average lap above.">Avg green speed (km/h, 0 = derive) <input data-path="config.greenSpeedKmh" type="number" step="any" min="0" /></label>
             <label>Finish margin (L) <input data-path="config.finishFuelL" type="number" step="any" /></label>
             <label>Fuel safety level (L) <input data-path="config.safetyFuelL" type="number" step="any" /></label>
             <label>Low-fuel warning (laps) <input data-path="config.fuelWarnLaps" type="number" step="1" min="0" title="Show the LOW FUEL banner once this few laps remain above the safety level (0 = off)" /></label>

@@ -90,12 +90,29 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
       if (c.condition !== 'dry' && c.condition !== 'wet') c.condition = 'dry';
       c.plan ??= null;
       c.savedPlans ??= {};
+      // Which situations get a column on the wall. A state saved before the
+      // switch existed shows all three, exactly as it did.
+      c.wallPlans ??= {};
+      for (const k of PLAN_KEYS) c.wallPlans[k] ??= true;
+      c.wallPlans.green = true; // the planned stop is never taken off the wall
       c.config.fuelModel ??= 'driver-avg';
       c.config.startFuelL ??= 0;
       c.config.refuelLps ??= 2.5;
       c.config.tyreChangeSec ??= 25;
       c.config.trackKm ??= 4.0;
       c.config.fcySpeedKmh ??= 80;
+      // The pit lane broken into legs, the rig dead time and any series minimum
+      // stop. All default to 0, which reproduces exactly what the app assumed
+      // before the lane had geometry: a stop is its stationary work and nothing
+      // else. Green speed likewise derives from the average lap until it is set.
+      c.config.greenSpeedKmh ??= 0;
+      c.config.refuelDeadSec ??= 0;
+      c.config.pitEntryToPumpSec ??= 0;
+      c.config.pumpToExitSec ??= 0;
+      c.config.pumpToBoxSec ??= 0;
+      c.config.boxToExitSec ??= 0;
+      c.config.pitEntryToBoxSec ??= 0;
+      c.config.minStopSec ??= 0;
       // Separate FCY / Code 60 rates: a car tuned before they existed inherits
       // its Safety Car figures, so nothing changes until they are edited.
       c.config.burnPerLap.fcy ??= c.config.burnPerLap.sc;
@@ -202,12 +219,20 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
       if (car.state.stintLapSec.length > 300) car.state.stintLapSec.shift();
       // Learn pace only under green and out of the pit lane, judged against
       // the rolling average *before* this lap enters it.
-      if (raceCondition(state.race).pace === null && !car.state.inPit) {
+      const green = raceCondition(state.race).pace === null && !car.state.inPit;
+      if (green) {
         learnLapSample(car, car.state.lastLapSec);
       }
       // Feeds the per-lap-time fuel curve; in/out and traffic laps are
-      // filtered out inside pushLapTime.
-      Object.assign(car.state, pushLapTime(car.state.recentLapSec, car.state.lastLapSec));
+      // filtered out inside pushLapTime. Neutralised laps are kept out
+      // altogether: pushLapTime rejects outliers against the window MEDIAN, so
+      // a long enough Code 60 makes crawling the new normal and the average
+      // — which the fuel curve and every green-pace comparison read — quietly
+      // becomes the neutralised lap time. The window freezes instead, holding
+      // the last green pace until the race goes back to racing.
+      if (green) {
+        Object.assign(car.state, pushLapTime(car.state.recentLapSec, car.state.lastLapSec));
+      }
     }
   }
 
@@ -1238,6 +1263,17 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
           hash: stopPlanHash(r),
           stale: false
         };
+        break;
+      }
+
+      // Take one situation's column off the wall's grab list, or put it back.
+      // The plan is untouched: it still stands, still approves, and the wall
+      // still shows it the moment that flag is actually flying — this only
+      // decides whether the crew carries a speculative "IF" column for it.
+      case 'wallPlan': {
+        if (!car || !PLAN_KEYS.includes(m.plan) || m.plan === 'green') break;
+        car.wallPlans ??= { green: true, fcy: true, sc: true };
+        car.wallPlans[m.plan] = m.show !== false;
         break;
       }
 

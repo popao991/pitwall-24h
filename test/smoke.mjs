@@ -10,7 +10,9 @@ import {
   burnAtLapTime, normalizeCurve, pushLapTime, burnDetail, LAP_AVG_WINDOW,
   driveTimeStats, pitCongestion, replanFromNow, planVsActual, stintStats, learnedOf, fmtGapUs,
   driverLapTimes, paceWindowStats, paceWindowLaps, PACE_WINDOW_DEFAULT, PACE_WINDOW_MAX,
-  carPickLabel, driverAbbrev, matchTimingDriver, createFeedSeen
+  carPickLabel, driverAbbrev, matchTimingDriver, createFeedSeen, wallShowsPlan,
+  pitCostSec, pitSegments, pitLaneTimeSec, refuelTimeSec, fuelBreakEven, recommendedStop,
+  greenSpeedKmh, neutralSpeedKmh
 } from '../shared/model.js';
 import WebSocket from 'ws';
 import fs from 'node:fs';
@@ -214,11 +216,123 @@ check('stop service time', Math.abs(stTime.totalSec - 41) < 0.01 &&
 check('stop time without tyres', Math.abs(stopServiceTime(state.cars['1'], { fuelLiters: 100, tyres: false }).totalSec - 16) < 0.01);
 check('target below on-board adds nothing', stopServiceTime(state.cars['1'], { fuelLiters: 30, tyres: false }).totalSec === 0);
 
-// FCY calculator: 4 km at 80 km/h = 180 s lap; green dry 105 s -> +75 s gain; net pit loss 55-75 = -20
+// FCY calculator: 4 km at 80 km/h = 180 s lap against a 105 s green lap. The
+// per-lap delta is 75 s — but that is what the whole FIELD drops, not what
+// pitting under it gains, so it is reported separately from the discount.
+// Green speed 4/105 = 137.14 km/h; a full 100 L fill is 40 s on the rig, and
+// 40 s of lane time at 80 km/h instead of 137.14 gives back 47.41 s.
 const fc = fcyCalc(state.cars['1']);
 check('fcy lap time', Math.abs(fc.fcyLapSec - 180) < 0.01);
-check('fcy gain per lap', Math.abs(fc.gainSec - 75) < 0.01);
-check('fcy net pit loss (free stop)', Math.abs(fc.netPitLossSec - -20) < 0.01);
+check('fcy per-lap delta is the field, not the gain', Math.abs(fc.fcyLapDeltaSec - 75) < 0.01);
+check('fcy gain scales with the stop, not the lap', Math.abs(fc.gainSec - 47.4074) < 0.01);
+check('fcy net pit loss', Math.abs(fc.netPitLossSec - 23.5926) < 0.01);
+check('fcy gain can never exceed what the stop costs under green', fc.gainSec < fc.netPitLossSec + fc.gainSec);
+
+// ---- what a stop costs, and what a neutralisation takes off it ----
+// The whole model in one identity: gain = T × (1 − vN/vG) + (deltaGreen − deltaNeutral).
+{
+  const car = state.cars['1'];
+  check('green speed derives from the average lap', Math.abs(greenSpeedKmh(car) - 137.1429) < 0.01);
+  check('fcy speed is the regulated one', neutralSpeedKmh(car, 'fcy') === 80);
+  check('no neutralisation, no discount', pitCostSec(car, null, { refuelSec: 40 }).gainSec === 0);
+
+  const cost = pitCostSec(car, 'fcy', { refuelSec: 40 });
+  const k = 1 - cost.vN / cost.vG;
+  check('the gain is lane time scaled by how much slower the field is',
+    Math.abs(cost.gainSec - (cost.T * k + (cost.deltaGreen - cost.deltaNeutral))) < 1e-9);
+  check('the gain is exactly the two losses apart',
+    Math.abs(cost.gainSec - (cost.lossGreen - cost.lossNeutral)) < 1e-9);
+  // Twice the fuel is twice the lane time, so the discount grows with it —
+  // the old per-lap model gave the same answer to a splash and a full tank.
+  const half = pitCostSec(car, 'fcy', { refuelSec: 20 });
+  check('a bigger fill earns a bigger discount', cost.gainSec > half.gainSec + 5);
+
+  // Box work is discounted by the same factor as the fuel, which is why a
+  // neutralisation is when to change tyres as well.
+  const withTyres = pitCostSec(car, 'fcy', { refuelSec: 40, boxWorkSec: 25 });
+  const greenMarginal = withTyres.lossGreen - cost.lossGreen;
+  const nowMarginal = withTyres.lossNeutral - cost.lossNeutral;
+  check('tyres cost their full time under green', Math.abs(greenMarginal - 25) < 0.01);
+  check('tyres cost the discounted time under fcy', Math.abs(nowMarginal - 25 * (1 - k)) < 0.01);
+}
+
+// ---- pit lane legs: three measured figures, two derived ----
+{
+  const cfg = { driveThroughSec: 24, pitEntryToPumpSec: 8, pumpToBoxSec: 6, boxToExitSec: 10 };
+  const seg = pitSegments(cfg);
+  check('rejoin from the rig derives from the drive-through', Math.abs(seg.pumpToExit - 16) < 0.01);
+  check('entry to box derives from the two legs before it', Math.abs(seg.entryToBox - 14) < 0.01);
+  check('a measured rejoin wins over the derived one',
+    Math.abs(pitSegments({ ...cfg, pumpToExitSec: 20 }).pumpToExit - 20) < 0.01);
+
+  // A fuel-only stop rejoins from the rig; adding box work carries on past it.
+  check('fuel-only stop drives entry→rig→exit',
+    Math.abs(pitLaneTimeSec(cfg, { refuelSec: 30 }).totalSec - (8 + 16 + 30)) < 0.01);
+  check('fuel plus work drives entry→rig→box→exit',
+    Math.abs(pitLaneTimeSec(cfg, { refuelSec: 30, boxWorkSec: 25 }).totalSec - (8 + 6 + 10 + 30 + 25)) < 0.01);
+  check('a stop with no fuel skips the rig',
+    Math.abs(pitLaneTimeSec(cfg, { boxWorkSec: 25 }).totalSec - (14 + 10 + 25)) < 0.01);
+  check('no work at all is a drive-through',
+    Math.abs(pitLaneTimeSec(cfg, {}).totalSec - 24) < 0.01);
+
+  // A series minimum stop time is a floor on the whole visit, so work that
+  // fits inside it is free.
+  const min = pitLaneTimeSec({ ...cfg, minStopSec: 90 }, { refuelSec: 30 });
+  check('a minimum stop time holds the car', Math.abs(min.totalSec - 90) < 0.01);
+  check('the minimum reports what it swallowed', Math.abs(min.heldSec - 36) < 0.01);
+  check('a stop longer than the minimum is unaffected',
+    Math.abs(pitLaneTimeSec({ ...cfg, minStopSec: 30 }, { refuelSec: 30 }).totalSec - 54) < 0.01);
+
+  // Rig dead time is charged once per fuelling stop, whatever the splash.
+  check('dead time is charged on any fill', Math.abs(refuelTimeSec({ refuelLps: 2.5, refuelDeadSec: 6 }, 25) - 16) < 0.01);
+  check('no fuel means no rig and no dead time', refuelTimeSec({ refuelLps: 2.5, refuelDeadSec: 6 }, 0) === 0);
+}
+
+// ---- the break-even fill: the standing call for the next flag ----
+// Closed window, so a stop under yellow buys an extra stop later. It only pays
+// once the discount covers that whole extra pit loss — a fixed litre figure,
+// because every term in it is track geometry and two speeds.
+{
+  const car = JSON.parse(JSON.stringify(state.cars['1']));
+  Object.assign(car.config, { pitEntryToPumpSec: 8, pumpToBoxSec: 6, boxToExitSec: 10, driveThroughSec: 24 });
+  const be = fuelBreakEven(car, 'fcy');
+  check('break-even names a real litre figure', be.rule === 'above' && be.litersL > 0);
+  check('break-even discount is the speed ratio', Math.abs(be.discount - (1 - 80 / 137.1429)) < 0.001);
+  // The threshold is exactly where the discount overtakes the extra pit loss.
+  const at = l => pitCostSec(car, 'fcy', { refuelSec: refuelTimeSec(car.config, l) }).gainSec;
+  check('one litre under the threshold does not pay', at(be.litersL - 1) < car.config.pitLossSec);
+  check('the threshold itself pays', at(be.litersL) >= car.config.pitLossSec - 1e-6);
+  // It is a property of the track, not of the race: nothing about where the
+  // car is in the stint moves it.
+  const later = JSON.parse(JSON.stringify(car));
+  later.state.fuelLiters = 12;
+  later.state.totalLaps = 200;
+  check('the threshold does not move during the race',
+    Math.abs(fuelBreakEven(later, 'fcy').litersL - be.litersL) < 1e-9);
+  check('lane legs lower the threshold', be.litersL < fuelBreakEven(state.cars['1'], 'fcy').litersL);
+  check('no answer under green', fuelBreakEven(car, null) === null);
+
+  // The threshold is not decoration: the app's own BOX NOW / STAY OUT call
+  // under a closed window has to land on exactly the same side of it. Sweep a
+  // whole tank of fills and check the two never disagree.
+  const beRace = { durationH: 24, startMs: Date.now() - 3600e3, fcy: { mode: 'fcy', active: true, startMs: Date.now(), source: 'manual', flag: null } };
+  let sweepChecked = 0;
+  let sweepAgreed = 0;
+  for (let fuelNow = 5; fuelNow <= 95; fuelNow += 5) {
+    const probe = JSON.parse(JSON.stringify(car));
+    probe.state.fuelLiters = fuelNow;
+    const c = carCalcs(probe, beRace, Date.now());
+    const f = fuelStrategy(probe, beRace, Date.now(), c);
+    if (!f || f.noStopNeeded || f.windowOpen) continue; // threshold only bites on a closed window
+    const plan = recommendedStop(probe, beRace, Date.now(), { calcs: c, fs: f, pace: 'fcy' });
+    if (plan.tyres.change) continue; // fuel only — box work earns its own discount
+    sweepChecked++;
+    const worthIt = plan.netSec <= 0;
+    if (worthIt === f.breakEvenMet.fcy) sweepAgreed++;
+  }
+  check('the sweep actually exercised closed-window fuel-only stops', sweepChecked >= 5);
+  check('the automatic call never disagrees with the break-even', sweepAgreed === sweepChecked);
+}
 
 // pit lane at the limit: 0.4 km at 60 km/h = 24 s; 55 s loss leaves 31 s overhead
 const pl = pitLaneCalc(state.cars['1']);
@@ -310,13 +424,22 @@ fstr = fuelStrategy(fsCar, fsRace(33), fsNow);
 check('no stop needed on a full tank', fstr.noStopNeeded && fstr.verdict === 'noStop' && fstr.stopsMin === 0);
 
 // FCY with the window open: fuel need stays projected on green pace (no
-// "whole race stays FCY" optimism), and the stop is discounted by the gain
-// (4 km at 80 km/h = 180 s FCY lap vs 100 s green → 80 s per lap).
+// "whole race stays FCY" optimism), and the stop is discounted. The window is
+// open, so nothing is wasted by boxing now and the whole discount is profit.
 fsCar.state.fuelLiters = 60;
 const fcyRace = { ...fsRace(33), fcy: { mode: 'fcy', active: true, startMs: fsNow, source: 'manual', flag: null } };
 fstr = fuelStrategy(fsCar, fcyRace, fsNow);
 check('fcy: fuel need stays on green basis', fstr.stopsMin === 1 && Math.abs(fstr.fuelToEnd - 97.4) < 0.01);
-check('fcy: box now saves the gain', fstr.verdict === 'pitNow' && Math.abs(fstr.netPitNowSec + 80) < 0.01);
+check('fcy: box now saves the gain', fstr.verdict === 'pitNow' && fstr.netPitNowSec < 0 &&
+  Math.abs(fstr.netPitNowSec + fstr.gainSec) < 1e-9);
+// The discount is priced on the fuel this stop actually takes — not on a lap
+// delta that would say the same thing for a splash and a full tank.
+check('fcy: the discount follows the fill', Math.abs(fstr.stopSec - (fstr.fillTargetL - 60) / 2.5) < 0.01);
+// Window open means the threshold does not apply: the stop was being made
+// anyway, so there is no extra stop for the discount to have to cover.
+check('fcy: an open window needs no break-even', fstr.windowOpen && fstr.breakEvenMet.fcy === true);
+check('fcy: the break-even is worked out under green too',
+  fuelStrategy(fsCar, fsRace(33), fsNow).breakEven.fcy !== null);
 
 // Low-fuel warning levels (laps counted above the safety reserve).
 fsCar.state.fuelLiters = 3 + 4 * 2.8; // exactly 4 laps of usable fuel
@@ -2037,6 +2160,27 @@ await until(() => state.cars['4'].nextStop.plan === null);
 check('tapping the held tab again follows the race', state.cars['4'].nextStop.plan === null);
 send({ type: 'clearStop', carId: '4', plan: 'sc' });
 await until(() => state.cars['4'].nextStop.status === 'draft');
+
+// ---- which situations get a column on the wall ----
+check('every situation is on the wall to begin with',
+  ['green', 'fcy', 'sc'].every(k => wallShowsPlan(state.cars['4'], k)));
+send({ type: 'wallPlan', carId: '4', plan: 'sc', show: false });
+await until(() => state.cars['4'].wallPlans.sc === false);
+check('the safety car column comes off the wall', !wallShowsPlan(state.cars['4'], 'sc'));
+check('taking a column down leaves the other two up',
+  wallShowsPlan(state.cars['4'], 'fcy') && wallShowsPlan(state.cars['4'], 'green'));
+{
+  // The plan itself is untouched — only the column went.
+  const plansOff = recommendedStops(state.cars['4'], state.race, Date.now());
+  check('the plan behind a hidden column still resolves',
+    resolveStop(state.cars['4'], plansOff.sc) != null);
+}
+send({ type: 'wallPlan', carId: '4', plan: 'green', show: false });
+await wait(120);
+check('the planned stop can never be taken off the wall', wallShowsPlan(state.cars['4'], 'green'));
+send({ type: 'wallPlan', carId: '4', plan: 'sc', show: true });
+await until(() => state.cars['4'].wallPlans.sc === true);
+check('the safety car column goes back up', wallShowsPlan(state.cars['4'], 'sc'));
 
 // a stop nobody has filled in is sent as the app planned it
 send({ type: 'update', carId: '4', patch: { nextStop: emptyStop() } });
