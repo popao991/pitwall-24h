@@ -12,8 +12,10 @@ import {
   FCY_MODES, PORT, defaultTyreSets, reconcileTyreSets, stopTyreSet, stintStats,
   learnLapSample, learnFuelReading, dirtyFuelRef, startFuelOf,
   currentTyreSet, tyreSetMileage, recommendedStops, resolveStop, stopPlanHash,
+  PLAN_KEYS, activePlanKey,
   pitVisitKind, stopServiceTime, BRAKE_COMPONENTS,
-  defaultAllBrakeSets, reconcileBrakeSets, stopBrakeSet, brakeSetsOf, DEFAULT_BRAKE_SET_COUNT
+  defaultAllBrakeSets, reconcileBrakeSets, stopBrakeSet, brakeSetsOf, DEFAULT_BRAKE_SET_COUNT,
+  PACE_WINDOW_DEFAULT
 } from '../shared/model.js';
 import { createTimingService } from './livetiming.js';
 
@@ -100,6 +102,7 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
       c.config.avgLapSec.fcy ??= c.config.avgLapSec.sc;
       c.config.finishFuelL ??= 5;
       c.config.safetyFuelL ??= 3;
+      c.config.paceAvgLaps ??= PACE_WINDOW_DEFAULT;
       c.state.inPit ??= false;
       c.state.pitEnterMs ??= null;
       c.state.avgLapSecLive ??= null;
@@ -114,8 +117,24 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
       // `plan` is null by design — the card follows whatever is flying until
       // the engineer picks a tab — so only add the key when it is missing.
       if (!('plan' in c.nextStop)) c.nextStop.plan = null;
-      c.nextStop.pinned ??= {};
-      c.nextStop.approved ??= null;
+      // Pins and approvals went from one shared set to one set per situation.
+      // A state saved before that gets its single set copied into all three
+      // drawers: nothing the engineer had pinned changes meaning, and the three
+      // plans can be pulled apart from the next tap onwards.
+      if (!c.nextStop.pins) {
+        const shared = c.nextStop.pinned && typeof c.nextStop.pinned === 'object' ? c.nextStop.pinned : {};
+        c.nextStop.pins = { green: { ...shared }, fcy: { ...shared }, sc: { ...shared } };
+      }
+      for (const k of PLAN_KEYS) c.nextStop.pins[k] ??= {};
+      delete c.nextStop.pinned;
+      if (!c.nextStop.approvals) {
+        // The old tick was for whichever situation was selected at the time.
+        const held = PLAN_KEYS.includes(c.nextStop.plan) ? c.nextStop.plan : 'green';
+        c.nextStop.approvals = { green: null, fcy: null, sc: null };
+        c.nextStop.approvals[held] = c.nextStop.approved || null;
+      }
+      for (const k of PLAN_KEYS) c.nextStop.approvals[k] ??= null;
+      delete c.nextStop.approved;
       // Tyre life moved from laps to kilometres: a car tuned in laps keeps the
       // same life by converting it over the track length, so nothing changes
       // until the km figure is edited.
@@ -697,12 +716,12 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
     for (const car of Object.values(state.cars)) {
       try {
         car.autoStop = recommendedStops(car, state.race, now);
-        // An approval is for the plan the engineer read. If any line has moved
-        // materially since, say so rather than letting the tick stand.
-        const ap = car.nextStop.approved;
-        if (ap) {
-          const plan = car.autoStop[car.nextStop.plan || 'green'] || car.autoStop.green;
-          ap.stale = stopPlanHash(resolveStop(car, plan)) !== ap.hash;
+        // An approval is for the plan the engineer read — and each of the three
+        // is approved on its own. If a line of one has moved materially since,
+        // say so on that one rather than letting its tick stand.
+        for (const k of PLAN_KEYS) {
+          const ap = car.nextStop.approvals?.[k];
+          if (ap) ap.stale = stopPlanHash(resolveStop(car, car.autoStop[k])) !== ap.hash;
         }
       } catch (e) {
         car.autoStop = null;
@@ -723,7 +742,9 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
   // engineer's hands, and applyStop keeps executing exactly what is on screen.
   function materialiseStop(car) {
     const plans = car.autoStop || recommendedStops(car, state.race, Date.now());
-    const plan = plans[car.nextStop.plan || 'green'] || plans.green;
+    // The situation the card is showing — the engineer's held tab, else
+    // whatever is flying. Sending has to execute what they were reading.
+    const plan = plans[activePlanKey(car, plans)] || plans.green;
     const r = resolveStop(car, plan);
     Object.assign(car.nextStop, {
       fuelLiters: r.fuelLiters,
@@ -738,6 +759,15 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
       brakeSetIds: { ...r.brakeSetIds }
     });
     return r;
+  }
+
+  // Which of the three plans a message is about: the situation the sender named
+  // (the tab they were looking at when they pressed it), else whatever the card
+  // is following. Naming it explicitly matters — a yellow dropping between the
+  // tap and the message must not move a pin into a different plan.
+  function planKeyFor(car, requested) {
+    if (PLAN_KEYS.includes(requested)) return requested;
+    return activePlanKey(car, car.autoStop || recommendedStops(car, state.race, Date.now()));
   }
 
   function broadcast() {
@@ -1068,7 +1098,10 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
         // Never leave a scrapped set as the plan's chosen part.
         if (set.scrapped) {
           if (car.nextStop.brakeSetIds?.[m.comp] === set.id) car.nextStop.brakeSetIds[m.comp] = null;
-          if (car.nextStop.pinned?.brakeSets?.[m.comp] === set.id) delete car.nextStop.pinned.brakeSets[m.comp];
+          // …in whichever of the three plans it had been chosen for.
+          for (const k of PLAN_KEYS) {
+            if (car.nextStop.pins?.[k]?.brakeSets?.[m.comp] === set.id) delete car.nextStop.pins[k].brakeSets[m.comp];
+          }
         }
         break;
       }
@@ -1148,30 +1181,58 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
       // ---- the stop plan: which situation, which lines are pinned, and the
       // engineer's approval ----
 
-      // Switch the plan being worked on (green / fcy / sc). The other two keep
-      // being computed — this only says which one the stop follows.
+      // Which of the three situations the engineer is working on, and which one
+      // the stop follows. Anything that is not one of the three hands the
+      // choice back to the race: the card tracks whatever is flying again.
       case 'stopPlan':
-        if (car && ['green', 'fcy', 'sc'].includes(m.plan)) car.nextStop.plan = m.plan;
+        if (!car) break;
+        car.nextStop.plan = PLAN_KEYS.includes(m.plan) ? m.plan : null;
         break;
 
-      // Pin one line to a value, or hand it back to the app with value null.
-      // Pinning never freezes the other lines: they keep tracking the race.
-      case 'pinStop': {
-        if (!car || !['fuel', 'tyres', 'driver', 'brakes', 'brakeSets'].includes(m.field)) break;
-        car.nextStop.pinned ??= {};
-        if (m.value == null) delete car.nextStop.pinned[m.field];
-        else car.nextStop.pinned[m.field] = m.value;
-        // The plan the crew was shown has changed under them.
-        if (car.nextStop.approved) car.nextStop.approved.stale = true;
+      // CLEAR on the station: wipe the plan on screen — its pinned lines, its
+      // tick and the stop's own figures — and leave the other two situations
+      // exactly as the engineer wrote them. Clearing the code 60 plan must
+      // never take the safety car plan with it.
+      case 'clearStop': {
+        if (!car) break;
+        const key = planKeyFor(car, m.plan);
+        const fresh = emptyStop();
+        fresh.pins = { ...fresh.pins, ...car.nextStop.pins, [key]: {} };
+        fresh.approvals = { ...fresh.approvals, ...car.nextStop.approvals, [key]: null };
+        fresh.plan = car.nextStop.plan; // stay on the tab that was cleared
+        car.nextStop = fresh;
         break;
       }
 
-      // "I have read this and it is the plan." Freezes the numbers into the
-      // stop so the wall and the crew are looking at something concrete.
+      // Pin one line of ONE situation's plan to a value, or hand it back to the
+      // app with value null. Pinning never freezes the other lines: they keep
+      // tracking the race. It never touches the other two plans either — that
+      // is the whole point of keeping three.
+      case 'pinStop': {
+        if (!car || !['fuel', 'tyres', 'driver', 'brakes', 'brakeSets'].includes(m.field)) break;
+        const key = planKeyFor(car, m.plan);
+        car.nextStop.pins ??= { green: {}, fcy: {}, sc: {} };
+        car.nextStop.pins[key] ??= {};
+        if (m.value == null) delete car.nextStop.pins[key][m.field];
+        else car.nextStop.pins[key][m.field] = m.value;
+        // The plan the crew was shown has changed under them — that one only.
+        if (car.nextStop.approvals?.[key]) car.nextStop.approvals[key].stale = true;
+        break;
+      }
+
+      // "I have read this and it is the plan." Approves one situation; the
+      // other two stand or fall on their own ticks. The situation the stop is
+      // actually following also freezes its numbers into the stop, so the wall
+      // and the crew are looking at something concrete.
       case 'approveStop': {
         if (!car) break;
-        const r = materialiseStop(car);
-        car.nextStop.approved = {
+        const key = planKeyFor(car, m.plan);
+        const plans = car.autoStop || recommendedStops(car, state.race, Date.now());
+        const r = key === activePlanKey(car, plans)
+          ? materialiseStop(car)
+          : resolveStop(car, plans[key]);
+        car.nextStop.approvals ??= { green: null, fcy: null, sc: null };
+        car.nextStop.approvals[key] = {
           by: String(m.by || '').slice(0, 24) || 'engineer',
           atMs: Date.now(),
           hash: stopPlanHash(r),
@@ -1181,7 +1242,7 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
       }
 
       case 'unapproveStop':
-        if (car) car.nextStop.approved = null;
+        if (car && car.nextStop.approvals) car.nextStop.approvals[planKeyFor(car, m.plan)] = null;
         break;
 
       // ---- live timing control (any screen may drive it; the connection

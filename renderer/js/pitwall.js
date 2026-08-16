@@ -6,7 +6,7 @@
 import {
   PORT, carCalcs, raceClock, stopServiceTime, fuelStrategy, pitLaneCalc, pitEta, fmtClock, fmtMinSec,
   stopTyreSet, tyreSetMileage, isNightAt, BRAKE_COMPONENTS, brakeSetsOf, stopBrakeSet,
-  recommendedStops, resolveStop, PIT_SERVICE_MARGIN_SEC,
+  recommendedStops, resolveStop, PIT_SERVICE_MARGIN_SEC, PLAN_LABEL, activePlanKey,
   TIMING_FLAGS, fmtLapUs, fmtGapUs, timingNrOf, createFeedSeen, carPickLabel,
   driverAbbrev, matchTimingDriver
 } from '../../shared/model.js';
@@ -17,6 +17,7 @@ import { initTheme, mountThemeSettings } from './theme.js';
 import { initHelpToggles } from './help.js';
 import { createTracker } from './trackmap.js';
 import { createRcPanel } from './rcmsg.js';
+import { setMarquee } from './marquee.js';
 
 applyIcons();
 initTheme();
@@ -909,6 +910,9 @@ function setTag(set) {
 // this car needs IF A YELLOW DROPS THIS SECOND, and what the planned green
 // stop takes. Cells that match say "same", so the differences are the only
 // thing that stands out — under a splash-and-dash that is the whole message.
+// The engineer keeps a separate plan per situation, so under green the code 60
+// and safety car plans get a column each — unless they say exactly the same
+// thing, in which case they share one and the card stays wide.
 // Once the engineer sends a stop the card collapses to that one work order.
 function renderGrab(card, car, c, plans, now) {
   const wrap = card.querySelector('[data-f="tiles"]');
@@ -954,21 +958,31 @@ function renderGrab(card, car, c, plans, now) {
   if (live) {
     cols = [{ head: stop.status === 'box' || car.state.inPit ? 'THIS STOP — NOW' : 'THIS STOP', hot: true, rows: rowsOf(stop), foot: `${Math.round(stopServiceTime(car, stop).totalSec)} s stationary` }];
   } else {
-    const fcyPlan = plans.live === 'sc' ? plans.sc : plans.fcy;
-    const fcyR = resolveStop(car, fcyPlan);
+    // A neutralisation column is what the crew would grab if the flag were out
+    // now; under an actual neutralisation only the flag that is flying counts.
+    const neutralCol = (key, head) => {
+      const r = resolveStop(car, plans[key]);
+      return {
+        head, hot: true, rows: rowsOf(r),
+        foot: `${Math.round(stopServiceTime(car, r).totalSec)} s stationary`
+      };
+    };
+    if (plans.live === 'fcy' || plans.live === 'sc') {
+      cols = [neutralCol(plans.live, plans.live === 'fcy' ? 'CODE 60 — NOW' : 'SAFETY CAR — NOW')];
+    } else {
+      const fcy = neutralCol('fcy', 'IF CODE 60');
+      const sc = neutralCol('sc', 'IF SAFETY CAR');
+      // Two identical columns teach nothing and cost the width the crew reads
+      // from across the garage — they only split once the plans do.
+      const same = fcy.rows.every((cell, i) => cell.v === sc.rows[i].v);
+      cols = same ? [{ ...fcy, head: 'IF A YELLOW NOW' }] : [fcy, sc];
+    }
     const greenR = resolveStop(car, plans.green);
-    cols = [
-      {
-        head: plans.live === 'fcy' ? 'CODE 60 — NOW' : plans.live === 'sc' ? 'SAFETY CAR — NOW' : 'IF A YELLOW NOW',
-        hot: true, rows: rowsOf(fcyR),
-        foot: `${Math.round(stopServiceTime(car, fcyR).totalSec)} s stationary`
-      },
-      {
-        head: `PLANNED · ${plans.green.dueMs != null ? fmtMinSec(Math.max(0, plans.green.dueMs)) : '—'}`,
-        rows: rowsOf(greenR),
-        foot: `${Math.round(stopServiceTime(car, greenR).totalSec + (car.config.pitLossSec || 0))} s total`
-      }
-    ];
+    cols.push({
+      head: `PLANNED · ${plans.green.dueMs != null ? fmtMinSec(Math.max(0, plans.green.dueMs)) : '—'}`,
+      rows: rowsOf(greenR),
+      foot: `${Math.round(stopServiceTime(car, greenR).totalSec + (car.config.pitLossSec || 0))} s total`
+    });
   }
 
   const limRow = c.clock.running ? (c.limit.key === 'reg' ? 'driver' : c.limit.key) : null;
@@ -991,21 +1005,25 @@ function renderGrab(card, car, c, plans, now) {
   </table>`;
 }
 
-// Has an engineer read this plan? Until they have, the card says so — the crew
-// can still lay out what both columns agree on, they just know nobody has
-// looked yet. Read-only here: the tick is set on the car station.
-function renderApproval(card, car) {
+// Has an engineer read this plan? Each of the three situations is approved on
+// its own, so the line speaks for the one the stop would actually follow — the
+// flag that is flying, or the plan the engineer is holding the card on. Until
+// somebody has looked, the card says so: the crew can still lay out what the
+// columns agree on, they just know nobody has signed it. Read-only here — the
+// tick is set on the car station.
+function renderApproval(card, car, plans) {
   const el = card.querySelector('[data-f="approve"]');
-  const ap = car.nextStop.approved;
+  const key = activePlanKey(car, plans);
+  const ap = car.nextStop.approvals?.[key];
   const live = car.nextStop.status !== 'draft';
   if (live) { el.style.display = 'none'; return; }
   el.style.display = '';
   el.className = 'wapprove' + (ap ? (ap.stale ? ' stale' : ' done') : '');
   el.innerHTML = ap && !ap.stale
-    ? `${icon('check')} APPROVED ${new Date(ap.atMs).toLocaleTimeString()} · ${esc(ap.by)}`
+    ? `${icon('check')} ${PLAN_LABEL[key]} PLAN APPROVED ${new Date(ap.atMs).toLocaleTimeString()} · ${esc(ap.by)}`
     : ap && ap.stale
-      ? `${icon('warn')} CHANGED SINCE APPROVAL — waiting on the engineer`
-      : `${icon('timer')} APP'S OWN PLAN — not approved yet`;
+      ? `${icon('warn')} ${PLAN_LABEL[key]} PLAN CHANGED SINCE APPROVAL — waiting on the engineer`
+      : `${icon('timer')} APP'S OWN ${PLAN_LABEL[key]} PLAN — not approved yet`;
 }
 
 function render() {
@@ -1110,7 +1128,7 @@ function render() {
       stationEl.innerHTML = `${icon('monitor')} no station connected for this car`;
       f('v-sub').style.display = 'none';
       f('verdict').className = 'verdict calm';
-      f('v-main').innerHTML = '— NO CAR RUNNING —';
+      setMarquee(f('v-main'), '— NO CAR RUNNING —');
       f('lt').style.display = 'none';
       f('tiles').style.display = 'none';
       f('extra').style.display = 'none';
@@ -1121,11 +1139,11 @@ function render() {
       if (feedWaiting) {
         stationEl.className = 'stationline';
         stationEl.innerHTML = `${icon('timer')} no car #${esc(ltNr)} in the feed yet — check the timing number if this stays`;
-        f('v-main').innerHTML = '— WAITING ON LIVE TIMING —';
+        setMarquee(f('v-main'), '— WAITING ON LIVE TIMING —');
       } else {
         stationEl.className = 'stationline lost';
         stationEl.innerHTML = `${icon('warn')} check the car's timing number — Settings → LIVE TIMING`;
-        f('v-main').innerHTML = `— NO CAR #${esc(ltNr)} IN LIVE TIMING —`;
+        setMarquee(f('v-main'), `— NO CAR #${esc(ltNr)} IN LIVE TIMING —`);
       }
       f('v-sub').style.display = 'none';
       f('verdict').className = 'verdict calm';
@@ -1195,7 +1213,7 @@ function render() {
       vCls += ' ' + fs.warn.level;
     }
     f('verdict').className = 'verdict ' + vCls;
-    f('v-main').innerHTML = vHtml;
+    setMarquee(f('v-main'), vHtml);
 
     // Sub-line: the pit-arrival estimate while it matters, else the fuel
     // window countdown — the band always says when something is next due.
@@ -1204,20 +1222,21 @@ function render() {
     if (etaLine) {
       sub.style.display = '';
       sub.className = 'vsub' + (etaLine.cls ? ' ' + etaLine.cls : '');
-      sub.innerHTML = etaLine.html;
+      setMarquee(sub, etaLine.html);
     } else if (!inPit && stop.status === 'draft' && clock.running &&
                fs && !fs.noStopNeeded && !fs.windowOpen && !neutralised) {
       sub.style.display = '';
       sub.className = 'vsub';
-      sub.innerHTML = `${icon('fuel')} fuel window in ${fs.lapsToWindow} laps <small>~${fmtMinSec(fs.msToWindow)}</small>`;
+      setMarquee(sub, `${icon('fuel')} fuel window in ${fs.lapsToWindow} laps <small>~${fmtMinSec(fs.msToWindow)}</small>`);
     } else {
       sub.style.display = 'none';
     }
 
     // The grab list — what to have ready if a yellow drops now, against the
     // planned green stop — plus whether an engineer has approved it.
-    renderGrab(card, car, c, recommendedStops(car, state.race, now, c), now);
-    renderApproval(card, car);
+    const plans = recommendedStops(car, state.race, now, c);
+    renderGrab(card, car, c, plans, now);
+    renderApproval(card, car, plans);
 
     // Under the tiles: stationary estimate + crew notes while a stop is live.
     const extra = f('extra');

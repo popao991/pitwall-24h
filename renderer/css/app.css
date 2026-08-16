@@ -532,6 +532,9 @@ input[type="number"] { font-family: var(--font-num); text-align: right; }
 }
 
 .kv { display: flex; justify-content: space-between; align-items: baseline; padding: 3px 0; }
+/* display:flex would otherwise win over the browser's own [hidden] rule, so a
+   row switched off in JS has to be switched off here too */
+.kv[hidden] { display: none; }
 .kv .k { color: var(--dim); font-size: 15px; }
 .kv .v { font-family: var(--font-num); font-size: 17px; font-weight: 600; }
 .kv .v.big { font-size: 26px; }
@@ -641,6 +644,47 @@ body.app-screen .topbar { flex: 0 0 auto; }
 .axlehead { color: var(--dim); font-size: 12px; letter-spacing: 1.5px; margin: 8px 0 2px; }
 .axlehead:first-child { margin-top: 0; }
 
+/* Second subject inside one card — tyres and brakes share the wear card, so
+   the rubber and the discs stay one glance apart without becoming one list. */
+.subhead {
+  margin: 12px 0 4px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+  color: var(--dim);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+/* PACE: the driver's rolling average, over a window the engineer sets here. */
+.pace .k input[type="number"] {
+  width: 46px;
+  padding: 1px 4px;
+  font-family: var(--font-num);
+  font-size: 14px;
+  text-align: right;
+}
+.lapstrip { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 4px; }
+.lapstrip .lap {
+  font-family: var(--font-num);
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--well);
+  color: var(--text);
+  border: 1px solid transparent;
+}
+.lapstrip .lap.fast { color: var(--green); }
+.lapstrip .lap.slow { color: var(--amber); }
+/* off the median — an in/out lap, traffic or a neutralisation */
+.lapstrip .lap.out { color: var(--dim); text-decoration: line-through; }
+.lapstrip .lap.now { border-color: var(--accent); }
+.lapstrip .more { font-size: 12px; color: var(--dim); align-self: center; }
+.dlt { font-family: var(--font-num); font-size: 14px; color: var(--dim); }
+.dlt.fast { color: var(--green); }
+.dlt.slow { color: var(--amber); }
+
 /* CONTEXT: mini scoreboard, seat time */
 .ctxrow { display: grid; grid-template-columns: 1.2fr 1fr; gap: 12px; min-width: 0; }
 .ctxrow .panel { min-width: 0; }
@@ -688,6 +732,7 @@ body.app-screen .topbar { flex: 0 0 auto; }
 /* The three situations. The live one carries a dot; the selected one is lit. */
 .plantabs { display: flex; gap: 4px; margin-bottom: 8px; }
 .plantabs button {
+  position: relative;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -703,6 +748,45 @@ body.app-screen .topbar { flex: 0 0 auto; }
 .plantabs button.live b::after { content: " ·"; color: var(--accent); }
 .plantabs button.on { background: var(--accent); color: #04121c; }
 .plantabs button.on span { opacity: 1; }
+/* A tab the engineer is holding against the race: it is being written, not
+   just read, so it keeps a hard edge even when the race moves on. */
+.plantabs button.held { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Corner dot: how far this plan has been written. Amber = its own lines are
+   pinned, green = signed off, red = signed off and moved since. */
+.plantabs button.mk-custom::after,
+.plantabs button.mk-approved::after,
+.plantabs button.mk-stale::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.plantabs button.mk-custom::after { background: var(--amber); }
+.plantabs button.mk-approved::after { background: var(--green); }
+.plantabs button.mk-stale::after { background: var(--red); }
+
+/* The card has stopped following the race — said plainly, with the way back. */
+.planhold {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: -4px 0 8px;
+  padding: 5px 8px;
+  border: 1px solid var(--amber);
+  border-radius: 6px;
+  background: var(--fcy-bg);
+  color: var(--amber);
+  font-family: var(--font-num);
+  font-size: 11px;
+  letter-spacing: 1px;
+}
+.planhold.hidden { display: none; }
+.planhold .ico { width: 14px; height: 14px; flex: none; }
+.planhold span { flex: 1; }
+.planhold button { padding: 3px 7px; font-size: 10px; letter-spacing: 1px; }
 
 /* The call itself — one answer, colour-coded, with the reason under it. */
 .verdictband {
@@ -1064,8 +1148,27 @@ body.app-screen .topbar { flex: 0 0 auto; }
 .drv-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
 .drv-row .dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
 .drv-row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.drv-row .tm { font-family: var(--font-num); color: var(--dim); }
+/* seat time leads, rest time sits behind a hairline as the secondary column */
+.drv-row .tm {
+  font-family: var(--font-num);
+  color: var(--text);
+  border-left: 1px solid var(--line);
+  padding-left: 8px;
+}
 .drv-row.cur .nm { color: var(--accent); font-weight: 700; }
+/* time out of the car — fixed width so the seat-time column still lines up
+   for the driver who is in the car and has no rest clock */
+.drv-row .rest {
+  font-family: var(--font-num);
+  font-size: 13px;
+  color: var(--dim);
+  flex: 0 0 auto;
+  min-width: 78px;
+  text-align: right;
+  white-space: nowrap;
+}
+.drv-row .rest.warn { color: var(--amber); }
+.drv-row .rest .ico { width: 11px; height: 11px; vertical-align: -1px; }
 
 /* planner */
 .planner .row {
@@ -1566,6 +1669,42 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* marquee — a nowrap line that scrolls its own content when it overflows
+   instead of clipping the answer. JS (marquee.js) measures the line, adds
+   .mq-on and sets the travel distance; the duration it sets keeps every
+   scrolling line on the page at the same pixels per second. */
+.marquee { overflow: hidden; }
+.marquee .mq-track {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: inherit; /* the line's own gap, so a fitting line lays out unchanged */
+}
+.marquee .mq-item {
+  display: inline-flex;
+  align-items: center;
+  gap: inherit;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+/* blank run before the text comes round again */
+.marquee .mq-item + .mq-item { margin-left: 48px; }
+.marquee.mq-on { justify-content: flex-start; }
+.marquee.mq-on .mq-track {
+  animation: mq-scroll var(--mq-dur, 8s) linear infinite;
+  will-change: transform;
+}
+@keyframes mq-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(var(--mq-shift, 0)); }
+}
+/* No motion: read from the start rather than from the middle of a centred
+   line, and drop the repeat that only exists to make the loop seamless. */
+@media (prefers-reduced-motion: reduce) {
+  .marquee.mq-on .mq-track { animation: none; }
+  .marquee.mq-on .mq-item + .mq-item { display: none; }
 }
 
 /* verdict band — one line that answers "what now?": the stop status, the

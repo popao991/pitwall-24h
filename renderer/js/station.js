@@ -3,13 +3,14 @@
 
 import {
   PORT, CONDITIONS, BRAKE_COMPONENTS, DRIVER_COLORS,
-  carCalcs, raceClock, projectStints, emptyStop, defaultDriver,
+  carCalcs, raceClock, projectStints, defaultDriver,
   stopServiceTime, fcyCalc, fuelStrategy, pitLaneCalc, pitEta, generatePlan,
   normalizeCurve, burnAtLapTime, emptyCurvePoint, LAP_AVG_WINDOW,
+  paceWindowStats, paceWindowLaps, PACE_WINDOW_MIN, PACE_WINDOW_MAX,
   currentTyreSet, stopTyreSet, replanFromNow, planVsActual, stintStats, learnedOf,
   tyreSetMileage, tyreLifeLapsOf, tyreKmLeft,
   brakeSetsOf, usableBrakeSets, brakeSetHours,
-  recommendedStops, resolveStop,
+  recommendedStops, resolveStop, PLAN_KEYS, PLAN_LABEL, activePlanKey, stopPins,
   fmtClock, fmtMinSec, fmtLap, fmtH,
   TIMING_FLAGS, fmtLapUs, fmtGapUs, timingNrOf, ourTimingNrs, createFeedSeen, carPickLabel,
   driverAbbrev, matchTimingDriver
@@ -466,6 +467,15 @@ $('btn-fuel-correct').addEventListener('click', () => {
   $('fuel-correct').value = '';
 });
 
+// The pace window lives in the car's config, so every screen on this car reads
+// the same average — the engineer sets it once, on the card itself.
+$('pace-laps').addEventListener('change', () => {
+  const el = $('pace-laps');
+  const v = Math.round(parseFloat(el.value));
+  if (isNaN(v)) return render();
+  patchCar({ config: { paceAvgLaps: Math.max(PACE_WINDOW_MIN, Math.min(PACE_WINDOW_MAX, v)) } });
+});
+
 // ---- condition selector ----
 
 const condRow = $('cond-row');
@@ -483,23 +493,41 @@ initConditionControls($('cond-controls'), mode => {
 });
 
 // ---- stop planner ----
-// The panel is the app's own plan for three situations — green, code 60 and
-// safety car — and every line of it either follows the app or is pinned by the
-// engineer. Pinning one line never freezes the others: they keep tracking the
-// race. Nothing here is a form to fill in; it is an answer to accept or change.
+// THREE PLANS, NOT ONE. Green, code 60 and safety car each keep their own
+// pinned lines and their own approval, because they are different work orders:
+// under a code 60 the stop is nearly free, so it takes everything — full tank,
+// tyres, driver — while the green plan next to it may be a splash and go. The
+// tabs switch which of the three you are writing; they do not re-dress a single
+// plan. Every line of the one on screen either follows the app or is pinned by
+// the engineer, and pinning one line never freezes the others: they keep
+// tracking the race. Nothing here is a form to fill in; it is an answer to
+// accept or change.
 
 let pickSetOpen = false;  // tyre stock list open under the TYRES line
 let pickBrakeOpen = false; // rack list open under the BRAKES line
 let fuelSetL = 0;         // last hand-typed fuel figure
+// Which of the three is on screen. Kept here so every pin names the plan it
+// belongs to: a yellow dropping between the tap and the message must not drop
+// a pin into a different plan than the one being read.
+let planTab = 'green';
 
-const pinStop = (field, value) => send({ type: 'pinStop', field, value });
+const pinStop = (field, value) => send({ type: 'pinStop', plan: planTab, field, value });
 
 $('plan-tabs').addEventListener('click', e => {
   const b = e.target.closest('button[data-plan]');
   if (!b || !state) return;
   pickSetOpen = false;
   pickBrakeOpen = false;
-  send({ type: 'stopPlan', plan: b.dataset.plan });
+  // Tapping the tab that is already held hands the card back to the race:
+  // it follows whatever is flying again. Same tap in, same tap out.
+  const held = state.cars[carId].nextStop.plan;
+  send({ type: 'stopPlan', plan: held === b.dataset.plan ? null : b.dataset.plan });
+});
+
+// "Follow the race again" — the way out of a held tab that does not require
+// knowing the tab is a toggle.
+$('plan-hold').addEventListener('click', e => {
+  if (e.target.closest('[data-follow]')) send({ type: 'stopPlan', plan: null });
 });
 
 $('plan-lines').addEventListener('click', e => {
@@ -519,7 +547,7 @@ $('plan-lines').addEventListener('click', e => {
   const brow = e.target.closest('[data-bset]');
   if (brow) {
     const [comp, setId] = brow.dataset.bset.split(':');
-    const pin = { ...(car.nextStop.pinned?.brakeSets || {}) };
+    const pin = { ...(stopPins(car, planTab).brakeSets || {}) };
     // Tapping the set already chosen hands the pick back to the app.
     if (pin[comp] === setId) delete pin[comp];
     else pin[comp] = setId;
@@ -561,10 +589,10 @@ $('plan-lines').addEventListener('click', e => {
     if (val === 'auto') { pinStop('brakeSets', null); return pinStop('brakes', null); }
     if (val === 'none') { pinStop('brakeSets', null); return pinStop('brakes', []); }
     // toggle one component, starting from whatever is currently planned
-    const cur = car.nextStop.pinned?.brakes || plannedBrakes(car);
+    const cur = stopPins(car, planTab).brakes || plannedBrakes(car);
     const next = cur.includes(val) ? cur.filter(x => x !== val) : [...cur, val];
     // A component no longer being changed has no set to pick.
-    const pin = { ...(car.nextStop.pinned?.brakeSets || {}) };
+    const pin = { ...(stopPins(car, planTab).brakeSets || {}) };
     if (!next.includes(val) && pin[val]) {
       delete pin[val];
       pinStop('brakeSets', Object.keys(pin).length ? pin : null);
@@ -629,7 +657,8 @@ $('pit-visit').addEventListener('click', e => {
 $('plan-approve').addEventListener('click', e => {
   const b = e.target.closest('button[data-approve]');
   if (!b) return;
-  send({ type: b.dataset.approve === 'yes' ? 'approveStop' : 'unapproveStop' });
+  // The tick is for the plan on screen — the other two keep their own.
+  send({ type: b.dataset.approve === 'yes' ? 'approveStop' : 'unapproveStop', plan: planTab });
 });
 
 // Lifecycle. The engineer owns SEND and BOX BOX; after that the timing feed
@@ -643,7 +672,8 @@ $('stop-actions').addEventListener('click', e => {
     case 'send': patchStop({ status: 'sent' }); break;
     case 'box': patchStop({ status: 'box' }); break;
     case 'unsend': patchStop({ status: 'draft' }); break;
-    case 'clear': patchCar({ nextStop: emptyStop() }); break;
+    // Clears the situation on screen only — the other two plans stand.
+    case 'clear': send({ type: 'clearStop', plan: planTab }); break;
     case 'inpit': send({ type: 'inPit', inPit: true }); break;
     case 'ontrack':
       if (confirm('Mark the car back on track WITHOUT a stop? No service is applied and the fuel level is not reset (drive-through).')) {
@@ -2049,8 +2079,11 @@ function render() {
   renderSetDecision(car, c);
   renderPitVisit(car);
 
-  // brakes
+  // brakes — same card as the tyres, below the rubber
   renderBrakes(c);
+
+  // rolling pace of the driver in the car
+  renderPace(car);
 
   // drivers + NOW strip (the timing-fed cells are set in renderTiming)
   renderDrivers(car, c);
@@ -2096,35 +2129,67 @@ const VERDICT_CLS = {
   boxNow: 'crit', box: 'go', stay: 'hold', noStop: 'go', plan: 'calm', none: 'calm'
 };
 
-// Brake work the current plan calls for — the starting point when the engineer
-// begins toggling components by hand.
+// Brake work the plan on screen calls for — the starting point when the
+// engineer begins toggling components by hand. Resolved live from that plan,
+// not from the stop record, which only carries figures once one is sent.
 function plannedBrakes(car) {
-  return BRAKE_COMPONENTS.filter(b => car.nextStop[b.id]).map(b => b.id);
+  const plans = recommendedStops(car, state.race, Date.now());
+  const r = resolveStop(car, plans[planTab] || plans.green);
+  return BRAKE_COMPONENTS.filter(b => r[b.id]).map(b => b.id);
 }
 
 let planLinesKey = '';
+let planHoldKey = '';
 
 function renderPlanner(car, c, now) {
   const stop = car.nextStop;
   const plans = recommendedStops(car, state.race, now, c);
-  // Until the engineer picks one, the card follows whatever is actually flying.
-  const tab = ['green', 'fcy', 'sc'].includes(stop.plan) ? stop.plan : plans.live;
+  // Until the engineer holds one, the card follows whatever is actually flying.
+  const tab = activePlanKey(car, plans);
+  planTab = tab;
   const plan = plans[tab];
-  const pinned = stop.pinned || {};
+  const pinned = stopPins(car, tab);
   const inPit = car.state.inPit;
   const live = stop.status !== 'draft'; // the engineer has committed this stop
+  const held = PLAN_KEYS.includes(stop.plan);
 
-  // ---- the three situations, with when each one would happen
+  // ---- the three situations: when each would happen, and how far each plan
+  // has been written. A corner dot says this one is no longer just the app's
+  // answer — somebody has shaped it, and whether it has been signed off.
   for (const b of $('plan-tabs').children) {
     const id = b.dataset.plan;
     const p = plans[id];
+    const ap = stop.approvals?.[id];
+    const custom = Object.keys(stopPins(car, id)).length > 0;
     b.classList.toggle('on', id === tab);
     b.classList.toggle('live', plans.live === id);
+    b.classList.toggle('held', held && stop.plan === id);
+    b.classList.toggle('mk-approved', !!ap && !ap.stale);
+    b.classList.toggle('mk-stale', !!ap && !!ap.stale);
+    b.classList.toggle('mk-custom', !ap && custom);
+    b.title = (id === tab && held
+      ? `Holding the ${PLAN_LABEL[id]} plan — tap again to follow the race. `
+      : `Write the ${PLAN_LABEL[id]} plan. `) +
+      (custom ? 'Its own lines are pinned here.' : 'Every line follows the app here.');
     b.querySelector('[data-when]').textContent =
       plans.live === id ? 'NOW'
         : p.dueMs != null && p.dueMs > 0 ? fmtMinSec(p.dueMs)
         : id === 'green' ? '—' : 'if it drops';
   }
+
+  // Holding a tab means the card has stopped following the race — and SEND
+  // would ship this plan, not the one for what is flying. Say so, always.
+  const holdEl = $('plan-hold');
+  holdEl.classList.toggle('hidden', !held || live);
+  // Rebuilt only when the words change — a bar that re-renders every second
+  // eats the tap on its own button.
+  const holdKey = held && !live ? tab + '|' + plans.live : '';
+  if (holdKey && holdKey !== planHoldKey) {
+    holdEl.innerHTML = `${icon('alert')} <span>WRITING THE <b>${PLAN_LABEL[tab]}</b> PLAN` +
+      (plans.live === tab ? '' : ` — the race is ${PLAN_LABEL[plans.live]}`) +
+      `</span><button data-follow>FOLLOW THE RACE</button>`;
+  }
+  planHoldKey = holdKey;
 
   // ---- the call
   const vb = $('plan-verdict');
@@ -2195,21 +2260,21 @@ function renderPlanner(car, c, now) {
       `${Math.round(svc.totalSec + (car.config.pitLossSec || 0))} s`
     : '—';
 
-  // ---- the approval tick
-  const ap = stop.approved;
+  // ---- the approval tick, for the plan on screen
+  const ap = stop.approvals?.[tab];
   const bar = $('plan-approve');
   bar.className = 'approvebar' + (ap ? (ap.stale ? ' stale' : ' done') : '');
   bar.innerHTML = ap && !ap.stale
     ? `<span class="box">${icon('check')}</span>
-       <span><b>APPROVED ${new Date(ap.atMs).toLocaleTimeString()}</b><br>the crew is preparing against this plan</span>
+       <span><b>${PLAN_LABEL[tab]} PLAN APPROVED ${new Date(ap.atMs).toLocaleTimeString()}</b><br>the crew is preparing against this plan</span>
        <button data-approve="no">UNDO</button>`
     : ap && ap.stale
       ? `<span class="box">${icon('warn')}</span>
-         <span><b>THE PLAN MOVED SINCE YOU APPROVED IT</b><br>the wall says so too</span>
+         <span><b>THE ${PLAN_LABEL[tab]} PLAN MOVED SINCE YOU APPROVED IT</b><br>the wall says so too</span>
          <button data-approve="yes">RE-APPROVE</button>`
       : `<span class="box"></span>
-         <span>The crew sees this as the app's suggestion until you approve it</span>
-         <button class="send" data-approve="yes">${icon('check')} APPROVE</button>`;
+         <span>The crew sees the ${PLAN_LABEL[tab]} plan as the app's suggestion until you approve it</span>
+         <button class="send" data-approve="yes">${icon('check')} APPROVE ${PLAN_LABEL[tab]}</button>`;
 
   // ---- lifecycle. The engineer owns SEND and BOX; the feed owns what follows.
   const acts = $('stop-actions');
@@ -2231,9 +2296,11 @@ function renderPlanner(car, c, now) {
         <button data-act="unsend">UNSEND</button>
         <button class="box big" data-act="box">BOX BOX</button></div>`;
   } else {
+    // Naming the plan on the button is the last chance to notice that a held
+    // tab is about to be sent instead of the one for what is flying.
     acts.innerHTML = `<div class="actions">
-        <button data-act="clear">CLEAR</button>
-        <button class="send" data-act="send">SEND TO CREW</button></div>`;
+        <button data-act="clear" title="Clears this situation's plan only — the other two stand">CLEAR ${PLAN_LABEL[tab]}</button>
+        <button class="send" data-act="send">SEND ${held ? PLAN_LABEL[tab] + ' PLAN' : 'TO CREW'}</button></div>`;
   }
 
   // ---- status line + stepper
@@ -2529,6 +2596,86 @@ function renderBrakes(c) {
   }
 }
 
+// Rolling pace of the driver in the car, over their last N timed laps. N is
+// the engineer's own setting (config.paceAvgLaps, set in the card's label):
+// widen it to read consistency over a stint, drop it to two or three laps
+// when the track is changing and only the newest laps mean anything.
+// The window follows the DRIVER, not the stint — a driver getting back in
+// keeps the laps they did earlier in the race.
+const PACE_STRIP_MAX = 10; // chips shown; anything older is counted, not drawn
+
+function renderPace(car) {
+  const drv = car.drivers.find(d => d.id === car.currentDriverId);
+  const n = paceWindowLaps(car);
+  const p = paceWindowStats(car, car.currentDriverId, n);
+  $('pace-driver').textContent = drv ? drv.name : 'no driver';
+  setInput($('pace-laps'), n);
+  $('pace-avg').textContent = fmtLap(p.avgSec);
+  $('pace-count').textContent = `${p.laps.length} of ${p.total}`;
+
+  // Last lap against the window average — the number the crew actually calls.
+  $('pace-last').textContent = fmtLap(p.lastSec);
+  const dEl = $('pace-delta');
+  // With a single lap in the window the lap IS the average; a "+0.0" there
+  // would read as a measurement rather than as the tautology it is.
+  if (p.avgSec != null && p.lastSec != null && p.laps.length > 1) {
+    const d = p.lastSec - p.avgSec;
+    dEl.textContent = `${d >= 0 ? '+' : '−'}${Math.abs(d).toFixed(1)}`;
+    dEl.className = 'dlt' + (d <= -0.1 ? ' fast' : d >= 0.1 ? ' slow' : '');
+  } else {
+    dEl.textContent = '';
+    dEl.className = 'dlt';
+  }
+
+  $('pace-range').textContent = p.bestSec != null
+    ? `${fmtLap(p.bestSec)} · ${fmtLap(p.worstSec)}`
+    : '—';
+
+  // An in-lap, an out-lap or a lap spent behind traffic drags the plain
+  // average down a tenth or more, so say what the window is worth without
+  // them — but only when the window actually holds one.
+  const cleanRow = $('pace-clean-row');
+  cleanRow.hidden = p.cleanAvgSec == null;
+  if (p.cleanAvgSec != null) $('pace-clean').textContent = fmtLap(p.cleanAvgSec);
+
+  const strip = $('pace-strip');
+  if (!p.laps.length) {
+    strip.innerHTML = '<span class="more">no timed laps for this driver yet</span>';
+    return;
+  }
+  const shown = p.laps.slice(-PACE_STRIP_MAX);
+  const hidden = p.laps.length - shown.length;
+  const cells = shown.map((t, i) => {
+    const idx = i + hidden;
+    const out = p.outliers[idx];
+    const d = p.avgSec != null ? t - p.avgSec : 0;
+    const cls = out ? ' out' : d <= -0.1 ? ' fast' : d >= 0.1 ? ' slow' : '';
+    const last = idx === p.laps.length - 1 ? ' now' : '';
+    const title = out
+      ? 'off the window median — in/out lap, traffic or a neutralisation'
+      : `${d >= 0 ? '+' : '−'}${Math.abs(d).toFixed(1)} on the average`;
+    return `<span class="lap${cls}${last}" title="${title}">${fmtLap(t)}</span>`;
+  });
+  if (hidden > 0) cells.unshift(`<span class="more" title="in the average, not drawn">+${hidden}</span>`);
+  strip.innerHTML = cells.join('');
+}
+
+// The other half of seat time: how long a driver has been out of the car. It
+// is what the next driver change is actually planned around — a driver two
+// hours out is ready, one who climbed out ten minutes ago is not. Drivers who
+// have not driven yet have been resting since the start. Still short of a
+// mandatory rest period, the cell turns amber and says how much is left.
+function restCell(d, cur, c) {
+  const r = c.reg?.byDriver?.[d.id];
+  if (cur) return '<span class="rest num" title="in the car"></span>';
+  const restMs = r?.restMs ?? (c.clock.running ? c.clock.elapsedMs : null);
+  if (restMs == null) return '<span class="rest num"></span>';
+  const title = r?.resting
+    ? `resting ${fmtClock(restMs)} — ${fmtMinSec(r.restLeftMs)} short of the mandatory rest`
+    : `resting ${fmtClock(restMs)}` + (r?.restMs == null ? ' — has not driven yet' : '');
+  return `<span class="rest num${r?.resting ? ' warn' : ''}" title="${title}">${icon('pause')} ${fmtClock(restMs)}</span>`;
+}
+
 function renderDrivers(car, c) {
   const wrap = $('drivers');
   wrap.innerHTML = '';
@@ -2544,7 +2691,8 @@ function renderDrivers(car, c) {
       <span class="badge${d.doubleStint ? '' : ' off'}" title="double stints ${d.doubleStint ? 'yes' : 'no'}">${icon('ff')}</span>
       <span class="badge${d.night ? '' : ' off'}" title="night driving ${d.night ? 'yes' : 'no'}">${icon('moon')}</span>
       <span class="badge${d.rain ? '' : ' off'}" title="rain ${d.rain ? 'yes' : 'no'}">${icon('rain')}</span>
-      <span class="tm num">${fmtClock(total)}</span>`;
+      ${restCell(d, cur, c)}
+      <span class="tm num" title="seat time driven">${fmtClock(total)}</span>`;
     wrap.appendChild(row);
 
     // Drive-time regulation bookkeeping, one compact line per driver.

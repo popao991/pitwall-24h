@@ -224,6 +224,34 @@ export function ourTimingNrs(state) {
   return map;
 }
 
+// The three situations the app keeps a separate plan for, and the short name
+// each one goes by on screen. They are three *different* work orders, not one
+// order shown three ways: what the crew does under a code 60 (cheap stop, take
+// everything) is rarely what they do under green.
+export const PLAN_KEYS = ['green', 'fcy', 'sc'];
+export const PLAN_LABEL = { green: 'GREEN', fcy: 'CODE 60', sc: 'SAFETY CAR' };
+
+// Which of the three a pace belongs to. `recommendedStop` carries the pace it
+// answered for (null = green), so a plan object always knows its own drawer.
+export function planKeyOf(pace) {
+  return pace === 'fcy' ? 'fcy' : pace === 'sc' ? 'sc' : 'green';
+}
+
+// The plan the stop actually follows: the one the engineer selected, else
+// whatever is flying right now. Every screen resolves it the same way, so the
+// card, the wall and the send button can never disagree about which of the
+// three is the live work order.
+export function activePlanKey(car, plans) {
+  const picked = car?.nextStop?.plan;
+  return PLAN_KEYS.includes(picked) ? picked : (plans?.live || 'green');
+}
+
+// The engineer's pinned lines for one situation. Empty = every line follows
+// the app.
+export function stopPins(car, key) {
+  return car?.nextStop?.pins?.[key] || {};
+}
+
 export function emptyStop() {
   return {
     fuelLiters: 0,
@@ -238,14 +266,17 @@ export function emptyStop() {
     brakeSetIds: { padsFront: null, padsRear: null, discsFront: null, discsRear: null },
     notes: '',
     status: 'draft', // draft -> sent -> box -> (applied)
-    // Which of the three situations the engineer is planning for, the lines
-    // they have pinned (everything else keeps following the app), and the
-    // approval that tells the crew a human has read this plan.
-    plan: null, // null = follow whatever is flying; 'green' | 'fcy' | 'sc' = pinned by the engineer
-    // { fuel: {mode,liters}, tyres: 'keep'|'new'|setId, driver: 'stay'|driverId,
-    //   brakes: [ids], brakeSets: { compId: setId } }
-    pinned: {},
-    approved: null // { by, atMs, hash, stale }
+    // Which of the three situations the engineer is looking at, and the three
+    // plans themselves. Each situation keeps its OWN pinned lines and its own
+    // approval, so a code 60 plan can say "fill it full, four tyres, swap the
+    // driver" while the green plan next to it says "splash and go" — and both
+    // stand ready at the same time.
+    plan: null, // null = follow whatever is flying; 'green' | 'fcy' | 'sc' = held by the engineer
+    // per situation: { fuel: {mode,liters}, tyres: 'keep'|'new'|setId,
+    //   driver: 'stay'|driverId, brakes: [ids], brakeSets: { compId: setId } }
+    pins: { green: {}, fcy: {}, sc: {} },
+    // per situation: { by, atMs, hash, stale }
+    approvals: { green: null, fcy: null, sc: null }
   };
 }
 
@@ -667,7 +698,8 @@ export function defaultCar(id, number) {
       pitInKm: 0,
       finishFuelL: 5,
       safetyFuelL: 3,
-      fuelWarnLaps: 5 // low-fuel warning once this few laps remain (0 = off)
+      fuelWarnLaps: 5, // low-fuel warning once this few laps remain (0 = off)
+      paceAvgLaps: PACE_WINDOW_DEFAULT // laps behind the pace card's rolling average
     },
     state: {
       stintStartMs: null,
@@ -827,6 +859,14 @@ export function burnDetail(car, cond = car.condition, pace = null, lapSec = null
 // may be before it is treated as an out-lap / traffic lap and ignored.
 export const LAP_AVG_WINDOW = 5;
 export const LAP_OUTLIER_FACTOR = 1.15;
+
+// The pace card's own window: how many of the current driver's last laps the
+// engineer wants averaged. Separate from LAP_AVG_WINDOW — that one feeds the
+// fuel curve and is not the crew's to retune mid-race — but it starts at the
+// same five laps, which is what a stint is normally read over.
+export const PACE_WINDOW_DEFAULT = 5;
+export const PACE_WINDOW_MIN = 1;
+export const PACE_WINDOW_MAX = 30;
 
 // Fold a new lap time into the rolling window and recompute the average that
 // the fuel curve is read at. Laps more than LAP_OUTLIER_FACTOR off the window
@@ -1785,9 +1825,11 @@ export function recommendedStops(car, race, now, calcs = carCalcs(car, race, now
 
 // The stop as it would actually be executed: the app's answer for every line
 // the engineer has not pinned, their value for the ones they have. Pins live on
-// nextStop.pinned and survive until the stop is applied or cleared.
+// nextStop.pins, one drawer per situation, and survive until the stop is
+// applied or cleared — so resolving the code 60 plan reads the code 60 pins
+// and never the green ones.
 export function resolveStop(car, plan) {
-  const pin = car.nextStop?.pinned || {};
+  const pin = stopPins(car, planKeyOf(plan?.pace));
   const tank = car.config.tankLiters || 0;
 
   const pf = pin.fuel || null;
@@ -2070,6 +2112,60 @@ export function stintStats(lapTimes) {
     n: laps.length,
     bestSec: sorted[0],
     avgSec: Math.round((use.reduce((a, b) => a + b, 0) / use.length) * 1000) / 1000
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Rolling pace window (the pace card)
+// ---------------------------------------------------------------------------
+// How many laps the card averages over, clamped to what the setting allows so
+// a stray entry can never blank the card.
+export function paceWindowLaps(car) {
+  const n = Math.round(Number(car?.config?.paceAvgLaps));
+  if (!(n >= PACE_WINDOW_MIN)) return PACE_WINDOW_DEFAULT;
+  return Math.min(PACE_WINDOW_MAX, n);
+}
+
+// Every timed lap one driver has done this race, oldest first: their closed
+// stints from the sheet plus the stint they are in right now. A driver who
+// gets back in later keeps their earlier laps, so the window spans the change
+// of car rather than restarting at the pit exit.
+export function driverLapTimes(car, driverId) {
+  const laps = [];
+  for (const h of car.stintHistory || []) {
+    if (h.driverId !== driverId) continue;
+    for (const t of h.lapTimes || []) if (t > 0) laps.push(t);
+  }
+  if (car.currentDriverId === driverId) {
+    for (const t of car.state?.stintLapSec || []) if (t > 0) laps.push(t);
+  }
+  return laps;
+}
+
+// The pace picture for one driver over their last `n` timed laps. `avgSec` is
+// the plain mean of the window — the number the engineer asked for. The same
+// median rule the fuel model uses also flags in/out and traffic laps, so the
+// card can mark them and offer the average without them (`cleanAvgSec`, null
+// when the window is already clean).
+export function paceWindowStats(car, driverId = car.currentDriverId, n = paceWindowLaps(car)) {
+  const all = driverLapTimes(car, driverId);
+  const laps = all.slice(-n);
+  const base = { n, driverId, laps, total: all.length };
+  if (!laps.length) {
+    return { ...base, avgSec: null, cleanAvgSec: null, bestSec: null, worstSec: null, lastSec: null, outliers: [] };
+  }
+  const mean = a => Math.round((a.reduce((x, y) => x + y, 0) / a.length) * 1000) / 1000;
+  const sorted = [...laps].sort((a, b) => a - b);
+  const cut = sorted[Math.floor(sorted.length / 2)] * LAP_OUTLIER_FACTOR;
+  const clean = laps.filter(t => t <= cut);
+  return {
+    ...base,
+    avgSec: mean(laps),
+    cleanAvgSec: clean.length && clean.length < laps.length ? mean(clean) : null,
+    bestSec: sorted[0],
+    worstSec: sorted[sorted.length - 1],
+    lastSec: laps[laps.length - 1],
+    outliers: laps.map(t => t > cut)
   };
 }
 

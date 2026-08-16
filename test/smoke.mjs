@@ -9,6 +9,7 @@ import {
   raceCondition,
   burnAtLapTime, normalizeCurve, pushLapTime, burnDetail, LAP_AVG_WINDOW,
   driveTimeStats, pitCongestion, replanFromNow, planVsActual, stintStats, learnedOf, fmtGapUs,
+  driverLapTimes, paceWindowStats, paceWindowLaps, PACE_WINDOW_DEFAULT, PACE_WINDOW_MAX,
   carPickLabel, driverAbbrev, matchTimingDriver, createFeedSeen
 } from '../shared/model.js';
 import WebSocket from 'ws';
@@ -598,6 +599,14 @@ delete brokenState.cars['1'].state.inPit; // saved before the pit-lane field exi
 delete brokenState.cars['1'].state.pitEnterMs;
 delete brokenState.event; // saved before event settings existed
 brokenState.cars['1'].config.pitLossSec = 40;
+// saved when one set of pins and one tick were shared by all three situations
+brokenState.cars['3'].nextStop.plan = 'fcy';
+brokenState.cars['3'].nextStop.pins = undefined;
+brokenState.cars['3'].nextStop.approvals = undefined;
+delete brokenState.cars['3'].nextStop.pins;
+delete brokenState.cars['3'].nextStop.approvals;
+brokenState.cars['3'].nextStop.pinned = { tyres: 'keep' };
+brokenState.cars['3'].nextStop.approved = { by: 'old', atMs: 1, hash: 'x', stale: false };
 const tmpFile = path.join(os.tmpdir(), `pitwall-smoke-${process.pid}.json`);
 fs.writeFileSync(tmpFile, JSON.stringify(brokenState));
 
@@ -616,6 +625,14 @@ check('pit-lane fields migrated on restore', state3.cars['1'].state.inPit === fa
   state3.cars['1'].state.pitEnterMs === null);
 check('dangling currentDriverId repaired', state3.cars['2'].currentDriverId === state3.cars['2'].drivers[0].id);
 check('event adopted from first car on restore', state3.event.pitLossSec === 40);
+{
+  const stop3 = state3.cars['3'].nextStop;
+  check('one shared set of pins becomes three, unchanged',
+    stop3.pinned === undefined && ['green', 'fcy', 'sc'].every(k => stop3.pins[k].tyres === 'keep'));
+  check('the old tick lands on the situation it was made for',
+    stop3.approved === undefined && stop3.approvals.fcy?.by === 'old' &&
+    stop3.approvals.green === null && stop3.approvals.sc === null);
+}
 check('event mirrored to all cars on restore', state3.cars['2'].config.pitLossSec === 40);
 
 // stations add/remove drivers by patching the whole array (arrays replace, not merge)
@@ -1940,8 +1957,8 @@ check('shrinking the count trims only never-used sets',
   check('the server keeps the plan for screens that are not connected',
     car4.autoStop && ['green', 'fcy', 'sc'].every(k => !!car4.autoStop[k]));
 }
-send({ type: 'pinStop', carId: '4', field: 'tyres', value: 'keep' });
-await until(() => state.cars['4'].nextStop.pinned.tyres === 'keep');
+send({ type: 'pinStop', carId: '4', plan: 'green', field: 'tyres', value: 'keep' });
+await until(() => state.cars['4'].nextStop.pins.green.tyres === 'keep');
 {
   const car4 = state.cars['4'];
   const plans = recommendedStops(car4, state.race, Date.now());
@@ -1949,19 +1966,77 @@ await until(() => state.cars['4'].nextStop.pinned.tyres === 'keep');
   check('a pinned line is held where the engineer put it', r.tyres === false);
   check('the lines around it keep following the app', r.fuelMode === plans.green.fuel.mode);
 }
-send({ type: 'approveStop', carId: '4', by: 'T. Claes' });
-await until(() => !!state.cars['4'].nextStop.approved);
+
+// three plans, not one shown three ways: pinning one situation leaves the
+// other two alone, so a code 60 plan and a green plan can say different things
+// at the same time.
+send({ type: 'pinStop', carId: '4', plan: 'fcy', field: 'fuel', value: { mode: 'full' } });
+send({ type: 'pinStop', carId: '4', plan: 'sc', field: 'fuel', value: { mode: 'none' } });
+await until(() => state.cars['4'].nextStop.pins.fcy.fuel?.mode === 'full' &&
+  state.cars['4'].nextStop.pins.sc.fuel?.mode === 'none');
+{
+  const car4 = state.cars['4'];
+  const plans = recommendedStops(car4, state.race, Date.now());
+  const g = resolveStop(car4, plans.green);
+  const f = resolveStop(car4, plans.fcy);
+  const sc = resolveStop(car4, plans.sc);
+  check('each situation resolves against its own pins',
+    f.fuelMode === 'full' && sc.fuelMode === 'none' && sc.fuelLiters === 0);
+  check('pinning one situation leaves the others untouched',
+    g.fuelMode !== 'none' && g.tyres === false &&
+    f.tyres === plans.fcy.tyres.change && sc.tyres === plans.sc.tyres.change);
+  check('a pin belongs to the plan it was made on', !state.cars['4'].nextStop.pins.fcy.tyres);
+}
+send({ type: 'pinStop', carId: '4', plan: 'sc', field: 'fuel', value: null });
+await until(() => !state.cars['4'].nextStop.pins.sc.fuel);
+
+send({ type: 'approveStop', carId: '4', plan: 'green', by: 'T. Claes' });
+await until(() => !!state.cars['4'].nextStop.approvals.green);
 {
   const stop = state.cars['4'].nextStop;
   check('approving records who and when',
-    stop.approved.by === 'T. Claes' && stop.approved.atMs > 0 && stop.approved.stale === false);
+    stop.approvals.green.by === 'T. Claes' && stop.approvals.green.atMs > 0 &&
+    stop.approvals.green.stale === false);
+  check('approving one situation does not sign off the others',
+    !stop.approvals.fcy && !stop.approvals.sc);
   check('approving freezes the plan into the stop itself',
     stop.tyres === false && stop.fuelLiters > 0 && stop.fuelMode != null);
 }
-send({ type: 'pinStop', carId: '4', field: 'driver', value: 'd3' });
-await until(() => state.cars['4'].nextStop.approved?.stale === true);
+send({ type: 'pinStop', carId: '4', plan: 'fcy', field: 'driver', value: 'd3' });
+await wait(150);
+check('a tick only goes stale when its own plan moves',
+  state.cars['4'].nextStop.approvals.green.stale === false);
+send({ type: 'pinStop', carId: '4', plan: 'green', field: 'driver', value: 'd3' });
+await until(() => state.cars['4'].nextStop.approvals.green?.stale === true);
 check('a plan that moves after approval clears the tick',
-  state.cars['4'].nextStop.approved.stale === true);
+  state.cars['4'].nextStop.approvals.green.stale === true);
+
+// CLEAR wipes the situation on screen and nothing else
+send({ type: 'clearStop', carId: '4', plan: 'green' });
+await until(() => !state.cars['4'].nextStop.pins.green.tyres);
+check('clearing a plan clears its pins and its tick',
+  Object.keys(state.cars['4'].nextStop.pins.green).length === 0 &&
+  state.cars['4'].nextStop.approvals.green === null);
+check('clearing one plan leaves the other two standing',
+  state.cars['4'].nextStop.pins.fcy.fuel?.mode === 'full' &&
+  state.cars['4'].nextStop.pins.fcy.driver === 'd3');
+send({ type: 'clearStop', carId: '4', plan: 'fcy' });
+await until(() => !state.cars['4'].nextStop.pins.fcy.fuel);
+
+// the held tab is what SEND ships: holding the safety-car plan under green
+// materialises the safety-car plan, not the green one
+send({ type: 'pinStop', carId: '4', plan: 'sc', field: 'fuel', value: { mode: 'full' } });
+send({ type: 'stopPlan', carId: '4', plan: 'sc' });
+await until(() => state.cars['4'].nextStop.plan === 'sc');
+send({ type: 'update', carId: '4', patch: { nextStop: { status: 'sent' } } });
+await until(() => state.cars['4'].nextStop.status === 'sent');
+check('sending ships the plan the engineer was holding',
+  state.cars['4'].nextStop.fuelLiters === state.cars['4'].config.tankLiters);
+send({ type: 'stopPlan', carId: '4', plan: null });
+await until(() => state.cars['4'].nextStop.plan === null);
+check('tapping the held tab again follows the race', state.cars['4'].nextStop.plan === null);
+send({ type: 'clearStop', carId: '4', plan: 'sc' });
+await until(() => state.cars['4'].nextStop.status === 'draft');
 
 // a stop nobody has filled in is sent as the app planned it
 send({ type: 'update', carId: '4', patch: { nextStop: emptyStop() } });
@@ -2028,6 +2103,46 @@ check('stintStats filters outliers', (() => {
   const st = stintStats([100, 101, 130, 99]);
   return st.bestSec === 99 && st.avgSec === 100 && st.n === 4;
 })());
+
+// ---- rolling pace window (the pace card) ----
+{
+  const pw = defaultCar('9', '9');
+  pw.currentDriverId = 'd2';
+  pw.stintHistory = [
+    { driverId: 'd2', lapTimes: [110, 111] },
+    { driverId: 'd1', lapTimes: [200, 201] },   // another driver's stint
+    { driverId: 'd2', lapTimes: [102, 103, 104] }
+  ];
+  pw.state.stintLapSec = [100, 101];
+
+  check('pace window default', paceWindowLaps(pw) === PACE_WINDOW_DEFAULT);
+  check('pace window clamps a silly setting', (() => {
+    const a = { ...pw, config: { ...pw.config, paceAvgLaps: 0 } };
+    const b = { ...pw, config: { ...pw.config, paceAvgLaps: 900 } };
+    return paceWindowLaps(a) === PACE_WINDOW_DEFAULT && paceWindowLaps(b) === PACE_WINDOW_MAX;
+  })());
+
+  const laps = driverLapTimes(pw, 'd2');
+  check('driver laps span stints, not the other driver', laps.join() === '110,111,102,103,104,100,101');
+
+  const p5 = paceWindowStats(pw, 'd2', 5);
+  check('pace window takes the newest laps', p5.laps.join() === '102,103,104,100,101');
+  check('pace average is the plain mean of the window', p5.avgSec === 102);
+  check('pace best / worst / last', p5.bestSec === 100 && p5.worstSec === 104 && p5.lastSec === 101);
+  check('pace counts every lap behind the window', p5.total === 7);
+
+  // An in-lap in the window: it still counts in the headline average (that is
+  // what the engineer asked for) but is flagged, and the clean figure is offered.
+  pw.state.stintLapSec = [100, 101, 145];
+  const pOut = paceWindowStats(pw, 'd2', 5);
+  check('pace flags the outlier lap', pOut.outliers.filter(Boolean).length === 1 &&
+    pOut.outliers[pOut.outliers.length - 1] === true);
+  check('pace clean average drops it', pOut.cleanAvgSec != null && pOut.cleanAvgSec < pOut.avgSec);
+
+  const pEmpty = paceWindowStats(pw, 'd4', 5);
+  check('pace window empty for a driver who has not driven',
+    pEmpty.laps.length === 0 && pEmpty.avgSec === null && pEmpty.cleanAvgSec === null);
+}
 
 // ---- pit arrival estimate (pitEta) ----
 // 4 km track, 100 s green lap (40 m/s), FCY 80 km/h (22.22 m/s), the last

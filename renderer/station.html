@@ -76,17 +76,30 @@
               <button id="btn-fuel-correct" style="padding:4px 8px">SET</button></span>
             </div>
           </div>
+          <div class="panel pace">
+            <h3>Pace — <span id="pace-driver">no driver</span></h3>
+            <div class="kv">
+              <span class="k">Average over
+                <input id="pace-laps" type="number" min="1" max="30" step="1" title="How many of this driver's last laps the average covers" />
+                laps</span>
+              <span class="v big" id="pace-avg">--:--.-</span>
+            </div>
+            <div class="lapstrip" id="pace-strip"></div>
+            <div class="kv"><span class="k">Last lap · vs average</span>
+              <span class="v"><span id="pace-last">--:--.-</span> <span class="dlt" id="pace-delta"></span></span></div>
+            <div class="kv"><span class="k">Best · slowest in window</span><span class="v" id="pace-range">—</span></div>
+            <div class="kv" title="Timed laps in the window, out of every timed lap this driver has done"><span class="k">Laps counted</span><span class="v" id="pace-count">0</span></div>
+            <div class="kv" id="pace-clean-row" hidden title="The same window without the in/out and traffic laps marked above"><span class="k">Clean-lap average</span><span class="v" id="pace-clean">—</span></div>
+          </div>
           <div class="panel">
-            <h3>Tyres</h3>
+            <h3>Tyres &amp; brakes</h3>
             <div class="kv"><span class="k">Laps on set</span><span class="v big" id="tyre-laps">0</span></div>
             <div class="meter" id="tyre-meter"><i></i></div>
             <div class="kv"><span class="k">Set on car</span><span class="v" id="tyre-current">—</span></div>
             <div class="kv"><span class="k">Laps left in set</span><span class="v" id="tyre-left">0</span></div>
             <div class="kv" title="Mileage banked on this set — green kilometres and the part driven under a neutralisation"><span class="k">Mileage · green · yellow</span><span class="v" id="tyre-km">—</span></div>
             <div class="kv"><span class="k">Sets used · fresh</span><span class="v" id="tyre-sets">1</span></div>
-          </div>
-          <div class="panel">
-            <h3>Brakes</h3>
+            <div class="subhead">Brakes</div>
             <div id="brakes"></div>
           </div>
         </div>
@@ -98,7 +111,7 @@
             <p class="hint" id="around-empty">Live timing is off — connect the feed on the pit wall.</p>
           </div>
           <div class="panel">
-            <h3>Drivers &amp; seat time</h3>
+            <h3>Drivers — seat &amp; rest time</h3>
             <div id="drivers"></div>
           </div>
         </div>
@@ -141,13 +154,18 @@
         <div class="panel planner">
         <h3>Next pit stop</h3>
 
-        <!-- The three situations the app keeps a plan for. The live one is
-             marked and pre-selected; the other two are one tap away. -->
+        <!-- Three separate plans, one per situation — each with its own pinned
+             lines and its own approval. The live one is marked and shown by
+             default; tapping another holds the card there so that plan can be
+             written in advance, and tapping it again follows the race again. -->
         <div class="plantabs" id="plan-tabs">
           <button data-plan="green"><b>GREEN</b><span data-when>—</span></button>
           <button data-plan="fcy"><b>CODE 60</b><span data-when>—</span></button>
           <button data-plan="sc"><b>SAFETY CAR</b><span data-when>—</span></button>
         </div>
+        <!-- Shown only while a tab is held: the card is no longer following
+             the race, and SEND would ship this plan. -->
+        <div class="planhold hidden" id="plan-hold"></div>
 
         <!-- The call, in words, with the reason under it. -->
         <div class="verdictband" id="plan-verdict">

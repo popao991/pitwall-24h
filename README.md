@@ -167,11 +167,19 @@ mid-race loses nothing.
 - **Next pit stop** panel — the app plans the stop, the engineer changes what
   they disagree with. There is never an empty form: from lights out the panel
   carries a complete stop, recomputed every second.
-  - **Three plans, one card.** Tabs for **GREEN**, **CODE 60 / FCY** and
-    **SAFETY CAR**, each with when it would happen. The situation actually
-    flying is marked and pre-selected until you pick a tab yourself; the other
-    two keep being worked out in the background, so "what do we do if a yellow
-    drops now" is already answered before it drops.
+  - **Three separate plans, one card.** Tabs for **GREEN**, **CODE 60 / FCY**
+    and **SAFETY CAR**, each with when it would happen. They are three
+    different work orders, not one plan shown three ways: each keeps **its own
+    pinned lines and its own approval**, so the code 60 plan can say "full
+    tank, four tyres, driver out" while the green plan next to it says "splash
+    and go" — and both stand ready at the same time. The situation actually
+    flying is marked and shown by default; tapping another tab **holds** the
+    card there so that plan can be written in advance (a strip says so, and
+    the SEND button names the plan it would ship), and tapping the same tab
+    again — or **FOLLOW THE RACE** — hands the card back to the flag. A corner
+    dot on each tab says how far that plan has been written: amber for lines
+    pinned, green for approved, red for approved-then-moved.
+    **CLEAR** wipes only the plan on screen; the other two stand.
   - **The call, then the reason**: BOX NOW / BOX WITHIN N LAPS / STAY OUT /
     NO STOP NEEDED, with the arithmetic behind it in a line of plain English
     ("boxing now would add a whole extra stop (+55 s); the window opens in 6
@@ -186,11 +194,13 @@ mid-race loses nothing.
     names the numbered set it will fit. Each line either **follows
     the app** — recomputed as fuel burns, tyres wear and the flag changes — or
     is **pinned** by you and held exactly there. Pinning one line never freezes
-    the others.
+    the others, and never touches the other two situations' plans.
   - **APPROVE** is the line between "the app suggests" and "we are doing this":
     one tap freezes the figures into the stop and turns the wall card green with
-    your name and the time. If the plan moves materially afterwards the tick
-    clears itself and both screens say so.
+    your name and the time. It signs off **the situation on screen** — each of
+    the three carries its own tick, so a code 60 plan can be approved and ready
+    hours before the yellow that needs it. If that plan moves materially
+    afterwards its own tick clears itself and both screens say so.
   - **SEND TO CREW** → the wall card goes amber ("NEXT STOP — PREPARE").
   - **BOX BOX** → the wall card flashes red ("CAR COMING IN"). That is the last
     button the engineer has to press: with live timing running, the pit-entry
@@ -320,15 +330,21 @@ the car stations or the live timing feed.
 
 Each card is a **grab list**: the parts down the side (fuel, tyres, driver,
 brakes) and one column per situation — **what this car needs if a yellow drops
-this second**, against the **planned green stop** and when it is due. Cells
-that match say *same*, so the only thing that stands out is where the two
-differ: under a splash-and-dash that is the whole message. Figures are the ones
+this second**, against the **planned green stop** and when it is due. Under
+green the code 60 and safety car plans get a column each as soon as the
+engineer has made them say different things (while they agree they share one
+column, *if a yellow now*); under an actual neutralisation only the flag that
+is flying gets a column. Cells that match say *same*, so the only thing that
+stands out is where the columns differ: under a splash-and-dash that is the
+whole message. Figures are the ones
 a mechanic acts on — FULL rather than a litre count that keeps moving, the rig
 figure and seconds, the set number with its mileage, the driver's name, which
 brake parts and the number of each. The row that forces the next stop is marked.
 
-Under the list, the card says whether an engineer has read the plan: *app's own
-plan — not approved yet*, *approved 19:42:10 · T. Claes*, or *changed since
+Under the list, the card says whether an engineer has read the plan the stop
+would actually follow — the flag that is flying, or the plan the engineer is
+holding the card on — and names it: *app's own CODE 60 plan — not approved
+yet*, *GREEN plan approved 19:42:10 · T. Claes*, or *GREEN plan changed since
 approval — waiting on the engineer*. The tick is set on the car station; the
 wall only reports it. So the crew can lay parts out long before anything is
 called, and knows exactly how much of it is committed.
