@@ -6,6 +6,35 @@
   <link rel="stylesheet" href="css/app.css" />
 </head>
 <body>
+  <!-- Start-lights splash: five reds come on one by one, a short hold, then
+       lights out and the launcher rises in. Plays once per app run — coming
+       back from a station skips straight to the picker. -->
+  <div class="startup" id="startup" aria-hidden="true">
+    <div class="gantry">
+      <span class="slight"></span><span class="slight"></span><span class="slight"></span><span class="slight"></span><span class="slight"></span>
+    </div>
+    <div class="boot-brand">PIT<span>WALL</span> 24H</div>
+  </div>
+  <script>
+    (() => {
+      const el = document.getElementById('startup');
+      if (sessionStorage.getItem('bootShown') ||
+          matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        el.remove();
+        return;
+      }
+      sessionStorage.setItem('bootShown', '1');
+      document.documentElement.classList.add('booting');
+      const lights = el.querySelectorAll('.slight');
+      lights.forEach((l, i) => setTimeout(() => l.classList.add('on'), 400 + i * 330));
+      // the hold before lights-out varies, like the real start
+      setTimeout(() => {
+        el.classList.add('out');
+        document.documentElement.classList.remove('booting');
+        setTimeout(() => el.remove(), 700);
+      }, 400 + lights.length * 330 + 350 + Math.random() * 550);
+    })();
+  </script>
   <div class="picker">
     <div class="fx" aria-hidden="true">
       <i class="streak s1"></i>

@@ -2,18 +2,25 @@
 // live strategy picture for one car and lets the engineer plan the next stop.
 
 import {
-  PORT, CONDITIONS, BRAKE_COMPONENTS, DRIVER_COLORS,
-  carCalcs, raceClock, projectStints, defaultDriver,
+  PORT, CONDITIONS, BRAKE_COMPONENTS, BRAKE_AXLES, DRIVER_COLORS,
+  carCalcs, raceClock, projectStints, defaultDriver, stintStartOf,
   stopServiceTime, fcyCalc, fuelStrategy, pitLaneCalc, pitEta, generatePlan,
   normalizeCurve, burnAtLapTime, emptyCurvePoint, LAP_AVG_WINDOW,
   paceWindowStats, paceWindowLaps, PACE_WINDOW_MIN, PACE_WINDOW_MAX,
   currentTyreSet, stopTyreSet, replanFromNow, planVsActual, stintStats, learnedOf,
   tyreSetMileage, tyreLifeLapsOf, tyreKmLeft,
+  warmableTyreSets, TYRE_WARMER_MAX,
+  newTyreSet, generateTyreSets, TYRE_SET_PATTERN, TYRE_SET_GEN_MAX,
+  generateBrakeSets, nextSetNumber, BRAKE_SET_PATTERN,
   brakeSetsOf, usableBrakeSets, brakeSetHours,
-  recommendedStops, resolveStop, PLAN_KEYS, PLAN_LABEL, activePlanKey, stopPins, wallShowsPlan,
+  brakeAxle, brakeKitsOf, kitOfDiscSet, freePadSets, currentBrakeSet,
+  stopBrakeAxle, brakeAxleWork, brakeWorkComps,
+  recommendedStops, resolveStop, PLAN_KEYS, PLAN_LABEL, activePlanKey, stopPins, wallShowsPlan, cautionCall, tyreBudget,
   fmtClock, fmtMinSec, fmtLap, fmtH,
   TIMING_FLAGS, fmtLapUs, fmtGapUs, timingNrOf, ourTimingNrs, createFeedSeen, carPickLabel,
-  driverAbbrev, matchTimingDriver, fuelBreakEven, pitCostSec, refuelTimeSec
+  driverAbbrev, matchTimingDriver, fuelBreakEven, pitCostSec, refuelTimeSec, isNightAt,
+  defaultCar, deepMerge, reconcileTyreSets, reconcileBrakeSets,
+  buildCarFile, readCarFile, applyCarFile, carFileName
 } from '../../shared/model.js';
 import { connect } from './net.js';
 import { renderConditionBar, initConditionControls, renderConditionControls } from './condition.js';
@@ -25,6 +32,7 @@ import {
 import { initHelpToggles } from './help.js';
 import { createTracker } from './trackmap.js';
 import { createRcPanel } from './rcmsg.js';
+import { initFaces, initExpand, facesAfterRender, closeFocus } from './faces.js';
 
 applyIcons();
 initTheme();
@@ -39,9 +47,19 @@ const serverIp = localStorage.getItem('serverIp') || '127.0.0.1';
 const serverPort = localStorage.getItem('serverPort') || PORT; // override used by tests
 
 const $ = id => document.getElementById(id);
+
+// Cards that carry more than one reading, and the ⤢ that throws one up at
+// garage-reading size. Both are this screen's own choice — scoped to the car
+// so a PC that has run two stations remembers each separately — and neither
+// touches the shared state: what a screen is looking at is not race truth.
+initFaces(document, { scope: carId, onChange: () => render() });
+initExpand(document);
+
 let state = null;
 let timing = null;
 let timingRxMs = 0; // when the last timing snapshot arrived (for E.T.A. ticking)
+let stateRxMs = 0; // when the last state snapshot arrived — fuel countdowns tick against it between broadcasts
+let feedDriverId = null; // roster driver the timing feed currently reads in the car
 const feedSeen = createFeedSeen(); // timing nrs the feed has posted this session
 
 // The pit-lane machines only show the newest three messages; the full log
@@ -50,7 +68,7 @@ const rcPanel = createRcPanel({ limit: 3 });
 
 const net = connect({
   url: `ws://${serverIp}:${serverPort}`,
-  onState: s => { state = s; tracker.setData(s, null); render(); },
+  onState: s => { state = s; stateRxMs = Date.now(); tracker.setData(s, null); render(); },
   onTiming: t => {
     timing = t;
     timingRxMs = Date.now();
@@ -59,6 +77,13 @@ const net = connect({
     renderTiming();
     renderScoreboard();
     rcPanel.update(t);
+  },
+  onMessage: m => {
+    if (m.type !== 'carFileResult') return;
+    if (!m.ok) return carFileStatus('The pit wall refused the file: ' + (m.error || 'unknown error'), 'warn');
+    carFileStatus(`Loaded onto ${m.name} — ${(m.applied || []).join(', ')}.` +
+      ((m.warnings || []).length ? ' ' + m.warnings.join(' ') : ''),
+      (m.warnings || []).length ? 'warn' : 'good');
   },
   onStatus: ok => {
     // Announce which car this station runs on every (re)connect, so the wall
@@ -120,6 +145,57 @@ const send = msg => net.send({ carId, ...msg });
 const patchCar = patch => send({ type: 'update', patch });
 const patchStop = patch => patchCar({ nextStop: patch });
 
+// ---- the car the SETTINGS pages act on --------------------------------------
+// Everything on those pages is car-specific work that is done BEFORE the event:
+// the driver line-up, the consumption figures, the tyre allocation, the brake
+// rack. None of it could be typed without a live link, because the pages are a
+// view of the car on the pit wall and there is no car until a station connects
+// — which is exactly backwards for the week before a 24h, when the pit wall is
+// in a flight case.
+//
+// So a station that has never reached a pit wall edits a DRAFT car instead:
+// this PC's own copy, kept in the browser store, saved out as a car file and
+// loaded onto the real car when the box is built. The moment a real state
+// arrives the pages point at the real car and the draft is left alone.
+const DRAFT_KEY = 'carDraft:' + carId;
+
+function loadDraft() {
+  const base = defaultCar(carId, carId);
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY);
+    if (raw) {
+      deepMerge(base, JSON.parse(raw));
+      reconcileTyreSets(base);
+      reconcileBrakeSets(base);
+    }
+  } catch { /* a half-written draft is not worth a dead settings page */ }
+  return base;
+}
+
+let draft = loadDraft();
+
+function saveDraft() {
+  try {
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+  } catch { /* private mode / full store: the page still works, the draft just does not survive */ }
+}
+
+// The car the settings pages read, and whether they are on the draft.
+const settingsCar = () => (state ? state.cars[carId] : draft);
+const onDraft = () => !state;
+
+// A settings edit goes wherever those pages are pointed. Live, that is the
+// wall (which echoes it back); on the draft it is applied here and nothing is
+// sent — a draft is a file being written, not a car being run.
+function patchSettings(patch) {
+  if (state) return patchCar(patch);
+  deepMerge(draft, patch);
+  if (patch.config?.tyreSets != null || patch.tyreSets) reconcileTyreSets(draft);
+  if (patch.config?.brakeSets || patch.brakeSets) reconcileBrakeSets(draft);
+  saveDraft();
+  renderDraftSettings();
+}
+
 $('btn-back').addEventListener('click', () => (location.href = 'index.html'));
 
 // ---- view tabs (strategy / scoreboard) ----
@@ -133,6 +209,9 @@ viewTabs.addEventListener('click', e => {
   if (btn) showView(btn.dataset.view);
 });
 function showView(v) {
+  // An expanded card belongs to the strategy grid — leaving it up would float
+  // it over the scoreboard, and its placeholder would hold a gap behind.
+  closeFocus();
   for (const b of viewTabs.children) b.classList.toggle('on', b.dataset.view === v);
   stationEl.classList.toggle('hidden', v !== 'strategy');
   sbView.classList.toggle('hidden', v !== 'scoreboard');
@@ -155,6 +234,24 @@ $('btn-lap').addEventListener('click', () => {
   $('lap-time').value = '';
 });
 $('btn-undo').addEventListener('click', () => send({ type: 'undoLap' }));
+
+// The lap count set to what the car has actually run. Always available —
+// with the feed live it corrects a miscount, with the feed dead it is how a
+// stint that nobody logged through gets its laps back. It is not a display
+// figure: the stint, the tyre on the car and its mileage all move with it.
+$('btn-lap-correct').addEventListener('click', () => {
+  const v = parseInt($('lap-correct').value, 10);
+  const now = state?.cars?.[carId]?.state.totalLaps ?? 0;
+  if (Number.isFinite(v) && v >= 0 && v !== now &&
+      confirm(`Set total laps to ${v} (from ${now})? Tyre wear and the stint move with it.`)) {
+    send({ type: 'setLaps', laps: v });
+  }
+  $('lap-correct').value = '';
+});
+
+$('lap-catchup').addEventListener('click', e => {
+  if (e.target.dataset.lapnote) send({ type: 'clearLapNote' });
+});
 
 // ---- live timing (decoded on the pit wall PC, rebroadcast to stations) ----
 
@@ -193,6 +290,21 @@ function renderTiming() {
   $('lap-feed-mode').textContent = feedDriving
     ? `feed · ${car.state.totalLaps} laps`
     : `manual · ${car.state.totalLaps} laps`;
+
+  // A lap count that jumps has to say why it jumped: either the laps run
+  // during a feed outage have just been put back, or the feed and the sheet
+  // are too far apart for that to have been done blind and the crew has to
+  // settle it. Stays up until it has been read.
+  const cu = car.state.lapCatchUp;
+  const note = $('lap-catchup');
+  note.hidden = !cu;
+  if (cu) {
+    const dismiss = '<button data-lapnote="ok" style="padding:2px 8px;margin-left:8px">OK</button>';
+    note.innerHTML = cu.laps > 0
+      ? `${cu.laps} lap${cu.laps === 1 ? '' : 's'} put back — run while the timing feed was down.${dismiss}`
+      : `The feed counts ${cu.gap} laps more than this sheet — too far apart to put back by itself. ` +
+        `Check what the car has really run and correct it below.${dismiss}`;
+  }
 
   const stateEl = $('lt-state');
   if (held) {
@@ -244,11 +356,12 @@ function renderTiming() {
   // never logged) is exactly what this catches.
   const feedTag = $('now-driver-feed');
   const rec = e?.driver ? matchTimingDriver(car, e.driver) : null;
+  feedDriverId = rec ? rec.id : null;
   if (rec && rec.id !== car.currentDriverId) {
     feedTag.hidden = false;
     feedTag.className = 'sub drvfeed warn';
     feedTag.innerHTML = `${icon('warn')} feed: ${esc(rec.name)}`;
-    feedTag.title = `Live timing shows "${e.driver}" in the car. If the change is real, log it in the stop planner (or the starting-driver setting).`;
+    feedTag.title = `Live timing shows "${e.driver}" in the car. A change made at a stop belongs in the stop planner — click the driver name to correct the seat by hand.`;
   } else if (rec) {
     feedTag.hidden = false;
     feedTag.className = 'sub drvfeed ok';
@@ -259,6 +372,106 @@ function renderTiming() {
   }
 
   renderAround(e);
+  trackSectors(e);
+  renderSectors(e);
+}
+
+// ---- sectors --------------------------------------------------------------
+// A lap time says the car is three tenths off. The sectors say whether that is
+// one corner, a tyre letting go at the end of the lap, or a driver who has not
+// found the second half yet — and against the class best, whether the deficit
+// is the driver or the car.
+//
+// The wire only ever carries a car's CURRENT sector times, so the session best
+// has to be accumulated here. It is a reading OF the feed, not race state, so
+// it stays on this screen and resets with the session rather than being pushed
+// to the wall.
+const sectorBest = { session: '', own: [null, null, null, null], cls: [null, null, null, null] };
+
+function trackSectors(own) {
+  const sess = (timing?.session?.name || '') + '|' + (timing?.conn || '');
+  if (sess !== sectorBest.session) {
+    sectorBest.session = sess;
+    sectorBest.own = [null, null, null, null];
+    sectorBest.cls = [null, null, null, null];
+  }
+  if (!own) return;
+  // Class best, not overall: an LMP2 sector is no reference for a GT3, and the
+  // number the crew is judged against is the one their own class is running.
+  // With no class on the feed the whole field is the comparison.
+  const ownCls = own.cls || null;
+  for (const e of timing?.entries || []) {
+    const mine = e === own;
+    const sameClass = !ownCls || e.cls === ownCls;
+    if (!mine && !sameClass) continue;
+    const s = [e.s1, e.s2, e.s3, e.s4];
+    for (let i = 0; i < 4; i++) {
+      if (!(s[i] > 0)) continue;
+      if (mine && (sectorBest.own[i] == null || s[i] < sectorBest.own[i])) sectorBest.own[i] = s[i];
+      if (sameClass && (sectorBest.cls[i] == null || s[i] < sectorBest.cls[i])) sectorBest.cls[i] = s[i];
+    }
+  }
+}
+
+// A sector is under a minute on any circuit worth the name, so the "0:" that
+// fmtLapUs prints for a lap is just noise here.
+function fmtSectUs(us) {
+  const n = parseInt(us, 10);
+  if (isNaN(n) || n <= 0 || n > 9e18) return '—';
+  return n < 60e6 ? (n / 1e6).toFixed(3) : fmtLapUs(n);
+}
+
+// Signed difference in seconds. `good` at or below zero — for the last lap
+// that means it just set our best, for the class column that we hold it.
+function sectDelta(us, refUs) {
+  if (!(us > 0) || !(refUs > 0)) return '<td class="num"></td>';
+  const d = (us - refUs) / 1e6;
+  const cls = d <= 0.001 ? 'good' : d < 0.3 ? '' : d < 1 ? 'warn' : 'crit';
+  return `<td class="num ${cls}">${d <= 0.001 ? '—' : '+' + d.toFixed(2)}</td>`;
+}
+
+function renderSectors(own) {
+  const body = $('sect-body');
+  const empty = $('sect-empty');
+  const hasFeed = timing?.conn === 'connected' || timing?.conn === 'replay';
+  const last = own ? [own.s1, own.s2, own.s3, own.s4] : [null, null, null, null];
+  // However many sectors this circuit and this feed actually report.
+  const used = [0, 1, 2, 3].filter(i =>
+    last[i] > 0 || sectorBest.own[i] != null || sectorBest.cls[i] != null);
+
+  if (!hasFeed || !used.length) {
+    body.innerHTML = '';
+    $('sect-theo').textContent = '--:--.-';
+    $('sect-hand').textContent = '—';
+    empty.hidden = false;
+    empty.textContent = !hasFeed
+      ? 'Live timing is off — connect the feed on the pit wall.'
+      : own ? 'This feed carries no sector times.'
+        : 'Waiting for this car on the feed.';
+    return;
+  }
+  empty.hidden = true;
+
+  body.innerHTML = used.map(i => `
+    <tr>
+      <td class="lab">S${i + 1}</td>
+      <td class="num">${fmtSectUs(last[i])}</td>
+      <td class="num">${fmtSectUs(sectorBest.own[i])}</td>
+      ${sectDelta(last[i], sectorBest.own[i])}
+      <td class="num">${fmtSectUs(sectorBest.cls[i])}</td>
+      ${sectDelta(sectorBest.own[i], sectorBest.cls[i])}
+    </tr>`).join('');
+
+  // Our best sectors added up: the lap this car has already shown it can do.
+  // Only worth printing once every sector has a best — a partial sum reads as
+  // an impossibly quick lap.
+  const complete = used.every(i => sectorBest.own[i] != null);
+  const theo = complete ? used.reduce((s, i) => s + sectorBest.own[i], 0) : null;
+  $('sect-theo').textContent = theo ? fmtLapUs(theo) : '--:--.-';
+  const bestLap = own?.bestUs;
+  $('sect-hand').textContent = theo && bestLap > 0
+    ? `${fmtLapUs(bestLap)} · ${((bestLap - theo) / 1e6).toFixed(2)} s in hand`
+    : bestLap > 0 ? fmtLapUs(bestLap) : '—';
 }
 
 // CONTEXT: the five rows of the field around this car — enough for the
@@ -436,12 +649,6 @@ function fmtEta(us) {
   return `${s < 0 ? '-' : ''}${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;
 }
 
-function fmtSectUs(us) {
-  if (us == null) return '—';
-  const sec = us / 1e6;
-  return sec >= 60 ? fmtLapUs(us) : sec.toFixed(3);
-}
-
 // Last-pit / stint cells use the getraceresults letter-prefix convention:
 // "L<µs>" is a frozen duration, "S<µs>"/"E<µs>" a start timestamp on the
 // feed's server clock — the duration is still running, so it counts up
@@ -469,6 +676,14 @@ $('btn-fuel-correct').addEventListener('click', () => {
   const v = parseFloat($('fuel-correct').value);
   if (!isNaN(v)) patchCar({ state: { fuelLiters: v } });
   $('fuel-correct').value = '';
+});
+
+// Same shape as the fuel correction: type the truth, press SET, done. The
+// server moves the set's banked mileage with the laps so they never disagree.
+$('btn-tyre-laps-correct').addEventListener('click', () => {
+  const v = parseInt($('tyre-laps-correct').value, 10);
+  if (Number.isFinite(v) && v >= 0) send({ type: 'setTyreLaps', laps: v });
+  $('tyre-laps-correct').value = '';
 });
 
 // The pace window lives in the car's config, so every screen on this car reads
@@ -555,6 +770,22 @@ $('plan-lines').addEventListener('click', e => {
     return render();
   }
 
+  // a kit in the brake rack — both numbers are pinned in one tap, because a
+  // kit is one part as far as the crew is concerned.
+  const krow = e.target.closest('[data-bkit]');
+  if (krow) {
+    const [axleId, discId] = krow.dataset.bkit.split(':');
+    const a = brakeAxle(axleId);
+    const kit = a && kitOfDiscSet(car, axleId, discId);
+    if (!kit) return;
+    const pin = { ...(stopPins(car, planTab).brakeSets || {}) };
+    // Tapping the kit already chosen hands the pick back to the app.
+    if (pin[a.discs] === kit.disc.id) { delete pin[a.discs]; delete pin[a.pads]; }
+    else { pin[a.discs] = kit.disc.id; pin[a.pads] = kit.pad.id; }
+    pinStop('brakeSets', Object.keys(pin).length ? pin : null);
+    return render();
+  }
+
   // a row in the brake rack — one component group's numbered set. The list
   // stays open: a stop often changes more than one group.
   const brow = e.target.closest('[data-bset]');
@@ -601,15 +832,21 @@ $('plan-lines').addEventListener('click', e => {
     // Handing a line back to the app hands its part numbers back too.
     if (val === 'auto') { pinStop('brakeSets', null); return pinStop('brakes', null); }
     if (val === 'none') { pinStop('brakeSets', null); return pinStop('brakes', []); }
-    // toggle one component, starting from whatever is currently planned
-    const cur = stopPins(car, planTab).brakes || plannedBrakes(car);
-    const next = cur.includes(val) ? cur.filter(x => x !== val) : [...cur, val];
-    // A component no longer being changed has no set to pick.
+    // One axle at a time: PADS onto the discs on the car, or the whole KIT.
+    // Tapping what is already called for takes that axle back out of the stop.
+    const [axleId, mode] = val.split(':');
+    const a = brakeAxle(axleId);
+    if (!a) return;
+    const work = brakeAxleWork(stopPins(car, planTab).brakes || plannedBrakes(car));
+    work[axleId] = work[axleId] === mode ? 'none' : mode;
+    const next = brakeWorkComps(work);
+    // A part no longer being changed has no number to pick.
     const pin = { ...(stopPins(car, planTab).brakeSets || {}) };
-    if (!next.includes(val) && pin[val]) {
-      delete pin[val];
-      pinStop('brakeSets', Object.keys(pin).length ? pin : null);
+    let dropped = false;
+    for (const comp of [a.pads, a.discs]) {
+      if (!next.includes(comp) && pin[comp]) { delete pin[comp]; dropped = true; }
     }
+    if (dropped) pinStop('brakeSets', Object.keys(pin).length ? pin : null);
     pinStop('brakes', next);
   }
   render();
@@ -629,9 +866,14 @@ $('stop-notes').addEventListener('change', () => patchStop({ notes: $('stop-note
 // What the feed decided about the last pit-lane visit: take it back, or tell
 // the app it was a stop after all.
 $('pit-visit').addEventListener('click', e => {
-  // brake toggles inside the correction form flip in place
-  const bk = e.target.closest('[data-fixbrake]');
-  if (bk) return bk.classList.toggle('on');
+  // the axle's NO / PADS / KIT inside the correction form flips in place
+  const bw = e.target.closest('[data-fixwork]');
+  if (bw) {
+    const box = bw.closest('[data-fixaxle]');
+    box.dataset.work = bw.dataset.fixwork.split(':')[1];
+    for (const b2 of box.querySelectorAll('[data-fixwork]')) b2.classList.toggle('on', b2 === bw);
+    return;
+  }
 
   const b = e.target.closest('button[data-act]');
   if (!b) return;
@@ -652,12 +894,16 @@ $('pit-visit').addEventListener('click', e => {
       driverChange: val('driver') || null
     };
     service.brakeSetIds = {};
-    for (const bb of el.querySelectorAll('[data-fixbrake]')) {
-      const comp = bb.dataset.fixbrake;
-      service[comp] = bb.classList.contains('on');
-      // Only a group that really was changed carries a part number.
-      const sel = el.querySelector(`[data-fixbset="${comp}"]`);
-      service.brakeSetIds[comp] = service[comp] ? (sel?.value || null) : null;
+    for (const box of el.querySelectorAll('[data-fixaxle]')) {
+      const a = brakeAxle(box.dataset.fixaxle);
+      if (!a) continue;
+      const work = box.dataset.work;
+      for (const comp of [a.pads, a.discs]) {
+        service[comp] = work === 'kit' || (work === 'pads' && comp === a.pads);
+        // Only a part that really was changed carries a number.
+        const sel = box.querySelector(`[data-fixbset="${comp}"]`);
+        service.brakeSetIds[comp] = service[comp] ? (sel?.value || null) : null;
+      }
     }
     send({ type: 'correctStop', service });
   }
@@ -706,9 +952,18 @@ $('stop-actions').addEventListener('click', e => {
 // ---- settings modal ----
 
 const overlay = $('settings-overlay');
-$('btn-settings').addEventListener('click', () => overlay.classList.remove('hidden'));
+$('btn-settings').addEventListener('click', () => {
+  overlay.classList.remove('hidden');
+  renderDraftSettings(); // with no pit wall, nothing else draws this page
+  // With one, the pane is filled by render() — draw it now rather than at the
+  // next state push, so opening SETTINGS never shows an empty rack for a tick.
+  render();
+});
 $('btn-settings-close').addEventListener('click', () => overlay.classList.add('hidden'));
-overlay.addEventListener('click', e => { if (e.target === overlay) overlay.classList.add('hidden'); });
+// No click-outside close. Settings is a form the crew works through a field at
+// a time — half a tyre pool typed in, the cursor in a number — and a stray
+// click on the backdrop that throws the page away is not a shortcut anyone
+// asked for. CLOSE is the way out.
 
 // settings tabs
 const tabbar = $('settings-tabs');
@@ -742,8 +997,8 @@ for (const inp of overlay.querySelectorAll('input[data-path], select[data-path]'
     for (let i = 0; i < parts.length - 1; i++) node = node[parts[i]] = {};
     node[parts[parts.length - 1]] = val;
     inp.classList.remove('unsent');
-    pendingSettings.set(inp.dataset.path, { value: val, sentMs: Date.now() });
-    patchCar(patch);
+    if (!onDraft()) pendingSettings.set(inp.dataset.path, { value: val, sentMs: Date.now() });
+    patchSettings(patch);
   });
 }
 
@@ -751,10 +1006,105 @@ function getPath(obj, path) {
   return path.split('.').reduce((o, k) => (o == null ? o : o[k]), obj);
 }
 
+// ---- the neutralisation call, edited on the card itself -------------------
+// These three live on the card rather than in SETTINGS because they are read
+// and argued about while a flag is out, not configured once before the race.
+const cautionPanel = $('caution-cfg');
+const cautionCog = $('btn-caution-cfg');
+
+cautionCog.addEventListener('click', () => {
+  const open = cautionPanel.hasAttribute('hidden');
+  cautionPanel.toggleAttribute('hidden', !open);
+  cautionCog.classList.toggle('on', open);
+  cautionCog.closest('.panel').classList.toggle('cfg-open', open);
+  if (open) {
+    fillCautionInputs();
+    // Answer straight away rather than waiting for the next state push — the
+    // panel is opened to read it, and a blank card looks broken.
+    const car = state?.cars[carId];
+    if (car) renderCautionOut(car);
+  }
+});
+
+for (const inp of cautionPanel.querySelectorAll('input[data-cpath]')) {
+  inp.addEventListener('change', () => {
+    const val = parseFloat(inp.value);
+    if (isNaN(val)) return;
+    // Paths may be nested (avgLapSec.dry), so build the patch down to the leaf.
+    const parts = inp.dataset.cpath.split('.');
+    const cfgPatch = {};
+    let node = cfgPatch;
+    for (let i = 0; i < parts.length - 1; i++) node = node[parts[i]] = {};
+    node[parts[parts.length - 1]] = val;
+    patchSettings({ config: cfgPatch });
+  });
+}
+
+function fillCautionInputs() {
+  const cfg = settingsCar()?.config;
+  if (!cfg) return;
+  for (const inp of cautionPanel.querySelectorAll('input[data-cpath]')) {
+    // Never fight the field being typed into.
+    if (document.activeElement !== inp) inp.value = getPath(cfg, inp.dataset.cpath) ?? 0;
+  }
+}
+
+// Both flags, side by side: they differ a lot, and the standing call for the
+// next one is what the crew actually wants off this panel.
+function renderCautionOut(car) {
+  const out = $('caution-out');
+  if (!out || cautionPanel.hasAttribute('hidden')) return;
+  if (!(car.config.tyreDegSecPerKm > 0)) {
+    out.innerHTML = '<p class="hint">Set a tyre wear figure to get an answer — ' +
+      'without it the call cannot see what old rubber costs.</p>';
+    return;
+  }
+  const rate = car.config.cautionsPerHour || 0;
+  out.innerHTML = ['fcy', 'sc'].map(pace => {
+    let r = null;
+    try { r = cautionCall(car, state.race, Date.now(), pace); } catch { r = null; }
+    const label = pace === 'fcy' ? 'CODE 60' : 'SAFETY CAR';
+    if (!r) return `<div class="row"><span class="k">${label}</span><span class="v">—</span></div>`;
+    const be = r.breakEven == null ? '> 5.00' : r.breakEven.toFixed(2);
+    const take = rate > 0 ? r.takeIt : true;
+    // A margin this small is inside the noise of the inputs it was built from.
+    // Calling it either way would read as a decision the maths has not earned,
+    // so it is shown as what it is and the crew decides on everything else.
+    const lineBall = r.marginSec < 2;
+    const head = lineBall
+      ? `${label} — LINE BALL${take ? ` · ${esc(r.winner.label.toLowerCase())} if you box` : ''}`
+      : `${label} — ${take ? `TAKE IT · ${esc(r.winner.label.toLowerCase())}` : 'STAY OUT'}`;
+    return `<div class="verdict ${lineBall ? 'even' : take ? 'take' : 'hold'}">${head}</div>
+      <div class="row"><span class="k">break-even rate</span><span class="v">${be} /h</span></div>
+      <div class="row"><span class="k">beats next best by</span><span class="v">${
+        lineBall ? 'under 2 s — too close to call' : r.marginSec.toFixed(1) + ' s'}</span></div>`;
+  }).join('<div style="height:8px"></div>') +
+    `<div class="row"><span class="k">your rate</span><span class="v">${
+      rate > 0 ? rate.toFixed(2) + ' /h' : 'not set'}</span></div>` +
+    tyreBudgetRow(car);
+}
+
+// The stock, not the set on the car: on a fixed allocation a set binned early
+// is distance that cannot be bought back, and that is what makes a "free" stop
+// under yellow expensive. Shown whenever the sums are tight.
+function tyreBudgetRow(car) {
+  let b = null;
+  try { b = tyreBudget(car, state.race, Date.now()); } catch { b = null; }
+  if (!b) return '';
+  // Same ledger as the Stock-to-flag row in the tyre panel, so the two can
+  // never tell the crew different stories.
+  const base = `<div class="row${b.setsMargin <= 1 ? ' tight' : ''}"><span class="k">tyre stock${
+    b.setsMargin < 0 ? ' — SHORT' : ''}</span><span class="v">${
+    b.setsFresh} fresh · needs ~${b.setsNeededMin} · margin ${b.setsMargin >= 0 ? '+' : ''}${b.setsMargin}</span></div>`;
+  if (b.affordEarlyChange) return base;
+  return base + `<div class="row"><span class="k">early change spends</span><span class="v">a set the flag still needs — ${
+    Math.round(b.fittedKmLeft)} km binned</span></div>`;
+}
+
 function patchDriver(idx, field, value) {
-  const drivers = state.cars[carId].drivers.map(d => ({ ...d }));
+  const drivers = settingsCar().drivers.map(d => ({ ...d }));
   drivers[idx][field] = value;
-  patchCar({ drivers });
+  patchSettings({ drivers });
 }
 
 // ---- race start (starting fuel / starting driver) ----
@@ -763,30 +1113,28 @@ function patchDriver(idx, field, value) {
 // stored as 0 rather than as the current tank size (which would silently stop
 // tracking the tank setting).
 $('start-fuel').addEventListener('change', () => {
-  if (!state) return;
   const raw = $('start-fuel').value.trim();
   const v = raw === '' ? 0 : parseFloat(raw);
   if (isNaN(v) || v < 0) return;
-  const tank = state.cars[carId].config.tankLiters;
-  patchCar({ config: { startFuelL: Math.min(v, tank) } });
+  const tank = settingsCar().config.tankLiters;
+  patchSettings({ config: { startFuelL: Math.min(v, tank) } });
 });
 
 $('start-driver').addEventListener('change', () => {
-  if (!state) return;
-  const car = state.cars[carId];
+  const car = settingsCar();
   const id = $('start-driver').value;
   if (!id || id === car.currentDriverId) return;
   // Mid-race this is not a "starting" driver any more: the seat time of the
   // running stint would be credited to whoever is selected here. A driver
   // change during the race belongs in the stop planner.
-  if (raceClock(state.race, Date.now()).running) {
+  if (state && raceClock(state.race, Date.now()).running) {
     const ok = confirm(
       'The race has already started. Changing the driver here credits the whole current stint to the new driver and does not log a pit stop.\n\n' +
       'For a normal driver change use DRIVER in the stop planner. Continue anyway?'
     );
     if (!ok) return renderStartDriver(car);
   }
-  patchCar({ currentDriverId: id });
+  patchSettings({ currentDriverId: id });
 });
 
 let startDriverKey = '';
@@ -810,8 +1158,7 @@ function renderStartDriver(car) {
 }
 
 $('btn-drv-add').addEventListener('click', () => {
-  if (!state) return;
-  const car = state.cars[carId];
+  const car = settingsCar();
   let n = car.drivers.length + 1;
   while (car.drivers.some(d => d.id === 'd' + n)) n++;
   const drivers = [...car.drivers, defaultDriver(n)];
@@ -820,11 +1167,11 @@ $('btn-drv-add').addEventListener('click', () => {
   if (!car.drivers.some(d => d.id === car.currentDriverId)) {
     patch.currentDriverId = drivers[0].id;
   }
-  patchCar(patch);
+  patchSettings(patch);
 });
 
 function removeDriver(i) {
-  const car = state.cars[carId];
+  const car = settingsCar();
   const d = car.drivers[i];
   if (d.id === car.currentDriverId) {
     return alert(`${d.name} is in the car — switch drivers before removing them.`);
@@ -832,7 +1179,7 @@ function removeDriver(i) {
   if (!confirm(`Remove ${d.name}? Their logged seat time is lost.`)) return;
   const patch = { drivers: car.drivers.filter((_, j) => j !== i) };
   if (car.nextStop.driverChange === d.id) patch.nextStop = { driverChange: null };
-  patchCar(patch);
+  patchSettings(patch);
 }
 
 let builtDriverCount = -1;
@@ -856,6 +1203,7 @@ function buildDriverTable(car) {
     abbrInp.type = 'text';
     abbrInp.className = 'abbr';
     abbrInp.maxLength = 4;
+    abbrInp.title = 'Short code shown in compact readouts. Empty = the proposed one: first letter of the first name + first two of the last (Roman Rusinov → RRU)';
     abbrInp.dataset.drvAbbr = i;
     abbrInp.addEventListener('change', () =>
       patchDriver(i, 'abbrev', abbrInp.value.trim().toUpperCase()));
@@ -880,7 +1228,7 @@ function buildDriverTable(car) {
       btn.className = 'flag';
       btn.dataset.drvFlag = `${i}.${field}`;
       btn.addEventListener('click', () =>
-        patchDriver(i, field, !state.cars[carId].drivers[i][field]));
+        patchDriver(i, field, !settingsCar().drivers[i][field]));
       td.appendChild(btn);
       tr.appendChild(td);
     }
@@ -937,8 +1285,8 @@ function curvePointsOf(car, i) {
 }
 
 function addCurvePoint(i) {
-  const pts = [...curvePointsOf(state.cars[carId], i)];
-  const car = state.cars[carId];
+  const car = settingsCar();
+  const pts = [...curvePointsOf(car, i)];
   // Seed a new row from the car's dry figures so the engineer edits a
   // plausible point instead of two zeroes.
   const last = pts[pts.length - 1];
@@ -949,7 +1297,7 @@ function addCurvePoint(i) {
 }
 
 function removeCurvePoint(i, j) {
-  patchCurve(i, curvePointsOf(state.cars[carId], i).filter((_, k) => k !== j));
+  patchCurve(i, curvePointsOf(settingsCar(), i).filter((_, k) => k !== j));
 }
 
 // Rebuilt whenever the driver names or the number of points change; the
@@ -992,7 +1340,7 @@ function renderFuelCurves(car, c) {
           lapInp.value = fmtLap(p.lapSec);
           lapInp.title = 'mm:ss.s or seconds';
           lapInp.addEventListener('change', () => {
-            const next = [...curvePointsOf(state.cars[carId], i)];
+            const next = [...curvePointsOf(settingsCar(), i)];
             if (!next[j]) return;
             next[j] = { ...next[j], lapSec: parseLapInput(lapInp.value) };
             patchCurve(i, next);
@@ -1007,7 +1355,7 @@ function renderFuelCurves(car, c) {
           fuelInp.min = '0';
           fuelInp.value = p.fuelL;
           fuelInp.addEventListener('change', () => {
-            const next = [...curvePointsOf(state.cars[carId], i)];
+            const next = [...curvePointsOf(settingsCar(), i)];
             if (!next[j]) return;
             const v = parseFloat(String(fuelInp.value).replace(',', '.'));
             next[j] = { ...next[j], fuelL: isNaN(v) || v < 0 ? 0 : v };
@@ -1167,12 +1515,26 @@ function renderSettings(car, c) {
 
   renderFuelCurves(car, c);
   renderFuelModelStatus(car, c);
+  // These pages work with or without a pit wall: connected they edit the car,
+  // and with no link they edit this PC's draft — which is how a car file gets
+  // written the week before the event. The banner says which one is on screen,
+  // because the one thing that must never happen is typing a full setup into a
+  // draft while believing it is going to the car.
+  const banner = $('settings-offline');
+  banner.hidden = !onDraft();
+  for (const b of ['btn-tyreset-add', 'btn-tyreset-gen', 'btn-brakeset-gen']) {
+    $(b).disabled = false;
+    $(b).removeAttribute('title');
+  }
+
   renderTyreSets(car);
+  renderTyreGen();
   renderBrakeSets(car);
+  renderBrakeGen();
   renderLearned(car);
 
   // Event settings readout (edited on the pit wall, same for every car)
-  const ev = state.event || car.config;
+  const ev = state?.event || car.config;
   const pl = pitLaneCalc(car);
   const regFmt = min => (min > 0 ? fmtH(min / 60) : 'not enforced');
   $('event-info').innerHTML = `
@@ -1188,7 +1550,116 @@ function renderSettings(car, c) {
     <div class="kv"><span class="k">Max drive whole race</span><span class="v">${regFmt(ev.regTotalMin)}</span></div>
     <div class="kv"><span class="k">Min rest between stints</span><span class="v">${ev.regRestMin > 0 ? ev.regRestMin + ' min' : 'not enforced'}</span></div>`;
 
+  renderCarFileSummary(car);
+  // Emptying the draft is only ever offered for the draft: there is no such
+  // button for a car the race is being run on.
+  $('btn-carfile-reset').hidden = !onDraft();
   renderPresets();
+}
+
+// ---- car files ----
+// The two buttons the CAR FILE tab exists for: write what these pages are
+// showing out to a file, or read one back in. Which car that is follows the
+// pages themselves — the live car when the station is connected, this PC's
+// draft when it is not — so the same pair does the preparation at home in
+// October and the loading in the box on race morning.
+
+let appVersion = '';
+window.pitwallApi?.getVersion?.().then(v => { appVersion = v?.version || ''; }).catch(() => {});
+
+function carFileStatus(text, cls = '') {
+  const el = $('carfile-status');
+  if (!el) return;
+  el.className = 'hint' + (cls ? ' ' + cls : '');
+  el.textContent = text;
+  el.hidden = !text;
+}
+
+// What the file about to be written would contain, in the shape a person can
+// check before saving: the four things that are easy to get wrong.
+function renderCarFileSummary(car) {
+  const wrap = $('carfile-summary');
+  if (!wrap) return;
+  const drivers = (car.drivers || []).map(d => d.name).join(', ') || 'none';
+  const curves = (car.drivers || []).filter(d => normalizeCurve(d.fuelCurve).length).length;
+  const tyres = (car.tyreSets || []).length;
+  const brakes = BRAKE_COMPONENTS.map(b => `${b.short} ${brakeSetsOf(car, b.id).length}`).join(' · ');
+  wrap.innerHTML = `
+    <div class="kv"><span class="k">These buttons act on</span><span class="v">${onDraft()
+      ? "this PC's draft — no pit wall" : 'the car on the pit wall'}</span></div>
+    <div class="kv"><span class="k">Saved as</span><span class="v">${esc(carFileName(car))}</span></div>
+    <div class="kv"><span class="k">Car</span><span class="v">${esc(car.name)} · #${esc(car.number)}${
+      [car.make, car.model].filter(Boolean).length ? ' · ' + esc([car.make, car.model].filter(Boolean).join(' ')) : ''}</span></div>
+    <div class="kv"><span class="k">Drivers</span><span class="v">${esc(drivers)}${
+      curves ? ` (${curves} with a fuel curve)` : ''}</span></div>
+    <div class="kv"><span class="k">Fuel</span><span class="v">${car.config.tankLiters} L tank · ${
+      car.config.burnPerLap?.dry} L/lap dry · ${car.config.avgLapSec?.dry} s lap</span></div>
+    <div class="kv"><span class="k">Racks</span><span class="v">${tyres} tyre set${tyres === 1 ? '' : 's'} · ${brakes}</span></div>`;
+}
+
+$('btn-carfile-save').addEventListener('click', async () => {
+  const api = window.pitwallApi;
+  if (!api?.saveCarFile) return carFileStatus('This build cannot reach the file system.', 'warn');
+  const car = settingsCar();
+  const res = await api.saveCarFile(carFileName(car), buildCarFile(car, { app: appVersion }));
+  if (res?.canceled) return;
+  if (!res?.ok) return carFileStatus('Could not save: ' + (res?.error || 'unknown error'), 'warn');
+  carFileStatus('Saved to ' + res.path, 'good');
+});
+
+$('btn-carfile-load').addEventListener('click', async () => {
+  const api = window.pitwallApi;
+  if (!api?.openCarFile) return carFileStatus('This build cannot reach the file system.', 'warn');
+  const res = await api.openCarFile();
+  if (res?.canceled) return;
+  if (!res?.ok) return carFileStatus('Could not open: ' + (res?.error || 'unknown error'), 'warn');
+  const read = readCarFile(res.text);
+  if (!read.ok) return carFileStatus(read.error, 'warn');
+  const f = read.file;
+  const who = [f.car?.number ? '#' + f.car.number : '', f.car?.name || ''].filter(Boolean).join(' ') || 'a car';
+  if (state) {
+    // The live car: the pit wall applies it, so every screen lands on the same
+    // setup at the same moment.
+    const car = state.cars[carId];
+    const ok = confirm(
+      `Load "${res.name}" (${who}) onto ${car.name}?\n\n` +
+      'It sets the car information, fuel and pace figures, wear limits, the driver table ' +
+      'and the tyre/brake racks.\n\n' +
+      'Laps, mileage, banked hours, seat time and every set that has already run are kept, ' +
+      'and event settings are not touched.');
+    if (!ok) return;
+    send({ type: 'loadCarFile', file: f });
+    carFileStatus('Sent to the pit wall…');
+  } else {
+    if (!confirm(`Load "${res.name}" (${who}) into this PC's draft? What is in the draft now is replaced.`)) return;
+    const r = applyCarFile(draft, f);
+    if (!r.ok) return carFileStatus(r.error, 'warn');
+    saveDraft();
+    renderDraftSettings();
+    carFileStatus(`Loaded ${res.name} into the draft — ${r.applied.join(', ')}.` +
+      (r.warnings.length ? ' ' + r.warnings.join(' ') : ''), r.warnings.length ? 'warn' : 'good');
+  }
+});
+
+$('btn-carfile-reset').addEventListener('click', () => {
+  if (!confirm('Empty the draft and start from the app defaults? The car files already saved to disk are not touched.')) return;
+  draft = defaultCar(carId, carId);
+  saveDraft();
+  renderDraftSettings();
+  carFileStatus('Draft emptied — every setting is back to the app default.');
+});
+
+// The settings pages with no pit wall behind them: the same forms, this PC's
+// draft car. Called at boot, when the page is opened and after every draft
+// edit; once a real state arrives render() owns the page and this stands down.
+const DRAFT_RACE = {
+  name: '', durationH: 24, startMs: null,
+  fcy: { mode: 'auto', active: false, startMs: null, source: 'none', flag: null, overrideFlag: null }
+};
+
+function renderDraftSettings() {
+  if (state) return;
+  renderSettings(draft, carCalcs(draft, DRAFT_RACE, Date.now()));
 }
 
 // ---- setup presets ----
@@ -1201,15 +1672,23 @@ $('btn-preset-save').addEventListener('click', () => {
   $('preset-name').value = '';
 });
 
-let presetListKey = '';
+let presetListKey = null;
 function renderPresets() {
   const presets = state?.presets || {};
-  const key = Object.entries(presets).map(([n, p]) => n + p.savedMs).join('|');
+  const key = (onDraft() ? 'draft|' : 'live|') +
+    Object.entries(presets).map(([n, p]) => n + p.savedMs).join('|');
   if (key === presetListKey) return;
   presetListKey = key;
   const wrap = $('preset-list');
   const names = Object.keys(presets).sort();
-  wrap.innerHTML = names.length ? '' : '<p class="hint">No presets saved yet.</p>';
+  // A preset lives in the shared state on the pit wall, so it is the one thing
+  // on this page that genuinely needs a link. The car file above does the same
+  // job with no pit wall at all — say so rather than showing an empty list.
+  $('btn-preset-save').disabled = onDraft();
+  $('preset-name').disabled = onDraft();
+  wrap.innerHTML = names.length ? '' : `<p class="hint">${onDraft()
+    ? 'Presets are kept on the pit wall PC — they need a connected station. With no pit wall, save a car file instead.'
+    : 'No presets saved yet.'}</p>`;
   for (const name of names) {
     const p = presets[name];
     const row = document.createElement('div');
@@ -1234,15 +1713,95 @@ function renderPresets() {
 // ---- tyre set manager ----
 
 function patchTyreSets(sets) {
-  patchCar({ tyreSets: sets, config: { tyreSets: sets.length } });
+  patchSettings({ tyreSets: sets, config: { tyreSets: sets.length } });
 }
 
 $('btn-tyreset-add').addEventListener('click', () => {
-  if (!state) return;
-  const sets = state.cars[carId].tyreSets || [];
+  const sets = settingsCar().tyreSets || [];
   let n = sets.length + 1;
   while (sets.some(t => t.id === 't' + n)) n++;
-  patchTyreSets([...sets.map(t => ({ ...t })), { id: 't' + n, name: 'S' + n, laps: 0, used: false }]);
+  patchTyreSets([...sets.map(t => ({ ...t })), newTyreSet('t' + n, 'S' + n)]);
+});
+
+// ---- generate a batch of sets ----
+// The allocation for a 24h arrives numbered on the rubber, not as twelve rows
+// to type in one at a time. The form asks the three things that description
+// needs — pattern, first number, how many — and shows the names it would
+// write before anything is committed; nothing is patched until GENERATE.
+
+const genForm = { count: 12, start: 1, pattern: TYRE_SET_PATTERN, replace: false };
+
+function openTyreGen(open) {
+  const box = $('tyreset-gen');
+  box.hidden = !open;
+  if (!open) return;
+  // Continue the numbering already on the shelf rather than colliding with it.
+  genForm.start = nextSetNumber((settingsCar().tyreSets || []).map(t => t.name));
+  $('gen-count').value = genForm.count;
+  $('gen-start').value = genForm.start;
+  $('gen-pattern').value = genForm.pattern;
+  renderTyreGen();
+}
+
+// What the form is asking for right now, clamped the same way the model does.
+function readTyreGen() {
+  genForm.count = Math.max(1, Math.min(TYRE_SET_GEN_MAX, parseInt($('gen-count').value, 10) || 1));
+  genForm.start = Math.max(0, parseInt($('gen-start').value, 10) || 0);
+  genForm.pattern = $('gen-pattern').value.trim() || TYRE_SET_PATTERN;
+  return generateTyreSets(settingsCar(), {
+    pattern: genForm.pattern, start: genForm.start,
+    count: genForm.count, replaceUnused: genForm.replace
+  });
+}
+
+function renderTyreGen() {
+  if ($('tyreset-gen').hidden) return;
+  const gen = readTyreGen();
+  $('gen-preview').innerHTML = gen.names
+    .map(n => `<span class="tag${gen.duplicates.includes(n) ? ' dup' : ''}">${esc(n)}</span>`).join('');
+  $('btn-gen-replace').classList.toggle('on', genForm.replace);
+  const note = $('gen-note');
+  const dup = [...new Set(gen.duplicates)];
+  if (dup.length) {
+    note.className = 'hint warn';
+    note.textContent = `Already in the list: ${dup.join(', ')} — rename, renumber, ` +
+      'or turn REPLACE UNUSED on if those are the placeholder sets.';
+  } else {
+    note.className = 'hint';
+    note.textContent =
+      `${gen.names.length} set${gen.names.length === 1 ? '' : 's'} added` +
+      (gen.removed ? `, ${gen.removed} unused set${gen.removed === 1 ? '' : 's'} removed` : '') +
+      ` — ${gen.sets.length} in the pool afterwards.`;
+  }
+  $('btn-gen-go').disabled = dup.length > 0;
+}
+
+$('btn-tyreset-gen').addEventListener('click', () => {
+  openTyreGen($('tyreset-gen').hidden);
+});
+$('btn-gen-cancel').addEventListener('click', () => openTyreGen(false));
+$('btn-gen-replace').addEventListener('click', () => {
+  genForm.replace = !genForm.replace;
+  renderTyreGen();
+});
+for (const id of ['gen-count', 'gen-start', 'gen-pattern']) {
+  $(id).addEventListener('input', renderTyreGen);
+}
+
+$('btn-gen-go').addEventListener('click', () => {
+  const gen = readTyreGen();
+  if (gen.duplicates.length) return;
+  if (gen.removed && !confirm(
+    `Replace ${gen.removed} unused set${gen.removed === 1 ? '' : 's'} with ` +
+    `${gen.names.length} new one${gen.names.length === 1 ? '' : 's'}? ` +
+    'Sets that have run, the set on the car and scrapped sets are kept.')) return;
+  // A stop still pointing at a set that just went out of the pool would show
+  // as "NO SET FREE" in the planner — let it fall back to the next new set.
+  const chosen = settingsCar().nextStop?.tyreSetId;
+  const patch = { tyreSets: gen.sets, config: { tyreSets: gen.sets.length } };
+  if (chosen && !gen.sets.some(t => t.id === chosen)) patch.nextStop = { tyreSetId: null };
+  patchSettings(patch);
+  openTyreGen(false);
 });
 
 // Why a set gets binned. Picking the reason IS the confirmation step — a
@@ -1251,15 +1810,37 @@ $('btn-tyreset-add').addEventListener('click', () => {
 const SCRAP_REASONS = ['worn out', 'flat spot', 'damage', 'wrong compound'];
 let scrapAsk = null; // id of the set whose reason strip is open
 
+// A set counts as used exactly while it carries mileage — so typing the laps
+// or the kilometres back to zero puts it back in the new pool, which is how a
+// crew undoes a figure they mistyped into the wrong row. The set on the car is
+// used whatever the boxes say: it is on the car.
+const tyreSetUsed = (t, onCar) => onCar || +t.laps > 0 || +t.km > 0;
+
 let tyreSetKey = '';
+let tyreSetHold = false;
 function renderTyreSets(car) {
   const wrap = $('tyreset-list');
   if (!wrap) return;
   const sets = car.tyreSets || [];
   const curId = car.state.currentTyreSetId;
-  const key = sets.map(t => `${t.id}:${t.name}:${t.laps}:${t.km}:${t.kmFcy}:${t.used}:${t.scrapped}:${t.scrapReason}`).join('|') +
+  const key = sets.map(t => `${t.id}:${t.name}:${t.compound}:${t.laps}:${t.km}:${t.kmFcy}:${t.used}:${t.scrapped}:${t.scrapReason}`).join('|') +
     `|${curId}:${car.state.tyreLapsOnSet}|${scrapAsk}`;
   if (key === tyreSetKey) return;
+  // Every counted lap moves these numbers, and rebuilding the list under the
+  // crew's hands would throw away the figure they are half way through typing.
+  // Hold the redraw while a box in here has focus; the buttons still redraw at
+  // once, so the scrap strip is never held back.
+  const editing = document.activeElement;
+  if (editing && editing.tagName === 'INPUT' && wrap.contains(editing)) {
+    if (!tyreSetHold) {
+      tyreSetHold = true;
+      wrap.addEventListener('focusout', () => {
+        tyreSetHold = false;
+        setTimeout(() => renderTyreSets(settingsCar()), 0);
+      }, { once: true });
+    }
+    return;
+  }
   tyreSetKey = key;
   wrap.innerHTML = sets.length ? '' : '<p class="hint">No sets — press ADD SET.</p>';
   sets.forEach((t, i) => {
@@ -1272,14 +1853,18 @@ function renderTyreSets(car) {
       : t.used ? ['', 'USED'] : ['new', 'NEW'];
     const laps = onCar ? car.state.tyreLapsOnSet : t.laps;
     row.innerHTML = `
-      <input data-set-name type="text" style="width:90px" />
+      <input data-set-name type="text" />
       <span class="setpill ${pill[0]}">${pill[1]}</span>
-      <span class="meta">laps <input data-set-laps type="number" min="0" step="1" style="width:60px" ${onCar ? 'disabled title="live — counted in the tyre panel"' : ''} /></span>
-      <span class="km" title="Mileage banked on this set — the yellow part was driven under a neutralisation">${
-        mil.km.toFixed(0)} km${mil.kmFcy > 0 ? ` <em>(${mil.kmFcy.toFixed(0)} yellow)</em>` : ''}</span>
+      <button data-act="compound" class="setpill ${t.compound === 'wet' ? 'iswet' : 'isslick'}"
+        title="Which stock this set belongs to. Wets are insurance — they are never counted toward the dry-running budget, and a wet track proposes them first.">${
+        t.compound === 'wet' ? 'WET' : 'SLICK'}</button>
+      <span class="meta figs">laps <input data-set-laps type="number" min="0" step="1" style="width:60px" ${onCar ? 'disabled title="live — counted in the tyre panel"' : ''} />
+        km <input data-set-km type="number" min="0" step="1" style="width:70px" title="Mileage banked on this set — type in what rubber that has already run arrives with" /></span>
+      <span class="km" title="The part of this set's mileage driven under a neutralisation">${
+        mil.kmFcy > 0 ? `<em>${mil.kmFcy.toFixed(0)} yellow</em>` : ''}</span>
       <span class="meta">${t.scrapped && t.scrapReason ? esc(t.scrapReason) : ''}</span>
       <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
-        ${t.scrapped
+        ${onDraft() ? '' : t.scrapped
           ? `<button data-act="restore">RESTORE</button>`
           : `<button data-act="scrap" ${onCar ? 'disabled title="the set on the car has to come off first"' : ''}>SCRAP…</button>`}
         <button data-act="del" class="danger" ${onCar || t.used ? 'disabled title="only never-used sets can be removed"' : ''}>${icon('x')}</button>
@@ -1297,7 +1882,25 @@ function renderTyreSets(car) {
       const v = parseInt(lapsInp.value, 10);
       const next = sets.map(x => ({ ...x }));
       next[i].laps = isNaN(v) || v < 0 ? 0 : v;
-      next[i].used = next[i].used || next[i].laps > 0;
+      next[i].used = tyreSetUsed(next[i], onCar);
+      patchTyreSets(next);
+    });
+    // Kilometres are the figure tyre life is measured in, so a set that arrives
+    // with mileage on it — a test day, a set bought used — has to be typed in
+    // here or the app reads it as a fresh 300 km of life.
+    const kmInp = row.querySelector('[data-set-km]');
+    kmInp.value = +mil.km.toFixed(1);
+    kmInp.addEventListener('change', () => {
+      const v = parseFloat(kmInp.value);
+      const next = sets.map(x => ({ ...x }));
+      next[i].km = isNaN(v) || v < 0 ? 0 : +v.toFixed(2);
+      next[i].kmFcy = Math.min(Math.max(0, +next[i].kmFcy || 0), next[i].km);
+      next[i].used = tyreSetUsed(next[i], onCar);
+      patchTyreSets(next);
+    });
+    row.querySelector('[data-act="compound"]').addEventListener('click', () => {
+      const next = sets.map(x => ({ ...x }));
+      next[i].compound = next[i].compound === 'wet' ? 'slick' : 'wet';
       patchTyreSets(next);
     });
     row.querySelector('[data-act="del"]').addEventListener('click', () => {
@@ -1307,7 +1910,7 @@ function renderTyreSets(car) {
     row.querySelector('[data-act="scrap"]')?.addEventListener('click', () => {
       scrapAsk = scrapAsk === t.id ? null : t.id;
       tyreSetKey = '';
-      renderTyreSets(state.cars[carId]);
+      renderTyreSets(settingsCar());
     });
     row.querySelector('[data-act="restore"]')?.addEventListener('click', () =>
       send({ type: 'tyreSetDecision', setId: t.id, scrapped: false }));
@@ -1327,7 +1930,7 @@ function renderTyreSets(car) {
           scrapAsk = null;
           tyreSetKey = '';
           if (why) send({ type: 'tyreSetDecision', setId: t.id, scrapped: true, reason: why });
-          else renderTyreSets(state.cars[carId]);
+          else renderTyreSets(settingsCar());
         });
       }
       wrap.appendChild(ask);
@@ -1340,102 +1943,475 @@ function renderTyreSets(car) {
 // front discs together, rear discs together, front pads, rear pads.
 
 function patchBrakeSets(comp, sets) {
-  patchCar({ brakeSets: { [comp]: sets }, config: { brakeSets: { [comp]: sets.length } } });
+  patchSettings({ brakeSets: { [comp]: sets }, config: { brakeSets: { [comp]: sets.length } } });
 }
 
-let brakeScrapAsk = null; // `${comp}:${setId}` of the set whose reason strip is open
+// ---- generate a rack ----
+// The tyre generator, once per pool: the crew ticks the groups a delivery
+// covers and one pattern names them all, because [P] is each group's own
+// prefix. One starting number across the rack on purpose — parts that arrive
+// together carry the same number, which is how the trolley is loaded.
 
+const bGenForm = {
+  comps: new Set(BRAKE_COMPONENTS.map(b => b.id)),
+  count: 4, start: 1, pattern: BRAKE_SET_PATTERN, replace: false, startTouched: false
+};
+
+// One past the highest number in every pool the form is writing to, so no
+// group lands on a name it already has.
+function bGenNextStart() {
+  const names = [...bGenForm.comps]
+    .flatMap(comp => brakeSetsOf(settingsCar(), comp).map(t => t.name));
+  return nextSetNumber(names);
+}
+
+function openBrakeGen(open) {
+  $('brakeset-gen').hidden = !open;
+  if (!open) return;
+  bGenForm.startTouched = false;
+  bGenForm.start = bGenNextStart();
+  $('bgen-count').value = bGenForm.count;
+  $('bgen-start').value = bGenForm.start;
+  $('bgen-pattern').value = bGenForm.pattern;
+  renderBrakeGen();
+}
+
+function readBrakeGen() {
+  bGenForm.count = Math.max(1, Math.min(TYRE_SET_GEN_MAX, parseInt($('bgen-count').value, 10) || 1));
+  bGenForm.start = Math.max(0, parseInt($('bgen-start').value, 10) || 0);
+  bGenForm.pattern = $('bgen-pattern').value.trim() || BRAKE_SET_PATTERN;
+  return generateBrakeSets(settingsCar(), {
+    comps: BRAKE_COMPONENTS.map(b => b.id).filter(id => bGenForm.comps.has(id)),
+    pattern: bGenForm.pattern, start: bGenForm.start,
+    count: bGenForm.count, replaceUnused: bGenForm.replace
+  });
+}
+
+function renderBrakeGen() {
+  if ($('brakeset-gen').hidden) return;
+  const gen = readBrakeGen();
+  const chips = $('bgen-comps');
+  if (!chips.children.length) {
+    chips.innerHTML = BRAKE_COMPONENTS
+      .map(b => `<button class="flag" data-bgen-comp="${b.id}">${b.short}</button>`).join('');
+    for (const btn of chips.children) {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.bgenComp;
+        if (bGenForm.comps.has(id)) bGenForm.comps.delete(id);
+        else bGenForm.comps.add(id);
+        if (!bGenForm.startTouched) {
+          bGenForm.start = bGenNextStart();
+          $('bgen-start').value = bGenForm.start;
+        }
+        renderBrakeGen();
+      });
+    }
+  }
+  for (const btn of chips.children) {
+    btn.classList.toggle('on', bGenForm.comps.has(btn.dataset.bgenComp));
+  }
+  $('btn-bgen-replace').classList.toggle('on', bGenForm.replace);
+
+  // One preview line per pool, so what each group gets named is readable
+  // before it is written.
+  $('bgen-preview').innerHTML = BRAKE_COMPONENTS.filter(b => gen[b.id]).map(b => {
+    const g = gen[b.id];
+    return `<div class="setgen-row"><span class="axlehead">${b.short}</span>` +
+      `<span class="setgen-preview">${g.names
+        .map(n => `<span class="tag${g.duplicates.includes(n) ? ' dup' : ''}">${esc(n)}</span>`)
+        .join('')}</span></div>`;
+  }).join('');
+
+  const dup = [...new Set(Object.values(gen).flatMap(g => g.duplicates))];
+  const added = Object.values(gen).reduce((n, g) => n + g.names.length, 0);
+  const removed = Object.values(gen).reduce((n, g) => n + g.removed, 0);
+  const note = $('bgen-note');
+  if (!bGenForm.comps.size) {
+    note.className = 'hint warn';
+    note.textContent = 'Pick at least one component group to write to.';
+  } else if (dup.length) {
+    note.className = 'hint warn';
+    note.textContent = `Already on the rack: ${dup.join(', ')} — renumber, or turn ` +
+      'REPLACE UNUSED on if those are the placeholder sets.';
+  } else {
+    note.className = 'hint';
+    note.textContent = `${added} set${added === 1 ? '' : 's'} added across ` +
+      `${bGenForm.comps.size} group${bGenForm.comps.size === 1 ? '' : 's'}` +
+      (removed ? `, ${removed} unused set${removed === 1 ? '' : 's'} removed` : '') + '.';
+  }
+  $('btn-bgen-go').disabled = dup.length > 0 || !bGenForm.comps.size;
+}
+
+$('btn-brakeset-gen').addEventListener('click', () => {
+  openBrakeGen($('brakeset-gen').hidden);
+});
+$('btn-bgen-cancel').addEventListener('click', () => openBrakeGen(false));
+$('btn-bgen-replace').addEventListener('click', () => {
+  bGenForm.replace = !bGenForm.replace;
+  renderBrakeGen();
+});
+$('bgen-start').addEventListener('input', () => { bGenForm.startTouched = true; renderBrakeGen(); });
+for (const id of ['bgen-count', 'bgen-pattern']) {
+  $(id).addEventListener('input', renderBrakeGen);
+}
+
+$('btn-bgen-go').addEventListener('click', () => {
+  const gen = readBrakeGen();
+  const removed = Object.values(gen).reduce((n, g) => n + g.removed, 0);
+  if (Object.values(gen).some(g => g.duplicates.length) || !bGenForm.comps.size) return;
+  if (removed && !confirm(
+    `Replace ${removed} unused set${removed === 1 ? '' : 's'} on the rack? ` +
+    'Sets that have run, the sets on the car and scrapped sets are kept.')) return;
+  const brakeSets = {};
+  const counts = {};
+  const chosen = { ...(settingsCar().nextStop?.brakeSetIds || {}) };
+  let stopEdited = false;
+  for (const [comp, g] of Object.entries(gen)) {
+    brakeSets[comp] = g.sets;
+    counts[comp] = g.sets.length;
+    // A stop pointing at a part that just left the rack falls back to the next
+    // unused set rather than reading as nothing free.
+    if (chosen[comp] && !g.sets.some(t => t.id === chosen[comp])) {
+      chosen[comp] = null;
+      stopEdited = true;
+    }
+  }
+  const patch = { brakeSets, config: { brakeSets: counts } };
+  if (stopEdited) patch.nextStop = { brakeSetIds: chosen };
+  patchSettings(patch);
+  openBrakeGen(false);
+});
+
+let brakeScrapAsk = null; // `${comp}:${setId}` of the set whose reason strip is open
+let brakeLinkAsk = null; // `${axle}:disc:${id}` / `${axle}:pad:${id}` — which link strip is open
+let brakeEditAsk = null; // `${comp}:${setId}` — the one row whose editor is unfolded
+
+// The rack, read the way the crew reads the car: the two axles side by side —
+// front on the left, rear on the right, the way the consumables board does it —
+// and inside each axle one block per kit, the disc set with the pads bedded
+// onto it underneath. A row is a glance, not a form: the part number, how much
+// of its life is gone as a bar, and what state it is in. Everything that
+// CHANGES a part — its number, its hours, scrapping it, binning it — folds out
+// under the row that was clicked, so three numbered parts per axle no longer
+// read as fifteen input boxes stacked down one column.
 let brakeSetKey = '';
 function renderBrakeSets(car) {
   const wrap = $('brakeset-list');
   if (!wrap) return;
   const cur = car.state.currentBrakeSetId || {};
   const key = BRAKE_COMPONENTS.map(b => b.id + '=' + brakeSetsOf(car, b.id)
-    .map(t => `${t.id}:${t.name}:${t.hours}:${t.used}:${t.scrapped}:${t.scrapReason}`).join('|') +
-    `@${cur[b.id]}:${(car.state.brakeUsedH || {})[b.id]}`).join('/') + `|${brakeScrapAsk}`;
+    .map(t => `${t.id}:${t.name}:${t.hours}:${t.used}:${t.scrapped}:${t.scrapReason}:${t.padSetId}:${t.kitName}`).join('|') +
+    `@${cur[b.id]}:${(car.state.brakeUsedH || {})[b.id]}:${car.config?.brakeLifeH?.[b.id]}`).join('/') +
+    // onDraft is in the key because it decides which buttons exist at all: a
+    // rack drawn before the pit wall answered would otherwise keep its
+    // read-only head for as long as nothing else about the parts changed.
+    `|${brakeScrapAsk}|${brakeLinkAsk}|${brakeEditAsk}|${onDraft()}`;
   if (key === brakeSetKey) return;
   brakeSetKey = key;
   wrap.innerHTML = '';
+  wrap.className = 'brack';
 
-  for (const b of BRAKE_COMPONENTS) {
-    const sets = brakeSetsOf(car, b.id);
-    const head = document.createElement('div');
-    head.className = 'axlehead';
-    head.textContent = b.label;
-    wrap.appendChild(head);
+  const redraw = () => { brakeSetKey = ''; renderBrakeSets(settingsCar()); };
 
-    sets.forEach((t, i) => {
-      const onCar = t.id === cur[b.id];
-      const hours = brakeSetHours(car, b.id, t);
-      const row = document.createElement('div');
-      row.className = 'preset-row' + (onCar ? ' oncar' : '') + (t.scrapped ? ' isscrapped' : '');
-      const pill = t.scrapped ? ['scrapped', 'SCRAPPED']
-        : onCar ? ['oncar', 'ON CAR']
-        : t.used ? ['', 'USED'] : ['new', 'NEW'];
-      row.innerHTML = `
-        <input data-bset-name type="text" style="width:90px" title="the number written on the part" />
-        <span class="setpill ${pill[0]}">${pill[1]}</span>
-        <span class="meta">hours <input data-bset-hours type="number" min="0" step="0.1" style="width:60px" ${
-          onCar ? 'disabled title="live — counted in the brake panel"' : ''} /></span>
-        <span class="km">${fmtH(hours)}</span>
-        <span class="meta">${t.scrapped && t.scrapReason ? esc(t.scrapReason) : ''}</span>
-        <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
-          ${t.scrapped
-            ? `<button data-act="restore">RESTORE</button>`
-            : `<button data-act="scrap" ${onCar ? 'disabled title="the part on the car has to come off first"' : ''}>SCRAP…</button>`}
-          <button data-act="del" class="danger" ${onCar || t.used ? 'disabled title="only never-used sets can be removed"' : ''}>${icon('x')}</button>
-        </span>`;
-      const nameInp = row.querySelector('[data-bset-name]');
-      nameInp.value = t.name;
-      nameInp.addEventListener('change', () => {
-        const next = sets.map(x => ({ ...x }));
-        next[i].name = nameInp.value.trim() || t.name;
-        patchBrakeSets(b.id, next);
-      });
-      const hInp = row.querySelector('[data-bset-hours]');
-      hInp.value = +hours.toFixed(2);
-      hInp.addEventListener('change', () => {
-        const v = parseFloat(hInp.value);
-        const next = sets.map(x => ({ ...x }));
-        next[i].hours = isNaN(v) || v < 0 ? 0 : +v.toFixed(4);
-        next[i].used = next[i].used || next[i].hours > 0;
-        patchBrakeSets(b.id, next);
-      });
-      row.querySelector('[data-act="del"]').addEventListener('click', () => {
-        if (onCar || t.used) return;
-        patchBrakeSets(b.id, sets.filter((_, j) => j !== i));
-      });
-      row.querySelector('[data-act="scrap"]')?.addEventListener('click', () => {
-        const k = `${b.id}:${t.id}`;
-        brakeScrapAsk = brakeScrapAsk === k ? null : k;
-        brakeSetKey = '';
-        renderBrakeSets(state.cars[carId]);
-      });
-      row.querySelector('[data-act="restore"]')?.addEventListener('click', () =>
-        send({ type: 'brakeSetDecision', comp: b.id, setId: t.id, scrapped: false }));
-      wrap.appendChild(row);
+  const isDisc = comp => BRAKE_AXLES.some(a => a.discs === comp);
+  // What a part is measured against. A pad set and a disc set on the same axle
+  // have different lives, so the bar under each is that part's own.
+  const lifeOf = comp => Math.max(0.01, +car.config?.brakeLifeH?.[comp] || 1);
+  // What the brake panel reads right now for the part on the car: the counter
+  // seeded at the last stop plus the stint that is running. This is the figure
+  // a measured correction replaces, so it is what the editor prefills.
+  const liveHours = comp => {
+    const now = Date.now();
+    const start = stintStartOf(car, state.race);
+    const stintH = raceClock(state.race, now).running && start
+      ? Math.max(0, now - start) / 3600e3 : 0;
+    return Math.max(0, +car.state.brakeUsedH?.[comp] || 0) + stintH;
+  };
 
-      // Second step: the reason strip. Nothing is binned until one is picked.
-      if (brakeScrapAsk === `${b.id}:${t.id}` && !t.scrapped) {
-        const ask = document.createElement('div');
-        ask.className = 'preset-row';
-        ask.innerHTML = `<span class="meta">Scrap ${esc(t.name)} — ${fmtH(hours)}. Why?</span>` +
-          `<span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">` +
-          BRAKE_SCRAP_REASONS.map(r => `<button data-why="${r}">${r.toUpperCase()}</button>`).join('') +
-          `<button data-why="">CANCEL</button></span>`;
-        for (const btn of ask.querySelectorAll('[data-why]')) {
-          btn.addEventListener('click', () => {
-            const why = btn.dataset.why;
-            brakeScrapAsk = null;
-            brakeSetKey = '';
-            if (why) send({ type: 'brakeSetDecision', comp: b.id, setId: t.id, scrapped: true, reason: why });
-            else renderBrakeSets(state.cars[carId]);
-          });
-        }
-        wrap.appendChild(ask);
-      }
+  const el = (cls, html) => {
+    const d = document.createElement('div');
+    d.className = cls;
+    if (html != null) d.innerHTML = html;
+    return d;
+  };
+
+  // One part, whichever pool it lives in, read at a glance: the number written
+  // on it, the hours on it, and how much of its life that leaves. Clicking it
+  // unfolds the editor — see editStrip.
+  const partRow = (comp, sets, i) => {
+    const t = sets[i];
+    const onCar = t.id === cur[comp];
+    const hours = brakeSetHours(car, comp, t);
+    const lifeH = lifeOf(comp);
+    const gone = Math.min(1, hours / lifeH);
+    const left = Math.max(0, Math.round((1 - gone) * 100));
+    const wear = t.scrapped ? 'scrapped' : gone >= 0.85 ? 'crit' : gone >= 0.6 ? 'warn' : '';
+    const pill = t.scrapped ? ['scrapped', 'SCRAPPED']
+      : onCar ? ['oncar', 'ON CAR']
+      : t.used ? ['', 'USED'] : ['new', 'NEW'];
+    const open = brakeEditAsk === `${comp}:${t.id}`;
+    const row = el('brack-row' + (onCar ? ' oncar' : '') + (t.scrapped ? ' isscrapped' : '') +
+      (open ? ' open' : ''), `
+      <span class="brack-glyph"><i class="${isDisc(comp) ? 'g-disc' : 'g-pad'}"></i></span>
+      <span class="brack-name">${esc(t.name)}<small>${isDisc(comp) ? 'discs' : 'pads'}${
+        t.scrapped && t.scrapReason ? ' · ' + esc(t.scrapReason) : ''}</small></span>
+      <span class="brack-val ${wear}" title="${fmtH(hours)} of ${fmtH(lifeH)}">${fmtH(hours)}</span>
+      <span class="brack-barwrap">
+        <span class="brack-bar ${wear}"><i style="width:${t.scrapped ? 0 : left}%"></i></span>
+        <span class="brack-left ${wear}">${t.scrapped ? '—' : left + '%'}</span>
+      </span>
+      <span class="brack-pill ${pill[0]}">${pill[1]}</span>`);
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
+    row.title = onCar
+      ? 'on the car — its hours tick in the brake panel. Click to type over them with a measured figure'
+      : 'click to change the number on this part, its hours or wear, or take it out of the rack';
+    const toggle = () => {
+      const k = `${comp}:${t.id}`;
+      brakeEditAsk = brakeEditAsk === k ? null : k;
+      brakeScrapAsk = null;
+      brakeLinkAsk = null;
+      redraw();
+    };
+    row.addEventListener('click', toggle);
+    row.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
     });
-  }
+    return row;
+  };
+
+  // The folded-out editor: everything that used to sit on the row itself. It
+  // belongs to exactly one part at a time, which is what keeps the board
+  // readable — the boxes are there when a part is being worked on, and gone
+  // the rest of the time.
+  const editStrip = (comp, sets, i, extra = '') => {
+    const t = sets[i];
+    if (brakeEditAsk !== `${comp}:${t.id}`) return null;
+    const onCar = t.id === cur[comp];
+    const hours = onCar ? liveHours(comp) : brakeSetHours(car, comp, t);
+    const lifeH = lifeOf(comp);
+    const leftPct = h => Math.max(0, Math.round((1 - Math.min(1, h / lifeH)) * 100));
+    const strip = el('brack-edit', `
+      <label>NO. <input data-bset-name type="text" title="the number written on the part" /></label>
+      <label>HOURS <input data-bset-hours type="number" min="0" step="0.1" ${
+        onCar ? 'title="what the live counter reads — type over it with a measured figure"' : ''} /></label>
+      <label>LEFT % <input data-bset-left type="number" min="0" max="100" step="1"
+        title="life left as the crew measures it — writes the hours to match" /></label>
+      <span class="brack-editacts">
+        ${extra}
+        ${onDraft() ? '' : t.scrapped
+          ? `<button data-act="restore">RESTORE</button>`
+          : `<button data-act="scrap" ${onCar ? 'disabled title="the part on the car has to come off first"' : ''}>SCRAP&hellip;</button>`}
+        <button data-act="del" class="danger" ${onCar || t.used ? 'disabled title="only never-used sets can be removed"' : ''}>${icon('x')}</button>
+      </span>`);
+    const nameInp = strip.querySelector('[data-bset-name]');
+    nameInp.value = t.name;
+    nameInp.addEventListener('change', () => {
+      const next = sets.map(x => ({ ...x }));
+      next[i].name = nameInp.value.trim() || t.name;
+      patchBrakeSets(comp, next);
+    });
+    // Hours and life-left are one figure written two ways: the crew that logs
+    // run time types hours, the crew that gauges pad thickness types the
+    // percent left, and either box writes the other through the part's life.
+    // In the rack the figure goes on the set; on the car it re-seeds the live
+    // counter, which keeps ticking from what was typed.
+    const applyHours = h => {
+      h = isNaN(h) || h < 0 ? 0 : +h.toFixed(4);
+      if (onCar) return send({ type: 'brakeSetHours', comp, setId: t.id, hours: h });
+      const next = sets.map(x => ({ ...x }));
+      next[i].hours = h;
+      // Same rule as the tyres: the hours box is what says whether a part has
+      // run, so typing it back to zero returns the part to the new pool.
+      next[i].used = next[i].hours > 0;
+      patchBrakeSets(comp, next);
+    };
+    const hInp = strip.querySelector('[data-bset-hours]');
+    const leftInp = strip.querySelector('[data-bset-left]');
+    hInp.value = +hours.toFixed(2);
+    leftInp.value = leftPct(hours);
+    hInp.addEventListener('change', () => applyHours(parseFloat(hInp.value)));
+    leftInp.addEventListener('change', () => {
+      const v = parseFloat(leftInp.value);
+      if (isNaN(v)) { leftInp.value = leftPct(hours); return; }
+      applyHours((1 - Math.max(0, Math.min(100, v)) / 100) * lifeH);
+    });
+    strip.querySelector('[data-act="del"]').addEventListener('click', () => {
+      if (onCar || t.used) return;
+      brakeEditAsk = null;
+      patchBrakeSets(comp, sets.filter((_, j) => j !== i));
+    });
+    strip.querySelector('[data-act="scrap"]')?.addEventListener('click', () => {
+      const k = `${comp}:${t.id}`;
+      brakeScrapAsk = brakeScrapAsk === k ? null : k;
+      brakeLinkAsk = null;
+      redraw();
+    });
+    strip.querySelector('[data-act="restore"]')?.addEventListener('click', () =>
+      send({ type: 'brakeSetDecision', comp, setId: t.id, scrapped: false }));
+    return strip;
+  };
+
+  // Second step of a scrap: nothing is binned until a reason is picked.
+  const scrapStrip = (comp, t, hours) => {
+    if (brakeScrapAsk !== `${comp}:${t.id}` || t.scrapped) return null;
+    const ask = el('brack-ask', `<span class="meta">Scrap ${esc(t.name)} — ${fmtH(hours)}. Why?</span>` +
+      `<span class="brack-askacts">` +
+      BRAKE_SCRAP_REASONS.map(r => `<button data-why="${r}">${r.toUpperCase()}</button>`).join('') +
+      `<button data-why="">CANCEL</button></span>`);
+    for (const btn of ask.querySelectorAll('[data-why]')) {
+      btn.addEventListener('click', () => {
+        const why = btn.dataset.why;
+        brakeScrapAsk = null;
+        if (why) { brakeEditAsk = null; send({ type: 'brakeSetDecision', comp, setId: t.id, scrapped: true, reason: why }); }
+        redraw();
+      });
+    }
+    return ask;
+  };
+
+  // The link strip: which pads go onto this disc, or which disc these pads go
+  // onto. One tap makes the kit — the name comes from the axle's series and
+  // can be typed over on the kit chip afterwards.
+  const linkStrip = (a, opts) => {
+    const strip = el('brack-ask');
+    if (!opts.choices.length) {
+      strip.innerHTML = `<span class="meta">${opts.empty}</span>` +
+        `<span class="brack-askacts"><button data-cancel>CLOSE</button></span>`;
+    } else {
+      strip.innerHTML = `<span class="meta">${opts.prompt}</span><span class="brack-askacts">` +
+        opts.choices.map(c => `<button data-pick="${c.id}">${esc(c.label)}</button>`).join('') +
+        `<button data-cancel>CANCEL</button></span>`;
+    }
+    strip.querySelector('[data-cancel]').addEventListener('click', () => {
+      brakeLinkAsk = null;
+      redraw();
+    });
+    for (const btn of strip.querySelectorAll('[data-pick]')) {
+      btn.addEventListener('click', () => {
+        brakeLinkAsk = null;
+        brakeEditAsk = null;
+        send({ type: 'brakeKitLink', axle: a.id, ...opts.link(btn.dataset.pick) });
+      });
+    }
+    return strip;
+  };
+
+  const board = el('brack-board');
+  wrap.appendChild(board);
+
+  BRAKE_AXLES.forEach((a, ai) => {
+    if (ai) board.appendChild(el('brack-vline'));
+    const col = el('brack-axle');
+    board.appendChild(col);
+
+    const discs = brakeSetsOf(car, a.discs);
+    const pads = brakeSetsOf(car, a.pads);
+    const free = freePadSets(car, a.id, { includeScrapped: true });
+    const kits = brakeKitsOf(car, a.id);
+    col.appendChild(el('brack-tag', `${a.label}<span class="meta">${kits.length} kit${
+      kits.length === 1 ? '' : 's'} · ${discs.length} disc set${discs.length === 1 ? '' : 's'} · ${
+      free.length} pad set${free.length === 1 ? '' : 's'} free</span>`));
+
+    discs.forEach((d, di) => {
+      const kit = kitOfDiscSet(car, a.id, d.id);
+      const kitOnCar = cur[a.discs] === d.id && cur[a.pads] === d.padSetId;
+      const block = el('brack-kit' + (kitOnCar ? ' oncar' : '') + (kit ? '' : ' unbedded'));
+      // The kit's own line: what the pair is called, and the one decision that
+      // is taken about the PAIR rather than about either part.
+      const head = el('brack-kithead', kit
+        ? `<span class="kitchip" title="the pads bedded onto these discs — click the name to change it">KIT
+             <input data-kitname type="text" maxlength="12" />
+           </span>` +
+          (onDraft() || kitOnCar ? '' : `<button data-act="unlink" title="take the pads back off these discs">UNBED</button>`)
+        : `<span class="kitchip none" title="a disc set with no pads bedded onto it cannot go on the car as a kit">NO KIT</span>` +
+          (onDraft() ? '' : `<button data-act="link" ${
+            free.some(p => !p.scrapped) ? '' : 'disabled title="every pad set is already bedded onto a disc"'}>BED PADS&hellip;</button>`));
+      const kitNameInp = head.querySelector('[data-kitname]');
+      if (kitNameInp) {
+        kitNameInp.value = kit.name;
+        kitNameInp.addEventListener('change', () =>
+          send({ type: 'brakeKitRename', axle: a.id, discSetId: d.id, name: kitNameInp.value }));
+      }
+      head.querySelector('[data-act="unlink"]')?.addEventListener('click', () =>
+        send({ type: 'brakeKitLink', axle: a.id, discSetId: d.id, padSetId: null }));
+      head.querySelector('[data-act="link"]')?.addEventListener('click', () => {
+        const k = `${a.id}:disc:${d.id}`;
+        brakeLinkAsk = brakeLinkAsk === k ? null : k;
+        brakeScrapAsk = null;
+        brakeEditAsk = null;
+        redraw();
+      });
+      block.appendChild(head);
+
+      block.appendChild(partRow(a.discs, discs, di));
+      const dEdit = editStrip(a.discs, discs, di);
+      if (dEdit) block.appendChild(dEdit);
+      const dScrap = scrapStrip(a.discs, d, brakeSetHours(car, a.discs, d));
+      if (dScrap) block.appendChild(dScrap);
+
+      if (kit) {
+        const pi = pads.findIndex(t => t.id === kit.pad.id);
+        block.appendChild(partRow(a.pads, pads, pi));
+        const pEdit = editStrip(a.pads, pads, pi);
+        if (pEdit) block.appendChild(pEdit);
+        const pScrap = scrapStrip(a.pads, kit.pad, brakeSetHours(car, a.pads, kit.pad));
+        if (pScrap) block.appendChild(pScrap);
+      } else {
+        block.appendChild(el('brack-nopad',
+          `no pads bedded onto ${esc(d.name)}${d.scrapped ? '' : ' — it cannot go on the car as a kit'}`));
+      }
+      if (brakeLinkAsk === `${a.id}:disc:${d.id}`) {
+        block.appendChild(linkStrip(a, {
+          prompt: `Bed which pads onto ${esc(d.name)}?`,
+          empty: 'every pad set on this axle is already bedded onto a disc',
+          choices: free.filter(p => !p.scrapped).map(p => ({
+            id: p.id,
+            label: `${p.name} ${p.used ? fmtH(brakeSetHours(car, a.pads, p)) : 'new'}`
+          })),
+          link: padSetId => ({ discSetId: d.id, padSetId })
+        }));
+      }
+      col.appendChild(block);
+    });
+
+    if (free.length) {
+      col.appendChild(el('brack-tag sub',
+        `AVAILABLE PADS<span class="meta">bedded onto nothing yet — click a set to bed it on</span>`));
+      const block = el('brack-kit loose');
+      for (const p of free) {
+        const pi = pads.findIndex(t => t.id === p.id);
+        const bare = discs.filter(x => !x.padSetId && !x.scrapped);
+        const act = onDraft() || p.scrapped ? ''
+          : `<button data-act="bed" ${bare.length ? '' : 'disabled title="every disc set already carries a pad set"'}>BED ONTO&hellip;</button>`;
+        block.appendChild(partRow(a.pads, pads, pi));
+        const edit = editStrip(a.pads, pads, pi, act);
+        if (edit) {
+          edit.querySelector('[data-act="bed"]')?.addEventListener('click', () => {
+            const k = `${a.id}:pad:${p.id}`;
+            brakeLinkAsk = brakeLinkAsk === k ? null : k;
+            brakeScrapAsk = null;
+            redraw();
+          });
+          block.appendChild(edit);
+        }
+        const strip = scrapStrip(a.pads, p, brakeSetHours(car, a.pads, p));
+        if (strip) block.appendChild(strip);
+        if (brakeLinkAsk === `${a.id}:pad:${p.id}`) {
+          block.appendChild(linkStrip(a, {
+            prompt: `Bed ${esc(p.name)} onto which discs?`,
+            empty: 'every disc set on this axle already carries a pad set',
+            choices: bare.map(x => ({
+              id: x.id,
+              label: `${x.name} ${x.used ? fmtH(brakeSetHours(car, a.discs, x)) : 'new'}`
+            })),
+            link: discSetId => ({ discSetId, padSetId: p.id })
+          }));
+        }
+      }
+      col.appendChild(block);
+    }
+  });
 }
 
 const BRAKE_SCRAP_REASONS = ['worn out', 'cracked', 'damage', 'glazed'];
@@ -1459,17 +2435,23 @@ function correctForm(car) {
       <option value="">no change${prevDrvId ? ' — ' + esc(car.drivers.find(d => d.id === prevDrvId)?.name || '') : ''}</option>
       ${car.drivers.map(d => `<option value="${d.id}" ${svc.driverChange === d.id ? 'selected' : ''}>${esc(d.name)} got in</option>`).join('')}
     </select></label>
-    <span class="fixbrakes">${BRAKE_COMPONENTS.map(b => {
-      const fitted = car.state.currentBrakeSetId?.[b.id];
+    <span class="fixbrakes">${BRAKE_AXLES.map(a => {
+      const work = svc[a.discs] ? 'kit' : svc[a.pads] ? 'pads' : 'none';
       // The part that was on the car before the stop cannot be what "went on":
-      // if the group really was changed, something else came off the rack.
-      const wasOn = h.brakeSetIds?.[b.id];
-      const pool = usableBrakeSets(car, b.id).filter(t => t.id !== wasOn);
-      return `<span class="fixbrake">
-        <button class="toggle ${svc[b.id] ? 'on' : ''}" data-fixbrake="${b.id}">${BRAKE_LABEL[b.id]}</button>
-        <select data-fixbset="${b.id}" title="which numbered set actually went on">
+      // if the axle really was worked on, something else came off the rack.
+      const sel = comp => {
+        const fitted = car.state.currentBrakeSetId?.[comp];
+        const wasOn = h.brakeSetIds?.[comp];
+        const pool = usableBrakeSets(car, comp).filter(t => t.id !== wasOn);
+        return `<select data-fixbset="${comp}" title="which numbered set actually went on">
           ${pool.map(t => `<option value="${t.id}" ${t.id === fitted ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
-        </select></span>`;
+        </select>`;
+      };
+      return `<span class="fixbrake" data-fixaxle="${a.id}" data-work="${work}">
+        <b>${a.label}</b>
+        ${[['none', 'NO'], ['pads', 'PADS'], ['kit', 'KIT']].map(([w, lab]) =>
+          `<button class="toggle ${work === w ? 'on' : ''}" data-fixwork="${a.id}:${w}">${lab}</button>`).join('')}
+        ${sel(a.pads)}${sel(a.discs)}</span>`;
     }).join('')}</span>
   </span>`;
 }
@@ -1593,6 +2575,133 @@ function renderSetDecision(car, c) {
   }
 }
 
+
+// ---- tyre warmers ----
+// The rack says what rubber the team owns; the warmers say what is ready to go
+// on the car. The icon on the tyre card opens the boxes: how many there are and
+// what is in each one, filled from the same stock the stop plan fits — so a set
+// is only ever in one place, and the question the crew actually asks at 03:00
+// ("is the set we are calling for hot?") is answered on the card.
+
+let warmersOpen = false;
+let warmerKey = '';
+
+function closeWarmers() {
+  if (!warmersOpen) return;
+  warmersOpen = false;
+  warmerKey = '';
+  renderWarmers(state?.cars[carId]);
+}
+
+// What a warmer row says about the rubber in it. The set on the car is never in
+// a box, so these figures are the ones banked on the set — no live counter.
+function warmerSetLine(car, set) {
+  if (!set) return 'nothing in it';
+  if (!set.used) return 'new';
+  const km = tyreSetMileage(set).km;
+  const left = tyreKmLeft(car, set);
+  return `${set.laps} laps · ${km.toFixed(0)} km` + (left != null ? ` · ${left.toFixed(0)} km left` : '');
+}
+
+function renderWarmers(car) {
+  const btn = $('btn-warmers');
+  const pop = $('warmer-pop');
+  if (!btn || !pop) return;
+  if (!car) { pop.classList.add('hidden'); return; }
+  const warmers = car.tyreWarmers || [];
+  const sets = car.tyreSets || [];
+  const setOf = id => sets.find(t => t.id === id) || null;
+  const full = warmers.filter(w => setOf(w.setId)).length;
+  // The set the next stop would fit — the one the boxes are being judged on.
+  const next = stopTyreSet(car, car.nextStop);
+  const holding = next ? warmers.find(w => w.setId === next.id) : null;
+
+  btn.classList.toggle('on', warmersOpen);
+  btn.classList.toggle('cold', !!next && warmers.length > 0 && !holding);
+  btn.setAttribute('aria-expanded', String(warmersOpen));
+  $('warmer-badge').textContent = warmers.length ? `${full}/${warmers.length}` : '—';
+
+  pop.classList.toggle('hidden', !warmersOpen);
+  if (!warmersOpen) { warmerKey = ''; return; }
+
+  // Redraw only when something on show moved: the fitted set banks kilometres
+  // every lap, and rebuilding under an open picker would shut it in the
+  // engineer's face.
+  const key = JSON.stringify([
+    warmers.map(w => [w.id, w.name, w.setId]),
+    warmers.map(w => warmerSetLine(car, setOf(w.setId))),
+    warmableTyreSets(car).map(t => [t.id, t.name]),
+    next?.id || null, holding?.id || null
+  ]);
+  if (key === warmerKey) return;
+  warmerKey = key;
+
+  const rows = warmers.map(w => {
+    const set = setOf(w.setId);
+    const isNext = !!set && !!next && set.id === next.id;
+    const opts = warmableTyreSets(car, w.setId);
+    return `<div class="wrow${set ? ' on' : ''}${isNext ? ' isnext' : ''}">
+      <span class="wnm">${esc(w.name)}</span>
+      <select data-warmer="${w.id}" title="What is in ${esc(w.name)}">
+        <option value="">— empty —</option>
+        ${opts.map(t => `<option value="${t.id}"${t.id === w.setId ? ' selected' : ''}>${
+          esc(t.name)}${t.used ? '' : ' · new'}</option>`).join('')}
+      </select>
+      <span class="wmeta">${warmerSetLine(car, set)}</span>
+      ${isNext ? '<span class="wpill">NEXT</span>' : ''}
+      <button data-empty="${w.id}"${set ? '' : ' disabled'} title="Take it out">${icon('x')}</button>
+    </div>`;
+  }).join('');
+
+  // The stock line: what is left on the rack that could still go in a box.
+  const spare = warmableTyreSets(car).length;
+  const foot = !warmers.length
+    ? '<p class="hint">No warmers. Press + once for each one the garage has.</p>'
+    : (next
+        ? `<p class="hint${holding ? '' : ' warn'}">${esc(next.name)} goes on at the next stop — ${
+            holding ? `it is in ${esc(holding.name)}.` : 'it is in no warmer.'}</p>`
+        : '<p class="hint">No stop is fitting tyres right now.</p>') +
+      `<p class="hint">${spare} set${spare === 1 ? '' : 's'} on the rack still out of a warmer.</p>`;
+
+  pop.innerHTML = `
+    <div class="wtop">
+      <span class="wlab">${icon('warmer')} TYRE WARMERS</span>
+      <span class="wcount" title="How many warmers the garage has">
+        <button data-act="less"${warmers.length ? '' : ' disabled'}>−</button>
+        <b>${warmers.length}</b>
+        <button data-act="more"${warmers.length >= TYRE_WARMER_MAX ? ' disabled' : ''}>+</button>
+      </span>
+    </div>
+    ${warmers.length ? `<div class="wrows">${rows}</div>` : ''}
+    ${foot}`;
+
+  pop.querySelector('[data-act="more"]')?.addEventListener('click', () =>
+    send({ type: 'tyreWarmerCount', count: warmers.length + 1 }));
+  pop.querySelector('[data-act="less"]')?.addEventListener('click', () =>
+    send({ type: 'tyreWarmerCount', count: warmers.length - 1 }));
+  for (const sel of pop.querySelectorAll('[data-warmer]')) {
+    sel.addEventListener('change', () => send({
+      type: 'tyreWarmerLoad', warmerId: sel.dataset.warmer, setId: sel.value || null
+    }));
+  }
+  for (const b of pop.querySelectorAll('[data-empty]')) {
+    b.addEventListener('click', () => send({
+      type: 'tyreWarmerLoad', warmerId: b.dataset.empty, setId: null
+    }));
+  }
+}
+
+$('btn-warmers').addEventListener('click', e => {
+  e.stopPropagation();
+  warmersOpen = !warmersOpen;
+  warmerKey = '';
+  renderWarmers(state?.cars[carId]);
+});
+document.addEventListener('click', e => {
+  if (!e.target.closest('#warmer-pop') && !e.target.closest('#btn-warmers')) closeWarmers();
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeWarmers(); });
+
 // ---- learned-from-live-data panel ----
 
 function adoptLearned(driverIdx, cond, learned) {
@@ -1658,9 +2767,9 @@ function renderLearned(car) {
   for (const btn of wrap.querySelectorAll('button[data-adopt]')) {
     btn.addEventListener('click', () => {
       const [i, cond] = btn.dataset.adopt.split('.');
-      const d = state.cars[carId].drivers[+i];
-      const L = learnedOf(state.cars[carId].learn, d.id, cond);
-      const target = state.cars[carId].config.fuelModel === 'driver-laptime'
+      const d = settingsCar().drivers[+i];
+      const L = learnedOf(settingsCar().learn, d.id, cond);
+      const target = settingsCar().config.fuelModel === 'driver-laptime'
         ? `a curve point at ${fmtLap(L.avgSec)}` : `${d.name}'s ${cond} average`;
       if (confirm(`Adopt ${L.burnLPerLap} L/lap (${cond}) as ${target}? Projections update immediately.`)) {
         adoptLearned(+i, cond, L);
@@ -1668,6 +2777,77 @@ function renderLearned(car) {
     });
   }
 }
+
+// ---- in-car correction (driver + stint clock, set by hand) ----------------
+// The NOW strip's DRIVER and STINT readings open this: the manual override for
+// a seat the sheet has wrong (a swap the feed saw but nobody logged, or a feed
+// reading the wrong name) and for a stint clock that started on the wrong
+// moment (a stop the app missed). Both are corrections of the record, not a
+// pit stop — a real driver change is logged in the stop planner.
+
+const incarOverlay = $('incar-overlay');
+
+// "1:23:45", "23:45" or "23" (minutes) → ms, null when it does not read.
+function parseClockMs(text) {
+  const parts = String(text).trim().split(':').map(p => p.trim());
+  if (!parts.length || parts.length > 3 || parts.some(p => !/^\d+$/.test(p))) return null;
+  const n = parts.map(Number);
+  if (parts.length === 3) return ((n[0] * 60 + n[1]) * 60 + n[2]) * 1000;
+  if (parts.length === 2) return (n[0] * 60 + n[1]) * 1000;
+  return n[0] * 60e3;
+}
+
+function openIncar() {
+  const car = state?.cars[carId];
+  if (!car) return;
+  const sel = $('incar-driver');
+  sel.innerHTML = car.drivers
+    .map(d => `<option value="${d.id}" ${d.id === car.currentDriverId ? 'selected' : ''}>${esc(d.name)}</option>`)
+    .join('');
+  // The stint clock is only a thing while a stint is running.
+  const clock = raceClock(state.race, Date.now());
+  const startMs = clock.running ? stintStartOf(car, state.race) : null;
+  const inp = $('incar-stint');
+  inp.value = startMs ? fmtClock(Math.max(0, Date.now() - startMs)) : '';
+  inp.disabled = !startMs;
+  inp.title = startMs ? 'h:mm:ss or m:ss' : 'No running stint — the stint clock starts with the race.';
+  const hint = $('incar-feed-hint');
+  const rec = feedDriverId ? car.drivers.find(d => d.id === feedDriverId) : null;
+  if (rec && rec.id !== car.currentDriverId) {
+    hint.hidden = false;
+    hint.innerHTML = `${icon('warn')} Live timing reads <b>${esc(rec.name)}</b> in the car — pick them above if the feed is right.`;
+  } else {
+    hint.hidden = true;
+  }
+  incarOverlay.classList.remove('hidden');
+}
+$('now-driver-itm').addEventListener('click', openIncar);
+$('now-stint-itm').addEventListener('click', openIncar);
+$('btn-incar-close').addEventListener('click', () => incarOverlay.classList.add('hidden'));
+incarOverlay.addEventListener('click', e => { if (e.target === incarOverlay) incarOverlay.classList.add('hidden'); });
+
+$('btn-incar-apply').addEventListener('click', () => {
+  const car = state?.cars[carId];
+  if (!car) return incarOverlay.classList.add('hidden');
+  const inp = $('incar-stint');
+  let stintMs = null;
+  if (!inp.disabled && inp.value.trim()) {
+    stintMs = parseClockMs(inp.value);
+    if (stintMs == null) {
+      return alert(`Cannot read "${inp.value}" as a stint time — use h:mm:ss or m:ss.`);
+    }
+  }
+  const id = $('incar-driver').value;
+  if (id && id !== car.currentDriverId) send({ type: 'setDriver', driverId: id });
+  if (stintMs != null) {
+    // Only a real edit is sent: the prefilled value keeps ticking underneath,
+    // so re-applying an untouched field must not nudge the clock.
+    const startMs = stintStartOf(car, state.race);
+    const curMs = startMs ? Math.max(0, Date.now() - startMs) : 0;
+    if (Math.abs(stintMs - curMs) >= 1500) send({ type: 'setStintTime', elapsedMs: stintMs });
+  }
+  incarOverlay.classList.add('hidden');
+});
 
 // ---- stint plan ----
 
@@ -1726,6 +2906,14 @@ $('btn-plan-replan').addEventListener('click', () => {
   const plan = replanFromNow(state.cars[carId], state.race, Date.now());
   plan.durationH = state.race.durationH;
   patchCar({ plan });
+});
+
+// Reassigning a planned stint. Delegated from the panel because the table is
+// re-rendered on every state push, so per-row listeners would not survive.
+$('plan-out').addEventListener('change', e => {
+  const sel = e.target.closest('select.plan-drv');
+  if (!sel) return;
+  send({ type: 'planStint', index: +sel.dataset.idx, driverId: sel.value });
 });
 
 // ---- saved plans (kept in the shared state on the pit wall PC) ----
@@ -1796,8 +2984,12 @@ function renderPlan(force = false) {
   const wallTime = ms => new Date(plan.startMs + ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const pva = planVsActual(car, state.race, Date.now());
 
+  // A stint already driven is history; the running one and everything after it
+  // is still the crew's to reassign, which is what the stop recommendation reads.
+  const firstEditable = car.stintHistory.length;
   const rows = plan.stints.map((s, i) => {
     const d = drvOf(s.driverId);
+    const editable = i >= firstEditable;
     const dot = `<span class="dot" style="background:${DRIVER_COLORS[idxOf(s.driverId) % DRIVER_COLORS.length]}"></span>`;
     const warn = s.noNightCover ? ` <span title="no night-capable driver — flag needs attention">${icon('warn')}</span>` : '';
     const r = pva?.rows[i];
@@ -1820,7 +3012,10 @@ function renderPlan(force = false) {
       <td class="num">${i + 1}</td>
       <td class="num">${fmtClock(s.fromMs)} – ${fmtClock(s.toMs)}</td>
       <td class="num">${wallTime(s.fromMs)}</td>
-      <td class="drv">${dot} ${d ? d.name.replace(/</g, '&lt;') : '?'}${s.night ? ' ' + icon('moon') : ''}${warn}</td>
+      <td class="drv">${dot} ${editable
+        ? `<select class="plan-drv" data-idx="${i}">${car.drivers.map(o =>
+            `<option value="${o.id}"${o.id === s.driverId ? ' selected' : ''}>${esc(o.name)}</option>`).join('')}</select>`
+        : (d ? d.name.replace(/</g, '&lt;') : '?')}${s.night ? ' ' + icon('moon') : ''}${warn}</td>
       <td class="num">${fmtMinSec(s.toMs - s.fromMs)}</td>
       <td class="num">${s.laps}</td>
       <td class="num">${s.fuelL != null ? s.fuelL + ' L' : '—'}</td>
@@ -1888,7 +3083,7 @@ function renderStintSheet(car) {
       ? Math.max(0, car.state.stintFuelStartL - car.state.fuelLiters) : null;
     entries.push({
       i: entries.length, driverId: car.currentDriverId,
-      fromMs: car.state.stintStartMs, toMs: now, laps: car.state.lapsThisStint,
+      fromMs: stintStartOf(car, state.race), toMs: now, laps: car.state.lapsThisStint,
       bestSec: st.bestSec, avgSec: st.avgSec,
       fuelUsedL: used != null ? +used.toFixed(1) : null,
       lPerLap: used != null && car.state.lapsThisStint > 0 ? used / car.state.lapsThisStint : null,
@@ -1954,6 +3149,11 @@ function render() {
   const now = Date.now();
   const c = carCalcs(car, state.race, now);
   const fs = fuelStrategy(car, state.race, now, c);
+  // Only costs anything while the card is flipped to the settings side.
+  if (!cautionPanel.hasAttribute('hidden')) {
+    fillCautionInputs();
+    renderCautionOut(car);
+  }
 
   document.title = `PitWall 24H — ${car.name}`;
   const defaultName = `Car #${car.number}`;
@@ -2084,6 +3284,11 @@ function render() {
   }
 
   // fuel
+  // The server drains the tank (and broadcasts) every 10 s; between snapshots
+  // the countdowns keep ticking against the time the snapshot arrived. Frozen
+  // while the car sits in the pit lane — the server pauses the burn there too.
+  const fuelTick = ms => c.clock.running && !car.state.inPit && stateRxMs
+    ? Math.max(0, ms - (Date.now() - stateRxMs)) : ms;
   const fuelPct = car.state.fuelLiters / car.config.tankLiters;
   $('fuel-now').textContent = car.state.fuelLiters.toFixed(1) + ' L';
   $('fuel-now').className = 'v big' +
@@ -2096,7 +3301,7 @@ function render() {
     ? 'paused — in pit'
     : `${c.burn.toFixed(2)} L · ${burnPerMin.toFixed(2)} L`;
   $('fuel-laps').textContent = c.lapsToEmpty;
-  $('fuel-time').textContent = fmtMinSec(c.msToEmpty);
+  $('fuel-time').textContent = fmtMinSec(fuelTick(c.msToSafety));
   $('fuel-to-end').textContent = c.clock.running ? Math.ceil(c.fuelToEnd) + ' L' : '—';
 
   // Pit window: the point from which refuelling stops costing extra time.
@@ -2161,8 +3366,8 @@ function render() {
     fwEl.classList.remove('hidden');
     fwEl.classList.toggle('crit', fw.level === 'crit');
     fwEl.innerHTML = `${icon('fuel')} LOW FUEL — ${fw.lapsLeft} LAP${fw.lapsLeft === 1 ? '' : 'S'} ` +
-      `TO SAFETY LEVEL (${fmtMinSec(fw.msLeft)})` +
-      (fs.windowOpen ? ` — BOX · FILL TO ${fs.fillTargetL} L` : '');
+      `TO SAFETY LEVEL — BOX IN ${fmtMinSec(fuelTick(fw.msLeft))}` +
+      (fs.windowOpen ? ` · FILL TO ${fs.fillTargetL} L` : '');
   } else {
     fwEl.classList.add('hidden');
   }
@@ -2185,7 +3390,26 @@ function render() {
   const scrapped = (car.tyreSets || []).filter(t => t.scrapped).length;
   $('tyre-sets').textContent = `${car.state.tyreSetsUsed} / ${car.config.tyreSets} · ${freshSets} new` +
     (scrapped ? ` · ${scrapped} scrapped` : '');
+  // The rationing line: fresh sets against what the distance to the flag still
+  // needs. This is where spending sets early stops being invisible — the margin
+  // is what every "free" tyre change under a flag is drawing down.
+  {
+    const el = $('tyre-stock');
+    let b = null;
+    try { b = tyreBudget(car, state.race, Date.now(), c); } catch { b = null; }
+    if (!b || !(b.kmToRun > 0)) {
+      el.textContent = '—';
+      el.className = 'v';
+    } else {
+      const m = b.setsMargin;
+      const other = b.activeCompound === 'wet' ? 'slick' : 'wet';
+      el.textContent = `${b.setsFresh} ${b.activeCompound} · needs ~${b.setsNeededMin} · margin ${m >= 0 ? '+' : ''}${m}`
+        + (b.setsFreshOther > 0 ? ` · ${b.setsFreshOther} ${other} held back` : '');
+      el.className = 'v ' + (m < 0 ? 'crit' : m <= 1 ? 'warn' : 'good');
+    }
+  }
   renderSetDecision(car, c);
+  renderWarmers(car);
   renderPitVisit(car);
 
   // brakes — same card as the tyres, below the rubber
@@ -2201,7 +3425,7 @@ function render() {
   $('stint-time').textContent = fmtMinSec(c.stintElapsedMs);
   $('stint-time').className = 'num' + (c.msDriverLeft < 5 * 60e3 ? ' crit' : c.msDriverLeft < 10 * 60e3 ? ' warn' : '');
   $('stint-max').textContent = car.config.maxStintMin + ' min';
-  $('now-fuel').textContent = c.clock.running ? fmtMinSec(c.msToEmpty) : '—';
+  $('now-fuel').textContent = c.clock.running ? fmtMinSec(fuelTick(c.msToSafety)) : '—';
   $('now-fuel').className = 'num' + (c.lapsToEmpty <= 3 ? ' crit' : c.lapsToEmpty <= 8 ? ' warn' : '');
   $('now-tyres').textContent = c.tyreLapsLeft + ' laps';
   $('now-tyres').className = 'num' + (c.tyreLapsLeft <= 3 ? ' crit' : c.tyreLapsLeft <= 8 ? ' warn' : '');
@@ -2225,13 +3449,14 @@ function render() {
   renderScoreboard();
   renderTimeline(car, now);
   renderPlan();
+  // Faces settle before the fit: the pinned heights are what autofit sums.
+  facesAfterRender();
   autofit();
 }
 
 // ---- the stop panel -------------------------------------------------------
 
 const PLAN_TABS = [['green', 'GREEN'], ['fcy', 'CODE 60'], ['sc', 'SAFETY CAR']];
-const BRAKE_LABEL = { padsFront: 'PADS F', padsRear: 'PADS R', discsFront: 'DISCS F', discsRear: 'DISCS R' };
 const VERDICT_CLS = {
   boxNow: 'crit', box: 'go', stay: 'hold', noStop: 'go', plan: 'calm', none: 'calm'
 };
@@ -2410,6 +3635,13 @@ function renderPlanner(car, c, now) {
   // ---- lifecycle. The engineer owns SEND and BOX; the feed owns what follows.
   const acts = $('stop-actions');
   const feedDrives = timing?.conn === 'connected' && state.timing?.autoLap?.[carId] !== false;
+  // Nothing is watching the pit-entry loop for this car — the feed is down or
+  // auto lap is off — so the car can arrive in the lane at any point in the
+  // lifecycle, and most of all at the point where no stop was ever planned: a
+  // puncture, damage, a driver called in off-plan. Marking it in must not
+  // require sending and boxing a stop that never existed.
+  const manualIn = feedDrives ? '' : `<div class="actions" style="margin-top:6px">
+      <button data-act="inpit">CAR IN PIT LANE</button></div>`;
   if (inPit) {
     acts.innerHTML = `<div class="feedstate">${icon('timer')}
         <span><b>Service running</b> — ${feedDrives ? 'the stop applies itself when the car leaves the pit lane' : 'release the car when the stop is done'}</span></div>
@@ -2425,13 +3657,13 @@ function renderPlanner(car, c, now) {
   } else if (stop.status === 'sent') {
     acts.innerHTML = `<div class="actions">
         <button data-act="unsend">UNSEND</button>
-        <button class="box big" data-act="box">BOX BOX</button></div>`;
+        <button class="box big" data-act="box">BOX BOX</button></div>` + manualIn;
   } else {
     // Naming the plan on the button is the last chance to notice that a held
     // tab is about to be sent instead of the one for what is flying.
     acts.innerHTML = `<div class="actions">
         <button data-act="clear" title="Clears this situation's plan only — the other two stand">CLEAR ${PLAN_LABEL[tab]}</button>
-        <button class="send" data-act="send">SEND ${held ? PLAN_LABEL[tab] + ' PLAN' : 'TO CREW'}</button></div>`;
+        <button class="send" data-act="send">SEND ${held ? PLAN_LABEL[tab] + ' PLAN' : 'TO CREW'}</button></div>` + manualIn;
   }
 
   // ---- status line + stepper
@@ -2476,11 +3708,14 @@ function planSentence(car, plan, r) {
   bits.push(r.tyres ? `fit <b>${esc(set ? set.name : 'a fresh set')}</b>` : 'keep the tyres');
   const drv = car.drivers.find(d => d.id === r.driverChange);
   bits.push(drv ? `<b>${esc(drv.name)}</b> takes over` : 'same driver stays in');
-  // Brake work names the part number — that is what gets laid out on the trolley.
-  const brakes = BRAKE_COMPONENTS.filter(b => r[b.id]).map(b => {
-    const set = brakeSetsOf(car, b.id).find(t => t.id === r.brakeSetIds?.[b.id]);
-    return BRAKE_LABEL[b.id].toLowerCase() + (set ? ` ${esc(set.name)}` : '');
-  });
+  // Brake work names the kit and the part numbers — that is what gets laid out
+  // on the trolley.
+  const brakes = BRAKE_AXLES.map(a => stopBrakeAxle(car, a.id, r))
+    .filter(x => x.work !== 'none')
+    .map(x => x.work === 'kit'
+      ? `${x.label.toLowerCase()} kit${x.name ? ' ' + esc(x.name) : ''}` +
+        (x.disc && x.pad ? ` <span class="t">(${esc(x.disc.name)} + ${esc(x.pad.name)})</span>` : '')
+      : `${x.label.toLowerCase()} pads${x.pad ? ' ' + esc(x.pad.name) : ''}`);
   if (brakes.length) bits.push(`<b>${brakes.join(' + ')}</b>`);
   const when = plan.dueMs == null
     ? 'Box now'
@@ -2517,16 +3752,24 @@ function planLineData(car, c, plan, r, pinned) {
   const brakeIds = BRAKE_COMPONENTS.filter(b => r[b.id]).map(b => b.id);
   const brakePin = pinned.brakes || null;
   const brakeSetPin = pinned.brakeSets || null;
-  // The part that would actually go on each component being changed — the
-  // number the crew has to pull off the rack, not just "front pads".
-  const brakeSetOf = comp => brakeSetsOf(car, comp).find(t => t.id === r.brakeSetIds?.[comp]) || null;
+  // Brakes are called by axle: a whole KIT (discs with the pads bedded onto
+  // them) or PADS onto the discs already on the car. The part numbers are the
+  // detail underneath — what the crew has to pull off the rack.
+  const brakeAxles = BRAKE_AXLES.map(a => stopBrakeAxle(car, a.id, r));
+  const brakeWork = brakeAxles.filter(x => x.work !== 'none');
+  const partTag = (comp, set) => !set ? '—'
+    : set.used ? fmtH(brakeSetHours(car, comp, set)) : 'new';
   // SELECT PARTS… lights while the rack is open and stays lit once a specific
   // set is pinned — the button is the state, not just a door. It sits alongside
   // the component buttons rather than replacing them: which components get
   // changed and which numbers go on them are two separate calls, and the app
   // can still own the first while the engineer owns the second. (Copied, never
   // the pinned array itself — this list gets pushed to.)
-  const brakeSel = brakePin ? (brakePin.length ? [...brakePin] : ['none']) : ['auto'];
+  const brakeSel = brakePin
+    ? (brakePin.length
+      ? BRAKE_AXLES.map(a => `${a.id}:${brakeAxleWork(brakePin)[a.id]}`).filter(k => !k.endsWith(':none'))
+      : ['none'])
+    : ['auto'];
   if (brakeSetPin || pickBrakeOpen) brakeSel.push('pick');
 
   return [
@@ -2559,54 +3802,82 @@ function planLineData(car, c, plan, r, pinned) {
     },
     {
       id: 'brakes', k: 'BRAKES', icon: 'brake', pinned: !!(brakePin || brakeSetPin),
-      quiet: !brakeIds.length,
-      v: brakeIds.length
-        ? brakeIds.map(id => {
-          const set = brakeSetOf(id);
-          return `${BRAKE_LABEL[id]} → ${set ? esc(set.name) : 'NO SET'}`;
-        }).join(' + ')
+      quiet: !brakeWork.length,
+      v: brakeWork.length
+        ? brakeWork.map(x => x.work === 'kit'
+          ? `${x.label} KIT ${x.name ? esc(x.name) : '—'}`
+          : `${x.label} PADS ${x.pad ? esc(x.pad.name) : 'NO SET'}`).join(' · ')
         : 'NO WORK',
-      n: brakeIds.length
-        ? brakeIds.map(id => {
-          const set = brakeSetOf(id);
-          if (!set) return `${BRAKE_LABEL[id]}: nothing free in the rack`;
-          const h = brakeSetHours(car, id, set);
-          return `${esc(set.name)} ${set.used ? fmtH(h) + ' on it' : 'new'}`;
+      n: brakeWork.length
+        ? brakeWork.map(x => {
+          const a = brakeAxle(x.axle);
+          if (x.work === 'kit') {
+            if (x.blocked) return `${x.label}: no kit free in the rack`;
+            return `${esc(x.disc.name)} ${partTag(a.discs, x.disc)} + ${esc(x.pad.name)} ${partTag(a.pads, x.pad)}` +
+              (x.formed ? ' · a new kit, bedded at this stop' : '');
+          }
+          if (!x.pad) return `${x.label}: no free pad set in the rack`;
+          return `${esc(x.pad.name)} ${partTag(a.pads, x.pad)} onto ${esc(currentBrakeSet(car, a.discs)?.name || 'the discs on the car')}`;
         }).join(' · ')
-        : BRAKE_COMPONENTS.map(b => `${BRAKE_LABEL[b.id]} ${fmtH(c.brakes[b.id].leftH)}`).join(' · '),
+        : BRAKE_AXLES.map(a => {
+          const ax = c.brakeAxles[a.id];
+          return `${a.label}${ax.name ? ' ' + esc(ax.name) : ''} ${fmtH(ax.leftH)}`;
+        }).join(' · '),
       sel: brakeSel,
       opts: [['auto', 'APP'], ['none', 'NONE'],
-        ...BRAKE_COMPONENTS.map(b => [b.id, BRAKE_LABEL[b.id]]),
+        ...BRAKE_AXLES.flatMap(a => [
+          [`${a.id}:pads`, `${a.short} PADS`],
+          [`${a.id}:kit`, `${a.short} KIT`]
+        ]),
         ['pick', 'SELECT PARTS…']]
     }
   ];
 }
 
-// The rack, opened from SELECT PARTS…: every component the stop is changing,
-// with the numbered sets still in its pool. Scrapped parts are not in here.
+// The rack, opened from SELECT PARTS…: for an axle having its kit changed,
+// the made-up kits still in the rack, each one line with both numbers on it;
+// for an axle only having pads, the pad sets bedded onto nothing. Scrapped
+// parts are not in here, and neither is a kit half of which is on the car.
 function brakePicker(car, r) {
-  const comps = BRAKE_COMPONENTS.filter(b => r[b.id]);
-  if (!comps.length) {
+  const axles = BRAKE_AXLES.filter(a => r[a.pads] || r[a.discs]);
+  if (!axles.length) {
     return `<div class="setpicker"><div class="srow mounted">
-      <span class="meta">Nothing to change — pick a component above first.</span></div></div>`;
+      <span class="meta">Nothing to change — pick an axle above first.</span></div></div>`;
   }
-  const body = comps.map(b => {
-    const sets = usableBrakeSets(car, b.id);
-    const onCar = car.state.currentBrakeSetId?.[b.id];
-    const selId = r.brakeSetIds?.[b.id];
-    const rows = sets.map(t => {
-      const mounted = t.id === onCar;
-      const h = brakeSetHours(car, b.id, t);
-      return `<div class="srow ${mounted ? 'mounted' : ''} ${t.id === selId ? 'on' : ''}" ${
-        mounted ? '' : `data-bset="${b.id}:${t.id}"`}>
-        <span class="nm">${esc(t.name)}</span>
-        <span>${mounted ? 'on the car' : t.used ? 'used' : 'new'}</span>
-        <span class="meta">${t.used || mounted ? fmtH(h) : 'unused'}</span>
-      </div>`;
-    }).join('');
-    const gone = brakeSetsOf(car, b.id).length - sets.length;
-    return `<div class="srow mounted"><span class="nm">${b.label}</span>${
-      gone ? `<span class="meta">${gone} scrapped not shown</span>` : ''}</div>${rows}`;
+  const cur = car.state.currentBrakeSetId || {};
+  const body = axles.map(a => {
+    const kitWork = !!r[a.discs];
+    let rows;
+    if (kitWork) {
+      const kits = brakeKitsOf(car, a.id).filter(k => !k.scrapped);
+      rows = kits.map(k => {
+        const mounted = k.onCar;
+        const h = brakeSetHours(car, a.discs, k.disc) + brakeSetHours(car, a.pads, k.pad);
+        return `<div class="srow ${mounted ? 'mounted' : ''} ${k.disc.id === r.brakeSetIds?.[a.discs] ? 'on' : ''}" ${
+          mounted ? '' : `data-bkit="${a.id}:${k.disc.id}"`}>
+          <span class="nm">${esc(k.name)}</span>
+          <span>${esc(k.disc.name)} + ${esc(k.pad.name)}</span>
+          <span class="meta">${mounted ? 'on the car' : k.used ? fmtH(h) + ' between them' : 'unused'}</span>
+        </div>`;
+      }).join('');
+      const bare = brakeSetsOf(car, a.discs).filter(t => !t.scrapped && !t.padSetId).length;
+      if (bare) {
+        rows += `<div class="srow mounted"><span class="meta">${bare} disc set${bare === 1 ? '' : 's'} with no pads bedded on ${
+          bare === 1 ? 'it' : 'them'} — bed a set on in SETTINGS to make ${bare === 1 ? 'it' : 'them'} a kit</span></div>`;
+      }
+    } else {
+      const pool = freePadSets(car, a.id).filter(t => t.id !== cur[a.pads]);
+      rows = pool.map(t => {
+        const h = brakeSetHours(car, a.pads, t);
+        return `<div class="srow ${t.id === r.brakeSetIds?.[a.pads] ? 'on' : ''}" data-bset="${a.pads}:${t.id}">
+          <span class="nm">${esc(t.name)}</span>
+          <span>${t.used ? 'used' : 'new'}</span>
+          <span class="meta">${t.used ? fmtH(h) : 'unused'}</span>
+        </div>`;
+      }).join('') || `<div class="srow mounted"><span class="meta">every pad set on this axle is bedded onto a disc — change the kit instead</span></div>`;
+    }
+    const head = kitWork ? `${a.label} — KITS` : `${a.label} — PAD SETS ONTO ${esc(currentBrakeSet(car, a.discs)?.name || 'THE DISCS ON THE CAR')}`;
+    return `<div class="srow mounted"><span class="nm">${head}</span></div>${rows}`;
   }).join('');
   return `<div class="setpicker">${body}</div>`;
 }
@@ -2711,6 +3982,12 @@ function autofit(deferred = false) {
     z = clampUiZoom(parseFloat(picked));
   }
   z = Math.round(z * 1000) / 1000; // or the last digit alone re-triggers a pass
+  // The fixed overlays are laid out against the real screen, not the zoomed
+  // page: a vh inside a zoomed body paints at zoom × the viewport, so a
+  // settings modal capped at 90vh runs off the top and bottom of a scaled-up
+  // station. app.css divides by this; it is set on every pass, including the
+  // first, so a modal is never sized against a factor that has moved.
+  document.documentElement.style.setProperty('--uizoom', String(z));
 
   if (z !== cur) {
     document.body.style.zoom = z;
@@ -2747,15 +4024,16 @@ function setMeter(el, left) {
   el.className = 'meter' + (left <= 0.15 ? ' crit' : left <= 0.25 ? ' warn' : '');
 }
 
-// Pads and discs share one gauge card, grouped by axle: FRONT shows its disc
-// and pad estimates together, then REAR, so the crew reads one end at a glance.
+// Pads and discs share one gauge card, grouped by axle and headed by the kit
+// on that axle: FRONT KIT F1 with its disc and pad estimates under it, then
+// REAR, so the crew reads one end — and one part number pair — at a glance.
 function renderBrakes(c) {
   const wrap = $('brakes');
   if (wrap.children.length === 0) {
     for (const axle of ['Front', 'Rear']) {
       const head = document.createElement('div');
       head.className = 'axlehead';
-      head.textContent = axle.toUpperCase();
+      head.innerHTML = `${axle.toUpperCase()} <b class="kitname" data-kit="${axle.toLowerCase()}"></b>`;
       wrap.appendChild(head);
       for (const kind of ['discs', 'pads']) {
         const id = kind + axle;
@@ -2767,6 +4045,13 @@ function renderBrakes(c) {
         wrap.appendChild(div);
       }
     }
+  }
+  for (const a of BRAKE_AXLES) {
+    const el = wrap.querySelector(`[data-kit="${a.id}"]`);
+    const ax = c.brakeAxles?.[a.id];
+    el.textContent = ax?.name ? `KIT ${ax.name}` : '';
+    el.title = ax?.kit ? `${ax.kit.disc.name} + ${ax.kit.pad.name} have run together` : '';
+    el.className = 'kitname' + (ax?.kit ? '' : ' none');
   }
   for (const b of BRAKE_COMPONENTS) {
     const info = c.brakes[b.id];
@@ -2868,7 +4153,10 @@ function renderDrivers(car, c) {
   const reg = c.reg;
   car.drivers.forEach((d, i) => {
     const cur = d.id === car.currentDriverId;
-    const total = d.totalMs + (cur ? c.stintElapsedMs : 0);
+    // Seat time from the same bookkeeping the regulations are read off, so
+    // the panel and the 6 h / total lines can never disagree — and neither
+    // can count a stint that belongs to an earlier session.
+    const total = c.reg.byDriver[d.id]?.totalMs ?? (d.totalMs + (cur ? c.stintElapsedMs : 0));
     const row = document.createElement('div');
     row.className = 'drv-row' + (cur ? ' cur' : '');
     row.innerHTML = `
@@ -2918,51 +4206,130 @@ function renderTimeline(car, now) {
   // as well as 24 h): smallest step that keeps the axis under ~14 ticks.
   const durH = clock.totalMs / 3600e3;
   const stepH = [1 / 12, 0.25, 0.5, 1, 2].find(s => durH / s <= 14) ?? Math.ceil(durH / 14);
+
+  // "Not driven yet" is diagonal cuts of the page background through the
+  // block's own colour — provisional at a glance in both themes, without
+  // inventing a separate palette for the future.
+  parts.push(`<defs><pattern id="tl-hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="7" style="stroke:var(--bg)" stroke-width="2.5" opacity=".55"/></pattern></defs>`);
+  parts.push(`<rect x="0" y="${barY}" width="${W}" height="${barH}" style="fill:var(--well)" rx="4"/>`);
+
   for (let i = 0; i * stepH <= durH + 1e-9; i++) {
     const h = i * stepH;
     const px = x(h * 3600e3);
     const label = stepH >= 1 ? `${h}h` : `${Math.round(h * 60)}m`;
-    parts.push(`<line x1="${px}" y1="${barY - 8}" x2="${px}" y2="${barY + barH + 8}" style="stroke:var(--line)" stroke-width="1"/>`);
+    parts.push(`<line x1="${px}" y1="${barY - 8}" x2="${px}" y2="${barY + barH + 6}" style="stroke:var(--line)" stroke-width="1"/>`);
     parts.push(`<text x="${px + 3}" y="${barY - 12}" style="fill:var(--dim)" font-size="13">${label}</text>`);
   }
-  parts.push(`<rect x="0" y="${barY}" width="${W}" height="${barH}" style="fill:var(--well)" rx="4"/>`);
+
+  // Night ribbon — the 21:00–06:00 window the plan generator schedules around,
+  // drawn where those hours fall in THIS race, so "who covers the night" is a
+  // glance at the bar instead of date arithmetic. Hour edges are walked with
+  // setHours so a DST change can't drift the 21:00 line.
+  const nightBands = [];
+  if (race.startMs) {
+    const endAbs = race.startMs + clock.totalMs;
+    const marks = [race.startMs];
+    const d = new Date(race.startMs); d.setMinutes(0, 0, 0);
+    while (marks.length < 400) {
+      d.setHours(d.getHours() + 1);
+      if (d.getTime() >= endAbs) break;
+      marks.push(d.getTime());
+    }
+    marks.push(endAbs);
+    for (let i = 0; i < marks.length - 1; i++) {
+      if (!isNightAt(marks[i])) continue;
+      let j = i + 1;
+      while (j < marks.length - 1 && isNightAt(marks[j])) j++;
+      nightBands.push([marks[i] - race.startMs, marks[j] - race.startMs]);
+      i = j - 1;
+    }
+    for (const [a, b] of nightBands) {
+      parts.push(`<rect x="${x(a)}" y="${barY - 7}" width="${Math.max(1, x(b) - x(a))}" height="5" rx="2.5" style="fill:var(--tl-night)"/>`);
+    }
+  }
 
   const driverIdx = {};
   car.drivers.forEach((d, i) => (driverIdx[d.id] = i));
 
   if (clock.running) {
-    for (const b of projectStints(car, race, now)) {
-      const from = Math.max(0, b.from);
-      const to = Math.min(clock.totalMs, b.to);
-      if (to <= from) continue;
-      let fill = 'var(--tl-future)', opacity = 1;
+    const labels = [];
+    const blocks = projectStints(car, race, now)
+      .map(b => ({ ...b, from: Math.max(0, b.from), to: Math.min(clock.totalMs, b.to) }))
+      .filter(b => b.to > b.from);
+    blocks.forEach((b, bi) => {
+      const bx = x(b.from), bw = Math.max(1, x(b.to) - x(b.from) - 1);
+      const di = (driverIdx[b.driverId] ?? 0) % DRIVER_COLORS.length;
+      const color = DRIVER_COLORS[di];
+      // The driver's tag inside the block, when it fits: reading the bar must
+      // not require decoding the colour legend from the DRIVERS table.
+      const ab = b.driverId != null ? esc(driverAbbrev(car.drivers[driverIdx[b.driverId]] || {})) : '';
+      // Proposed laps for the stint (to the safety fuel level, or the flag).
+      // The running stint is drawn as two blocks that share one figure — the
+      // laps line goes in the wider half so it reads once, not twice.
+      let laps = b.laps > 0 ? b.laps : null;
+      if (laps != null && (b.kind === 'current' || b.kind === 'projected')) {
+        const twin = b.kind === 'current' ? blocks[bi + 1] : blocks[bi - 1];
+        if (twin && (twin.kind === 'current' || twin.kind === 'projected') &&
+            Math.max(1, x(twin.to) - x(twin.from) - 1) > bw) laps = null;
+      }
+      const lapsTxt = laps != null ? `${laps} laps` : '';
+      const abFits = ab && bw > ab.length * 8 + 10;
+      const lapsFits = lapsTxt && bw > lapsTxt.length * 6 + 8;
+      const cy = barY + barH / 2;
+      const label = (fillAttr, abOp, lapsOp) => {
+        if (abFits && lapsFits) {
+          labels.push(`<text x="${bx + bw / 2}" y="${cy - 2}" text-anchor="middle" font-size="12" font-weight="700" ${fillAttr} opacity="${abOp}">${ab}</text>`);
+          labels.push(`<text x="${bx + bw / 2}" y="${cy + 11}" text-anchor="middle" font-size="10" ${fillAttr} opacity="${lapsOp}">${lapsTxt}</text>`);
+        } else if (abFits) {
+          labels.push(`<text x="${bx + bw / 2}" y="${cy + 4}" text-anchor="middle" font-size="12" font-weight="700" ${fillAttr} opacity="${abOp}">${ab}</text>`);
+        } else if (lapsFits) {
+          labels.push(`<text x="${bx + bw / 2}" y="${cy + 3.5}" text-anchor="middle" font-size="10" ${fillAttr} opacity="${lapsOp}">${lapsTxt}</text>`);
+        }
+      };
       if (b.kind === 'past' || b.kind === 'current') {
-        fill = DRIVER_COLORS[(driverIdx[b.driverId] ?? 0) % DRIVER_COLORS.length];
-      } else if (b.kind === 'projected') {
-        fill = DRIVER_COLORS[(driverIdx[b.driverId] ?? 0) % DRIVER_COLORS.length];
-        opacity = 0.35;
+        parts.push(`<rect x="${bx}" y="${barY + 2}" width="${bw}" height="${barH - 4}" style="fill:${color}" rx="2"/>`);
+        label('fill="#10151d"', '.85', '.7');
       } else {
-        opacity = 0.55;
+        const fill = b.kind === 'projected' ? color : 'var(--tl-future)';
+        parts.push(`<rect x="${bx}" y="${barY + 2}" width="${bw}" height="${barH - 4}" style="fill:${fill}" opacity="${b.kind === 'projected' ? 0.4 : 0.7}" rx="2"/>`);
+        parts.push(`<rect x="${bx}" y="${barY + 2}" width="${bw}" height="${barH - 4}" fill="url(#tl-hatch)" rx="2"/>`);
+        label('style="fill:var(--text)"', '.7', '.6');
+        parts.push(`<line x1="${x(b.to)}" y1="${barY - 3}" x2="${x(b.to)}" y2="${barY + barH + 3}" style="stroke:var(--red)" stroke-width="2" stroke-linecap="round"/>`);
       }
-      parts.push(`<rect x="${x(from)}" y="${barY + 2}" width="${Math.max(1, x(to) - x(from) - 1)}" height="${barH - 4}" style="fill:${fill}" opacity="${opacity}" rx="2"/>`);
-      if (b.kind === 'future' || b.kind === 'projected') {
-        parts.push(`<line x1="${x(to)}" y1="${barY - 4}" x2="${x(to)}" y2="${barY + barH + 4}" style="stroke:var(--red)" stroke-width="2"/>`);
-      }
-    }
+    });
+    parts.push(...labels);
     // Plan overlay: amber markers where the shared stint plan expects each
     // stop, so plan-vs-projection divergence is visible at a glance.
     if (car.plan?.stints?.length) {
       for (const s of car.plan.stints) {
         if (!(s.toMs > 0) || s.toMs >= clock.totalMs) continue;
         const px = x(s.toMs);
-        parts.push(`<path d="M ${px - 4} ${barY - 9} l 4 7 l 4 -7 z" style="fill:var(--amber)"/>`);
+        parts.push(`<path d="M ${px - 4.5} ${barY - 9} l 4.5 8 l 4.5 -8 z" style="fill:var(--amber)"/>`);
       }
     }
-    // now marker
+    // now marker: the line, and a pill that stays on-screen at either end
     const nowX = x(clock.elapsedMs);
-    parts.push(`<line x1="${nowX}" y1="${barY - 10}" x2="${nowX}" y2="${barY + barH + 10}" style="stroke:var(--text)" stroke-width="2"/>`);
-    parts.push(`<text x="${Math.min(nowX + 4, W - 44)}" y="${barY + barH + 24}" style="fill:var(--text)" font-size="13">NOW</text>`);
-    parts.push(`<text x="0" y="${H - 4}" style="fill:var(--dim)" font-size="13">solid = driven · faded = projected · red ticks = pit stops${car.plan?.stints?.length ? ' · amber = plan' : ''}</text>`);
+    parts.push(`<line x1="${nowX}" y1="${barY - 2}" x2="${nowX}" y2="${barY + barH + 8}" style="stroke:var(--text)" stroke-width="2"/>`);
+    const pw = 42, pillX = Math.min(Math.max(nowX - pw / 2, 2), W - pw - 2);
+    parts.push(`<rect x="${pillX}" y="${barY + barH + 8}" width="${pw}" height="17" rx="8.5" style="fill:var(--text)"/>`);
+    parts.push(`<text x="${pillX + pw / 2}" y="${barY + barH + 20.5}" text-anchor="middle" font-size="11" font-weight="700" style="fill:var(--bg)">NOW</text>`);
+    // glyph legend — each key drawn with the mark it explains, not described
+    // in a sentence
+    let lx = 2;
+    const gy = H - 12;
+    const leg = (glyph, label) => {
+      parts.push(glyph);
+      parts.push(`<text x="${lx + 18}" y="${H - 3}" style="fill:var(--dim)" font-size="12">${label}</text>`);
+      lx += 18 + label.length * 6.5 + 14;
+    };
+    const curColor = DRIVER_COLORS[(driverIdx[car.currentDriverId] ?? 0) % DRIVER_COLORS.length];
+    leg(`<rect x="${lx}" y="${gy}" width="14" height="9" rx="2" style="fill:${curColor}"/>`, 'driven');
+    leg(`<rect x="${lx}" y="${gy}" width="14" height="9" rx="2" style="fill:${curColor}" opacity=".4"/><rect x="${lx}" y="${gy}" width="14" height="9" rx="2" fill="url(#tl-hatch)"/>`, 'projected');
+    leg(`<line x1="${lx + 7}" y1="${gy - 2}" x2="${lx + 7}" y2="${gy + 11}" style="stroke:var(--red)" stroke-width="2" stroke-linecap="round"/>`, 'pit stop');
+    if (car.plan?.stints?.length)
+      leg(`<path d="M ${lx + 2.5} ${gy} l 4.5 8 l 4.5 -8 z" style="fill:var(--amber)"/>`, 'plan');
+    if (nightBands.length)
+      leg(`<rect x="${lx}" y="${gy + 2}" width="14" height="5" rx="2.5" style="fill:var(--tl-night)"/>`, 'night');
   } else if (clock.scheduled) {
     parts.push(`<text x="${W / 2}" y="${barY + barH / 2 + 4}" style="fill:var(--amber)" font-size="14" text-anchor="middle">Race starts in ${fmtClock(clock.msToStart)}</text>`);
   } else {
@@ -2970,6 +4337,10 @@ function renderTimeline(car, now) {
   }
   svg.innerHTML = parts.join('');
 }
+
+// With no pit wall the settings pages are the whole app: draw them once at
+// boot so a car file can be built on a PC that has never seen a server.
+renderDraftSettings();
 
 // re-render every second so clocks/accruals tick between broadcasts
 setInterval(render, 1000);

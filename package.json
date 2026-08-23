@@ -1,7 +1,7 @@
 {
   "name": "pitwall-24h",
   "productName": "PitWall 24H",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "24h endurance race strategy stations + pit wall display for a 4-car team",
   "author": "IO Refuge <iorefuge@gmail.com>",
   "main": "main.js",
@@ -10,6 +10,7 @@
     "start": "electron .",
     "test": "node test/smoke.mjs",
     "test:ui": "electron test/ui-check.cjs",
+    "test:brakes": "electron test/brake-rack-check.cjs",
     "package": "electron-packager . PitWall24H --platform=win32 --arch=x64 --out=dist --overwrite",
     "dist": "electron-builder --win --publish never",
     "release": "electron-builder --win --publish always"

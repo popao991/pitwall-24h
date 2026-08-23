@@ -23,8 +23,11 @@ const PATHS = {
   fuel: '<line x1="3" y1="22" x2="15" y2="22"/><line x1="4" y1="9" x2="14" y2="9"/><path d="M14 22V4a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v18"/><path d="M14 13h2a2 2 0 0 1 2 2v2a2 2 0 0 0 4 0V9.83a2 2 0 0 0-.59-1.42L18 5"/>',
   tyre: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="4.93" y1="4.93" x2="9.17" y2="9.17"/><line x1="14.83" y1="14.83" x2="19.07" y2="19.07"/><line x1="14.83" y1="9.17" x2="19.07" y2="4.93"/><line x1="4.93" y1="19.07" x2="9.17" y2="14.83"/>',
   driver: '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  // a tyre with the heat coming off it — the warmers
+  warmer: '<circle cx="12" cy="15.5" r="6.5"/><circle cx="12" cy="15.5" r="2.2"/><path d="M7.5 7c1.3-1 1.3-2.6 0-3.6"/><path d="M12 7c1.3-1 1.3-2.6 0-3.6"/><path d="M16.5 7c1.3-1 1.3-2.6 0-3.6"/>',
   brake: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M12 5.5v.01"/><path d="M12 18.5v.01"/><path d="M5.5 12h.01"/><path d="M18.5 12h.01"/>',
   pad: '<path d="M3 16a9 9 0 0 1 18 0"/><path d="M7 16a5 5 0 0 1 10 0"/><line x1="3" y1="16" x2="7" y2="16"/><line x1="17" y1="16" x2="21" y2="16"/>',
+  folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   note: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>',
   play: '<polygon points="6 3 20 12 6 21 6 3"/>',
   pause: '<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>',

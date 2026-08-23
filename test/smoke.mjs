@@ -3,7 +3,8 @@
 // Run with: npm test
 import { startServer } from '../server/server.js';
 import {
-  carCalcs, projectStints, raceClock, effectiveBurn, stopServiceTime, fcyCalc, pitLaneCalc, pitEta, generatePlan,
+  carCalcs, projectStints, raceClock, effectiveBurn, stopServiceTime, fcyCalc, pitLaneCalc, pitEta,
+  pitArrivalOrder, generatePlan,
   fuelStrategy, defaultCar, emptyStop,
   recommendedStops, resolveStop,
   raceCondition,
@@ -12,7 +13,22 @@ import {
   driverLapTimes, paceWindowStats, paceWindowLaps, PACE_WINDOW_DEFAULT, PACE_WINDOW_MAX,
   carPickLabel, driverAbbrev, matchTimingDriver, createFeedSeen, wallShowsPlan,
   pitCostSec, pitSegments, pitLaneTimeSec, refuelTimeSec, fuelBreakEven, recommendedStop,
-  greenSpeedKmh, neutralSpeedKmh, timingNrOf
+  greenSpeedKmh, neutralSpeedKmh, timingNrOf,
+  tyreSetNames, generateTyreSets, TYRE_SET_GEN_MAX, tyreBudget, stopTyreSet, reconcileTyreSets,
+  brakeSetNames, generateBrakeSets, nextSetNumber, BRAKE_COMPONENTS,
+  reconcileBrakeSets, linkBrakeKit, brakeKitsOf, stopBrakeAxle,
+  reconcileTyreWarmers, loadTyreWarmer, warmableTyreSets, TYRE_WARMER_MAX,
+  buildCarFile, readCarFile, applyCarFile, carFileName, carConfigFields,
+  CAR_FILE_GROUPS, CAR_FILE_RACK_FIELDS, EVENT_FIELDS,
+  // --- pure-function coverage added below (kits, racks, caution, next driver) ---
+  isDiscComponent, axleOfComponent, brakeAxle, brakeAxleWork,
+  brakeWorkComps, currentBrakeKit, kitNameFor, kitOfDiscSet,
+  discSetOfPadSet, freePadSets, unlinkBrakeKit, syncBrakeKitToCar,
+  reconcileBrakeKits, stopBrakeKit, stopPadSet, brakeSetsOf,
+  expandSetNames, defaultTyreSets, newTyreSet, newBrakeSet,
+  newTyreWarmer, setTyreSetNames, setBrakeSetNames, warmerOfSet,
+  currentTyreSet, stintStartOf, plannedNextDriver, nextDriverCall,
+  probabilityOfCautionWithin, cautionCall
 } from '../shared/model.js';
 import WebSocket from 'ws';
 import fs from 'node:fs';
@@ -21,7 +37,25 @@ import path from 'node:path';
 
 // Ports 8485/8486 so tests never touch a live app on the default port 8484.
 // Main server: no ticking, so fuel values stay deterministic.
+// Binding is asynchronous, so a port still held by another smoke run does not
+// throw here — the run happily connects to the OTHER run's server instead, both
+// suites then drive the same state, and the output is pages of unrelated
+// failures that look like real regressions. Fail on the spot and say why.
+async function bound(info, which) {
+  try {
+    await info.listening;
+  } catch (e) {
+    console.error(`
+Cannot start the ${which} test server: ${e.message}`);
+    console.error('Another smoke run or an orphaned server still holds the port.');
+    console.error('Wait for it to exit (or kill it) and run the suite again.');
+    process.exit(2);
+  }
+  return info;
+}
+
 const info = startServer({ dataFile: null, port: 8485, tickMs: 3600e3 });
+await bound(info, 'main');
 console.log('server up on', info.port, 'ips:', info.ips);
 
 const ws = new WebSocket('ws://127.0.0.1:' + info.port);
@@ -216,12 +250,20 @@ check('stop service time', Math.abs(stTime.totalSec - 41) < 0.01 &&
 check('stop time without tyres', Math.abs(stopServiceTime(state.cars['1'], { fuelLiters: 100, tyres: false }).totalSec - 16) < 0.01);
 check('target below on-board adds nothing', stopServiceTime(state.cars['1'], { fuelLiters: 30, tyres: false }).totalSec === 0);
 
-// FCY calculator: 4 km at 80 km/h = 180 s lap against a 105 s green lap. The
+// FCY calculator, on a round 4 km track rather than the seeded circuit, so
+// every figure below divides out exactly.
+// 4 km at 80 km/h = 180 s lap against a 105 s green lap. The
 // per-lap delta is 75 s — but that is what the whole FIELD drops, not what
 // pitting under it gains, so it is reported separately from the discount.
 // Green speed 4/105 = 137.14 km/h; a full 100 L fill is 40 s on the rig, and
 // 40 s of lane time at 80 km/h instead of 137.14 gives back 47.41 s.
-const fc = fcyCalc(state.cars['1']);
+// The speed is pinned here alongside the track figures: these checks verify the
+// identity, not the product default, and 80 km/h is what makes every number
+// below divide out exactly. Zolder's own Code 60 runs at 60 km/h — that is the
+// shipped default in defaultEvent(), and deliberately not what this fixture uses.
+const roundTrack = car => { const c = JSON.parse(JSON.stringify(car));
+  c.config.trackKm = 4; c.config.pitLaneKm = 0.4; c.config.fcySpeedKmh = 80; return c; };
+const fc = fcyCalc(roundTrack(state.cars['1']));
 check('fcy lap time', Math.abs(fc.fcyLapSec - 180) < 0.01);
 check('fcy per-lap delta is the field, not the gain', Math.abs(fc.fcyLapDeltaSec - 75) < 0.01);
 check('fcy gain scales with the stop, not the lap', Math.abs(fc.gainSec - 47.4074) < 0.01);
@@ -231,7 +273,7 @@ check('fcy gain can never exceed what the stop costs under green', fc.gainSec < 
 // ---- what a stop costs, and what a neutralisation takes off it ----
 // The whole model in one identity: gain = T × (1 − vN/vG) + (deltaGreen − deltaNeutral).
 {
-  const car = state.cars['1'];
+  const car = roundTrack(state.cars['1']);
   check('green speed derives from the average lap', Math.abs(greenSpeedKmh(car) - 137.1429) < 0.01);
   check('fcy speed is the regulated one', neutralSpeedKmh(car, 'fcy') === 80);
   check('no neutralisation, no discount', pitCostSec(car, null, { refuelSec: 40 }).gainSec === 0);
@@ -311,7 +353,7 @@ check('fcy gain can never exceed what the stop costs under green', fc.gainSec < 
 // once the discount covers that whole extra pit loss — a fixed litre figure,
 // because every term in it is track geometry and two speeds.
 {
-  const car = JSON.parse(JSON.stringify(state.cars['1']));
+  const car = roundTrack(state.cars['1']);
   Object.assign(car.config, { pitEntryToPumpSec: 8, pumpToBoxSec: 6, boxToExitSec: 10, driveThroughSec: 24 });
   const be = fuelBreakEven(car, 'fcy');
   check('break-even names a real litre figure', be.rule === 'above' && be.litersL > 0);
@@ -327,7 +369,9 @@ check('fcy gain can never exceed what the stop costs under green', fc.gainSec < 
   later.state.totalLaps = 200;
   check('the threshold does not move during the race',
     Math.abs(fuelBreakEven(later, 'fcy').litersL - be.litersL) < 1e-9);
-  check('lane legs lower the threshold', be.litersL < fuelBreakEven(state.cars['1'], 'fcy').litersL);
+  // Same track and same neutralised speed on both sides — the lane legs are the
+  // only difference, which is the whole point of the comparison.
+  check('lane legs lower the threshold', be.litersL < fuelBreakEven(roundTrack(state.cars['1']), 'fcy').litersL);
   check('no answer under green', fuelBreakEven(car, null) === null);
 
   // The threshold is not decoration: the app's own BOX NOW / STAY OUT call
@@ -353,7 +397,7 @@ check('fcy gain can never exceed what the stop costs under green', fc.gainSec < 
 }
 
 // pit lane at the limit: 0.4 km at 60 km/h = 24 s; 55 s loss leaves 31 s overhead
-const pl = pitLaneCalc(state.cars['1']);
+const pl = pitLaneCalc(roundTrack(state.cars['1']));
 check('pit lane transit time', Math.abs(pl.transitSec - 24) < 0.01);
 check('pit lane overhead vs configured loss', Math.abs(pl.overheadSec - 31) < 0.01);
 check('pit lane needs both figures', pitLaneCalc({ config: { pitLaneKm: 0.4, pitSpeedKmh: 0 } }) === null);
@@ -390,7 +434,7 @@ check('car label number only', carPickLabel('2', { number: '107', name: 'Car #10
     { id: 'd4', name: 'Jane Doe', abbrev: 'JAN', timingName: '' }
   ] };
   check('abbrev entered wins', driverAbbrev(rosterCar.drivers[1]) === 'KVB');
-  check('abbrev derived from surname', driverAbbrev(rosterCar.drivers[0]) === 'VER');
+  check('abbrev derived from name (M + VE)', driverAbbrev(rosterCar.drivers[0]) === 'MVE');
   check('match exact name', matchTimingDriver(rosterCar, 'Max Verstappen')?.id === 'd1');
   check('match reordered name', matchTimingDriver(rosterCar, 'VERSTAPPEN Max')?.id === 'd1');
   check('match initial + surname', matchTimingDriver(rosterCar, 'M. VERSTAPPEN')?.id === 'd1');
@@ -481,8 +525,13 @@ await wait(150);
 check('settings patch applied', state.settings.backupIntervalMin === 10);
 
 // ---- event settings: edited once on the pit wall, mirrored to every car ----
-check('event settings seeded', state.event && state.event.trackKm === 4 && state.event.refuelLps === 2.5 &&
-  state.event.pitSpeedKmh === 60 && state.event.pitLaneKm === 0.4);
+check('event settings seeded', state.event && state.event.trackKm === 4.007 && state.event.refuelLps === 2.5 &&
+  state.event.pitSpeedKmh === 60 && state.event.pitLaneKm === 0.411);
+// Zolder off its official track map: 4007 m, pit IN → pit OUT 411 m, and the
+// two intermediates at 1376,4 m / 2864,6 m from a start line at offset 0.
+check('the track is seeded from the official figures',
+  state.event.s1EndKm === 1.3764 && state.event.s2EndKm === 2.8646 &&
+  state.event.s3EndKm === 0 && state.cars['1'].config.s1EndKm === 1.3764);
 send({ type: 'event', patch: { pitSpeedKmh: 50 } });
 await wait(150);
 check('pit speed mirrored to every car', Object.values(state.cars).every(c => c.config.pitSpeedKmh === 50));
@@ -516,6 +565,137 @@ check('preset load keeps seat time', state.cars['2'].drivers[0].totalMs === seat
 send({ type: 'deletePreset', name: 'test setup' });
 await wait(150);
 check('preset deleted', !state.presets['test setup']);
+
+// ---- car files: one car's whole setup as a file, prepared with no server ----
+{
+  // Every car-specific config field is in the file, and no event field is:
+  // this is the check that keeps a setting added later from falling out.
+  const covered = [...CAR_FILE_GROUPS.flatMap(g => g.fields), ...CAR_FILE_RACK_FIELDS].sort();
+  check('the file covers every car setting and nothing else',
+    JSON.stringify(covered) === JSON.stringify(carConfigFields().sort()));
+  check('no event setting travels in a car file',
+    !covered.some(f => EVENT_FIELDS.includes(f)));
+
+  const source = defaultCar('1', '31');
+  source.name = 'Zolder GT3';
+  source.make = 'Porsche';
+  source.model = '992 GT3 Cup';
+  source.config.tankLiters = 88;
+  source.config.burnPerLap.dry = 3.14;
+  source.config.avgLapSec.wet = 121;
+  source.config.tyreLifeKm = 275;
+  source.config.tyreChangeSec = 19;
+  source.drivers[0].name = 'Jo Bloggs';
+  source.drivers[0].abbrev = 'BLO';
+  source.drivers[0].fuelDry = 3.4;
+  source.drivers[0].fuelCurve = [{ lapSec: 105, fuelL: 3.2 }, { lapSec: 112, fuelL: 2.8 }];
+  source.drivers[0].totalMs = 45 * 60e3; // seat time must NOT travel
+  source.tyreSets = generateTyreSets(source, { pattern: 'GVP[##]', start: 1, count: 8, replaceUnused: true }).sets;
+  source.config.tyreSets = source.tyreSets.length;
+
+  const file = buildCarFile(source, { app: '1.0.5', savedMs: 1700000000000 });
+  check('a car file names itself', carFileName(source) === '31-zolder-gt3.pitcar.json');
+  check('a car file is stamped', file.kind === 'pitwall-24h.car' && file.version >= 1 &&
+    file.savedIso.startsWith('2023-') && file.app === '1.0.5');
+  check('a car file explains itself', typeof file._readme === 'string' && file._readme.length > 80);
+  check('a car file carries the car', file.car.number === '31' && file.car.make === 'Porsche');
+  check('a car file carries the setup', file.fuel.tankLiters === 88 && file.pace.avgLapSec.wet === 121 &&
+    file.wear.tyreLifeKm === 275 && file.wear.tyreChangeSec === 19);
+  check('a car file carries the drivers and their curves',
+    file.drivers.length === 4 && file.drivers[0].abbrev === 'BLO' && file.drivers[0].fuelCurve.length === 2);
+  check('seat time never travels in a car file', file.drivers.every(d => d.totalMs === undefined));
+  // The set the car is sitting on survives a generation, so the rack is that
+  // one plus the eight generated — and the file says exactly what is on the
+  // shelf, placeholder included.
+  check('a car file carries the racks by name',
+    file.tyreRack.names.includes('GVP01') && file.tyreRack.names.includes('GVP08') &&
+    file.tyreRack.count === file.tyreRack.names.length &&
+    file.brakeRack.padsFront.names.join() === 'PF1,PF2,PF3,PF4');
+  check('the round trip survives JSON', JSON.parse(JSON.stringify(file)).fuel.tankLiters === 88);
+
+  // Loading onto a car that has run: settings land, race data stays.
+  const target = defaultCar('2', '2');
+  target.state.totalLaps = 140;
+  target.state.tyreLapsOnSet = 12;
+  target.drivers[0].totalMs = 2 * 3600e3;
+  target.tyreSets[0].used = true;
+  target.tyreSets[0].km = 310;
+  target.tyreSets[0].laps = 74;
+  const res = applyCarFile(target, JSON.parse(JSON.stringify(file)));
+  check('a car file loads', res.ok && res.applied.includes('driver table') && res.applied.includes('tyre rack'));
+  check('the setup landed', target.config.tankLiters === 88 && target.config.burnPerLap.dry === 3.14 &&
+    target.number === '31' && target.name === 'Zolder GT3' && target.model === '992 GT3 Cup');
+  check('the drivers landed', target.drivers[0].name === 'Jo Bloggs' && target.drivers[0].fuelDry === 3.4);
+  check('seat time survives a load', target.drivers[0].totalMs === 2 * 3600e3);
+  check('race data survives a load', target.state.totalLaps === 140 && target.state.tyreLapsOnSet === 12);
+  check('the set that has run keeps its mileage',
+    target.tyreSets.some(t => t.km === 310 && t.laps === 74));
+  check('the rack came from the file',
+    target.tyreSets.filter(t => t.name.startsWith('GVP')).length === 8 &&
+    target.config.tyreSets === target.tyreSets.length);
+  check('the file rack does not drag the placeholder in twice',
+    target.tyreSets.filter(t => t.name === 'S1').length === 1);
+  check('a set with mileage under a name the file also lists is reported',
+    res.warnings.some(w => w.includes('S1')));
+  check('a fresh car loading a fresh file says nothing about mileage',
+    applyCarFile(defaultCar('4', '4'), JSON.parse(JSON.stringify(file))).warnings.length === 0);
+  check('the car is still on a set it owns',
+    target.tyreSets.some(t => t.id === target.state.currentTyreSetId));
+
+  // A file loaded twice must not grow the rack a second time.
+  const before = target.tyreSets.length;
+  applyCarFile(target, JSON.parse(JSON.stringify(file)));
+  check('loading the same file twice does not duplicate the rack', target.tyreSets.length === before);
+
+  // Hand-edited files: the ones a text editor produces.
+  const hand = JSON.parse(JSON.stringify(file));
+  hand.fuel.tankLiters = '92,5'; // European decimal comma, typed by hand
+  hand.fuel.fuelModel = 'nonsense';
+  hand.pace.paceAvgLaps = 999;
+  hand.wear.tyreLifeKm = -20;
+  delete hand.drivers;
+  const hc = defaultCar('3', '3');
+  const hr = applyCarFile(hc, hand);
+  check('a hand-typed decimal comma is read', hr.ok && hc.config.tankLiters === 92.5);
+  check('a nonsense fuel model falls back', hc.config.fuelModel === 'driver-avg');
+  check('an out-of-range pace window is clamped', hc.config.paceAvgLaps === PACE_WINDOW_MAX);
+  check('a negative life figure cannot get in', hc.config.tyreLifeKm >= 0);
+  check('a file with no drivers leaves the roster alone', hc.drivers.length === 4 && hc.drivers[0].name === 'Driver 1');
+
+  check('a file from a newer build still loads, with a warning',
+    (() => {
+      const future = { ...JSON.parse(JSON.stringify(file)), version: 99 };
+      const r = readCarFile(future);
+      return r.ok && r.warnings.length === 1;
+    })());
+  check('a state backup is not a car file', !readCarFile('{"race":{},"cars":{}}').ok);
+  check('a truncated file is refused', !readCarFile('{"kind":"pitwall-24h.car"').ok);
+  check('an empty file is refused', !applyCarFile(defaultCar('1', '1'), '').ok);
+}
+
+// ---- the pit wall applies a car file to any car ----
+{
+  const wallFile = buildCarFile((() => {
+    const c = defaultCar('1', '77');
+    c.name = 'Night Runner';
+    c.config.tankLiters = 96;
+    c.config.pitLossSec = 999; // an event field, hand-added: must not fork the car
+    c.drivers[1].name = 'Sam Vega';
+    return c;
+  })(), { savedMs: Date.now() });
+  wallFile.wear.pitLossSec = 999;
+
+  const seatBefore = state.cars['3'].drivers[1].totalMs;
+  send({ type: 'loadCarFile', carId: '3', file: wallFile });
+  await until(() => state.cars['3'].config.tankLiters === 96);
+  check('the wall loads a car file onto a car', state.cars['3'].config.tankLiters === 96 &&
+    state.cars['3'].name === 'Night Runner' && state.cars['3'].number === '77');
+  check('the loaded car takes the file drivers', state.cars['3'].drivers[1].name === 'Sam Vega');
+  check('a car file load keeps seat time', state.cars['3'].drivers[1].totalMs === seatBefore);
+  check('a car file cannot fork the event settings',
+    state.cars['3'].config.pitLossSec === state.event.pitLossSec);
+  check('other cars are untouched by a car file', state.cars['4'].config.tankLiters !== 96);
+}
 
 // ---- race setups: race name + duration + event settings under a name ----
 send({ type: 'race', patch: { name: 'Test 30min', durationH: 0.5 } });
@@ -688,6 +868,7 @@ check('night stints respect night flag', nightOk);
 
 // ---- time-based fuel burn on a fast-ticking second server ----
 const info2 = startServer({ dataFile: null, port: 8486, tickMs: 150 });
+await bound(info2, 'tick');
 const ws2 = new WebSocket('ws://127.0.0.1:' + info2.port);
 let state2 = null;
 ws2.on('message', raw => {
@@ -752,6 +933,7 @@ const tmpFile = path.join(os.tmpdir(), `pitwall-smoke-${process.pid}.json`);
 fs.writeFileSync(tmpFile, JSON.stringify(brokenState));
 
 const info3 = startServer({ dataFile: tmpFile, port: 8487, tickMs: 3600e3 });
+await bound(info3, 'persistence');
 const ws3 = new WebSocket('ws://127.0.0.1:' + info3.port);
 let state3 = null;
 ws3.on('message', raw => {
@@ -1920,6 +2102,182 @@ await wait(150);
 check('tyre count edit reconciles the set list',
   state.cars['2'].tyreSets.length === 6 && state.cars['2'].config.tyreSets === 6);
 
+// ---- generating a batch of sets ----
+// The allocation is typed as a pattern, not row by row: [#] is the number,
+// [###] pads it, and a pattern without one still numbers what it makes.
+check('naming pattern numbers the batch',
+  tyreSetNames('S[#]', 1, 3).join() === 'S1,S2,S3' &&
+  tyreSetNames('S[#]_GVP', 7, 2).join() === 'S7_GVP,S8_GVP' &&
+  tyreSetNames('R[###]', 9, 2).join() === 'R009,R010' &&
+  tyreSetNames('GVP', 1, 2).join() === 'GVP1,GVP2');
+check('generation is clamped and never silent about it',
+  tyreSetNames('S[#]', 1, 999).length === TYRE_SET_GEN_MAX &&
+  tyreSetNames('S[#]', 1, 0).length === 0 &&
+  tyreSetNames('', 1, 1).join() === 'S1');
+{
+  // Car 1 has run t1 and t5 by now and is sitting on t1 (refitted above).
+  const car1 = state.cars['1'];
+  const appended = generateTyreSets(car1, { pattern: 'X[#]', start: 1, count: 2 });
+  check('generating appends without touching what is there',
+    appended.removed === 0 &&
+    appended.sets.length === car1.tyreSets.length + 2 &&
+    appended.sets.slice(0, car1.tyreSets.length)
+      .every((t, i) => t.name === car1.tyreSets[i].name) &&
+    appended.sets.slice(-2).map(t => t.name).join() === 'X1,X2' &&
+    appended.sets.slice(-2).every(t => !t.used && t.laps === 0 && t.km === 0));
+  check('a name already in the pool is reported, not silently doubled',
+    generateTyreSets(car1, { pattern: 'S[#]', start: 1, count: 2 }).duplicates.join() === 'S1,S2');
+
+  const replaced = generateTyreSets(car1, { pattern: 'G[#]', start: 1, count: 4, replaceUnused: true });
+  const survivors = replaced.sets.filter(t => !t.name.startsWith('G'));
+  check('replacing keeps the rubber that has run and the set on the car',
+    survivors.every(t => t.used || t.scrapped || t.id === car1.state.currentTyreSetId) &&
+    survivors.some(t => t.id === car1.state.currentTyreSetId) &&
+    replaced.removed === car1.tyreSets.length - survivors.length &&
+    replaced.sets.length === survivors.length + 4);
+  const oldIds = new Set(car1.tyreSets.map(t => t.id));
+  check('a generated set never inherits a swept-away id',
+    replaced.sets.filter(t => t.name.startsWith('G')).every(t => !oldIds.has(t.id)));
+
+  // What the station sends: the generated list plus the count it implies.
+  send({ type: 'update', carId: '1', patch: { tyreSets: replaced.sets, config: { tyreSets: replaced.sets.length } } });
+  await until(() => state.cars['1'].tyreSets.length === replaced.sets.length);
+  const after = state.cars['1'];
+  check('the generated pool survives the round trip',
+    after.config.tyreSets === replaced.sets.length &&
+    after.tyreSets.filter(t => t.name.startsWith('G')).length === 4 &&
+    after.tyreSets.some(t => t.id === after.state.currentTyreSetId) &&
+    after.state.tyreSetsUsed === after.tyreSets.filter(t => t.used).length);
+}
+
+// ---- generating a rack ----
+// Same generator as the rubber, one pool at a time, with [P] standing for the
+// group's own prefix so one pattern names the whole delivery.
+check('the position token is the group prefix',
+  brakeSetNames('padsFront', '[P][#]', 1, 2).join() === 'PF1,PF2' &&
+  brakeSetNames('padsRear', '[P][#]', 1, 1).join() === 'PR1' &&
+  brakeSetNames('discsFront', '[P] [##]', 8, 2).join() === 'DF 08,DF 09' &&
+  brakeSetNames('discsRear', '[P][#]', 3, 1).join() === 'DR3');
+// ---- kits in the model: migration, the plan, and the car file ----
+{
+  // A rack written before kits existed: the parts on the car have run
+  // together, so they are married up first and the spares follow.
+  const old = defaultCar('9', '9');
+  for (const b of BRAKE_COMPONENTS) {
+    for (const t of old.brakeSets[b.id]) { delete t.padSetId; delete t.kitName; }
+  }
+  old.state.currentBrakeSetId.discsFront = 'df2';
+  old.state.currentBrakeSetId.padsFront = 'pf3';
+  reconcileBrakeSets(old);
+  const onCar = old.brakeSets.discsFront.find(t => t.id === 'df2');
+  check('an old rack marries the parts that are on the car first',
+    onCar.padSetId === 'pf3' && onCar.kitName === 'F1');
+  check('the spare discs are kitted with what is left',
+    old.brakeSets.discsFront.filter(t => t.padSetId).length === 3 &&
+    new Set(old.brakeSets.discsFront.map(t => t.padSetId)).size === 3);
+
+  // A link can only ever name parts that are still in the rack.
+  linkBrakeKit(old, 'front', 'df1', 'pf3');
+  check('bedding pads that are already on another disc moves them',
+    old.brakeSets.discsFront.find(t => t.id === 'df1').padSetId === 'pf3' &&
+    old.brakeSets.discsFront.find(t => t.id === 'df2').padSetId === null);
+  check('the kits on an axle read back as pairs',
+    brakeKitsOf(old, 'front').every(k => k.disc && k.pad && k.name));
+}
+{
+  // The plan resolves an axle as a unit: both numbers come off one kit.
+  const carK = defaultCar('8', '8');
+  reconcileBrakeSets(carK);
+  const plans = recommendedStops(carK, state.race, Date.now());
+  const pinned = { ...plans.green, pins: {} };
+  carK.nextStop.pins = { green: { brakes: ['padsFront', 'discsFront'] } };
+  const r = resolveStop(carK, pinned);
+  const disc = carK.brakeSets.discsFront.find(t => t.id === r.brakeSetIds.discsFront);
+  check('a kit call resolves both parts off the same kit',
+    r.padsFront && r.discsFront && !!disc && disc.padSetId === r.brakeSetIds.padsFront);
+  check('the card reads the axle as a kit by name',
+    stopBrakeAxle(carK, 'front', r).work === 'kit' &&
+    !!stopBrakeAxle(carK, 'front', r).name);
+  // Pads on their own never rob a made-up kit while a free set is left.
+  carK.nextStop.pins = { green: { brakes: ['padsRear'] } };
+  const r2 = resolveStop(carK, pinned);
+  check('a pads-only call takes a pad set that is bedded onto nothing',
+    r2.padsRear && !r2.discsRear &&
+    !carK.brakeSets.discsRear.some(t => t.padSetId === r2.brakeSetIds.padsRear));
+}
+{
+  // Nothing made up in the rack: the app pairs the next free disc with the next
+  // free pad and says the kit is being made at this stop rather than refusing
+  // to plan one.
+  const bare = defaultCar('5', '5');
+  reconcileBrakeSets(bare);
+  for (const t of bare.brakeSets.discsFront) linkBrakeKit(bare, 'front', t.id, null);
+  const call = { padsFront: true, discsFront: true, brakeSetIds: {} };
+  const ax = stopBrakeAxle(bare, 'front', call);
+  check('with no made-up kit left the app pairs a free disc with free pads',
+    ax.work === 'kit' && !!ax.disc && !!ax.pad && ax.formed === true && !ax.blocked);
+  check('the pair it forms is not the one on the car',
+    ax.disc.id !== bare.state.currentBrakeSetId.discsFront &&
+    ax.pad.id !== bare.state.currentBrakeSetId.padsFront);
+}
+{
+  // The car file carries which pads are bedded onto which discs, by number.
+  const src = defaultCar('7', '7');
+  reconcileBrakeSets(src);
+  linkBrakeKit(src, 'front', 'df3', 'pf4', 'F7');
+  const file = buildCarFile(src, 'Kit car');
+  check('the file lists the kits by part number',
+    file.brakeRack.kits.some(k => k.axle === 'front' && k.disc === 'DF3' && k.pad === 'PF4' && k.name === 'F7'));
+  const dst = defaultCar('6', '6');
+  reconcileBrakeSets(dst);
+  const res = applyCarFile(dst, file);
+  check('reading the file beds the same pads onto the same discs',
+    res.ok && dst.brakeSets.discsFront.find(t => t.name === 'DF3')?.kitName === 'F7' &&
+    dst.brakeSets.discsFront.find(t => t.name === 'DF3')?.padSetId ===
+      dst.brakeSets.padsFront.find(t => t.name === 'PF4')?.id);
+}
+
+check('a batch continues the series it lands next to',
+  nextSetNumber(['PF1', 'PF2', 'PF3']) === 4 &&
+  nextSetNumber(['S12_GVP', 'S3_GVP']) === 13 &&
+  nextSetNumber([]) === 1);
+{
+  const carR = state.cars['3'];
+  const before = Object.fromEntries(BRAKE_COMPONENTS.map(b => [b.id, carR.brakeSets[b.id].length]));
+  const gen = generateBrakeSets(carR, { comps: ['padsFront', 'discsRear'], pattern: '[P][#]', start: 9, count: 2 });
+  check('only the groups asked for are written',
+    Object.keys(gen).join() === 'padsFront,discsRear' &&
+    gen.padsFront.names.join() === 'PF9,PF10' &&
+    gen.discsRear.names.join() === 'DR9,DR10' &&
+    gen.padsFront.sets.length === before.padsFront + 2 &&
+    gen.discsRear.sets.every(t => t.hours === 0 || t.used));
+  check('a part number already on the rack is reported',
+    generateBrakeSets(carR, { comps: ['padsFront'], pattern: '[P][#]', start: 1, count: 2 })
+      .padsFront.duplicates.join() === 'PF1,PF2');
+
+  const swept = generateBrakeSets(carR, { comps: ['padsFront'], pattern: '[P][#]', start: 20, count: 3, replaceUnused: true });
+  const onCar = carR.state.currentBrakeSetId.padsFront;
+  check('replacing keeps the part on the car and everything that has run',
+    swept.padsFront.sets.some(t => t.id === onCar) &&
+    swept.padsFront.sets.filter(t => !t.name.startsWith('PF2')).every(t => t.used || t.scrapped || t.id === onCar) &&
+    swept.padsFront.removed === before.padsFront - 1);
+
+  // What the station sends for a two-group generation.
+  send({ type: 'update', carId: '3', patch: {
+    brakeSets: { padsFront: gen.padsFront.sets, discsRear: gen.discsRear.sets },
+    config: { brakeSets: { padsFront: gen.padsFront.sets.length, discsRear: gen.discsRear.sets.length } }
+  } });
+  await until(() => state.cars['3'].brakeSets.padsFront.length === before.padsFront + 2);
+  const after = state.cars['3'];
+  check('the generated rack survives the round trip',
+    after.config.brakeSets.padsFront === before.padsFront + 2 &&
+    after.config.brakeSets.discsRear === before.discsRear + 2 &&
+    after.brakeSets.padsFront.slice(-2).map(t => t.name).join() === 'PF9,PF10' &&
+    after.brakeSets.discsRear.slice(-2).map(t => t.name).join() === 'DR9,DR10' &&
+    after.brakeSets.padsRear.length === before.padsRear &&
+    after.brakeSets.padsFront.some(t => t.id === after.state.currentBrakeSetId.padsFront));
+}
+
 // ---- tyre mileage, life in km, and scrapping ----
 // Mileage rides on the set itself (laps x track length) and is split by how it
 // was driven, so at the flag a set's green and yellow kilometres are both known.
@@ -1998,6 +2356,112 @@ check('a scrapped set can be restored to the pool',
 send({ type: 'tyreSetDecision', carId: '3', setId: 't2', scrapped: false });
 await wait(100);
 
+// ---- tyre warmers: what is hot, out of the same stock ----
+// A warmer is a numbered box holding at most one set off the rack. The rules
+// are the ones the garage already works to: one set is in one place, the set on
+// the car is on the car, and nothing in the bin is hot.
+check('a car starts with no warmers',
+  state.cars['3'].tyreWarmers.length === 0 && state.cars['3'].config.tyreWarmers === 0);
+
+send({ type: 'tyreWarmerCount', carId: '3', count: 3 });
+await until(() => state.cars['3'].tyreWarmers.length === 3);
+check('the crew says how many warmers the garage has',
+  state.cars['3'].tyreWarmers.map(w => w.name).join(',') === 'W1,W2,W3' &&
+  state.cars['3'].config.tyreWarmers === 3 &&
+  state.cars['3'].tyreWarmers.every(w => w.setId === null));
+
+send({ type: 'tyreWarmerLoad', carId: '3', warmerId: 'w1', setId: 't1' });
+await until(() => state.cars['3'].tyreWarmers[0].setId === 't1');
+check('a set off the rack goes in a warmer', state.cars['3'].tyreWarmers[0].setId === 't1');
+
+// The same set carried to another box moves — there is only one of it.
+send({ type: 'tyreWarmerLoad', carId: '3', warmerId: 'w2', setId: 't1' });
+await until(() => state.cars['3'].tyreWarmers[1].setId === 't1');
+check('a set is never in two warmers at once',
+  state.cars['3'].tyreWarmers[0].setId === null &&
+  state.cars['3'].tyreWarmers[1].setId === 't1');
+
+// The rubber that is running cannot also be warming.
+send({ type: 'tyreWarmerLoad', carId: '3', warmerId: 'w1', setId: state.cars['3'].state.currentTyreSetId });
+await wait(150);
+check('the set on the car never goes in a warmer',
+  state.cars['3'].tyreWarmers[0].setId === null);
+
+// Nothing in the bin is hot: binning a set empties the box it was in.
+send({ type: 'tyreSetDecision', carId: '3', setId: 't1', scrapped: true, reason: 'damage' });
+await until(() => state.cars['3'].tyreSets[0].scrapped);
+check('scrapping a set takes it out of its warmer',
+  state.cars['3'].tyreWarmers.every(w => w.setId !== 't1'));
+send({ type: 'tyreSetDecision', carId: '3', setId: 't1', scrapped: false });
+await until(() => !state.cars['3'].tyreSets[0].scrapped);
+
+// Fitting the rubber the box was holding empties it — it is on the car now.
+send({ type: 'tyreWarmerLoad', carId: '3', warmerId: 'w1', setId: 't5' });
+await until(() => state.cars['3'].tyreWarmers[0].setId === 't5');
+send({ type: 'update', carId: '3', patch: { nextStop: { tyres: true, tyreSetId: 't5', status: 'box' } } });
+await wait(150);
+send({ type: 'applyStop', carId: '3' });
+await until(() => state.cars['3'].state.currentTyreSetId === 't5');
+check('a set fitted at a stop comes out of its warmer',
+  state.cars['3'].state.currentTyreSetId === 't5' &&
+  state.cars['3'].tyreWarmers.every(w => w.setId !== 't5'));
+
+// Correcting the count must never tip hot rubber onto the floor: the empty
+// boxes go first.
+send({ type: 'tyreWarmerLoad', carId: '3', warmerId: 'w3', setId: 't6' });
+await until(() => state.cars['3'].tyreWarmers[2].setId === 't6');
+send({ type: 'tyreWarmerCount', carId: '3', count: 2 });
+await until(() => state.cars['3'].tyreWarmers.length === 2);
+check('shrinking the count takes the empty warmers first',
+  state.cars['3'].tyreWarmers.length === 2 &&
+  state.cars['3'].tyreWarmers.some(w => w.setId === 't6'));
+
+send({ type: 'tyreWarmerCount', carId: '3', count: 99 });
+await until(() => state.cars['3'].tyreWarmers.length === TYRE_WARMER_MAX);
+check('the number of warmers is capped',
+  state.cars['3'].tyreWarmers.length === TYRE_WARMER_MAX &&
+  state.cars['3'].config.tyreWarmers === TYRE_WARMER_MAX);
+send({ type: 'tyreWarmerCount', carId: '3', count: 0 });
+await until(() => state.cars['3'].tyreWarmers.length === 0);
+check('a team without warmers can say so', state.cars['3'].tyreWarmers.length === 0);
+
+// The picker only ever offers rubber that could really go in: on the rack, not
+// binned, not on the car and not already in another box.
+{
+  const car = defaultCar('9', '9');
+  car.config.tyreWarmers = 2;
+  reconcileTyreWarmers(car);
+  car.tyreSets[1].scrapped = true;                       // t2 is in the bin
+  loadTyreWarmer(car, 'w1', 't3');                       // t3 is already hot
+  const free = warmableTyreSets(car).map(t => t.id);
+  check('the warmer picker offers only rubber that could go in',
+    !free.includes('t1') && !free.includes('t2') && !free.includes('t3') && free.includes('t4'));
+  check('the box it is looking at stays in its own list',
+    warmableTyreSets(car, 't3').map(t => t.id).includes('t3'));
+}
+
+// The boxes are equipment, so they travel in a car file; what is in them is
+// race data and does not.
+{
+  const source = defaultCar('1', '77');
+  source.config.tyreWarmers = 4;
+  reconcileTyreWarmers(source);
+  source.tyreWarmers[1].name = 'BENCH';
+  loadTyreWarmer(source, 'w1', 't5');
+  const file = buildCarFile(source, { app: 'test', savedMs: 1 });
+  check('a car file carries the warmers, not what is in them',
+    file.warmerRack.count === 4 && file.warmerRack.names[1] === 'BENCH' &&
+    JSON.stringify(file).includes('BENCH') && file.warmerRack.names.length === 4);
+
+  const target = defaultCar('2', '2');
+  const res = applyCarFile(target, file);
+  check('loading a car file sets up the same warmers',
+    res.ok && target.tyreWarmers.length === 4 &&
+    target.config.tyreWarmers === 4 &&
+    target.tyreWarmers[1].name === 'BENCH' &&
+    target.tyreWarmers.every(w => w.setId === null));
+}
+
 // ---- numbered brake sets: one pool per component group ----
 // Front discs are a numbered pair, rear discs another, and so are the front and
 // rear pads. Each pool works like the tyre sets: the part that comes off banks
@@ -2017,18 +2481,22 @@ await wait(100);
 // hours have to be on the parts before a change is worth checking
 send({ type: 'update', carId: '2', patch: { state: { brakeUsedH: { padsFront: 6, discsFront: 9 } } } });
 await wait(150);
-// a stop changing the front pads only: auto choice takes the next unused set
+// a stop changing the front pads only: the auto choice is the pad set that is
+// bedded onto nothing (PF1-PF3 are kitted to the three disc sets, PF4 is free),
+// so a made-up kit is never robbed of its pads to service another axle.
 send({ type: 'update', carId: '2', patch: { nextStop: { padsFront: true, status: 'box' } } });
 await wait(150);
 send({ type: 'applyStop', carId: '2' });
-await until(() => state.cars['2'].state.currentBrakeSetId.padsFront === 'pf2');
+await until(() => state.cars['2'].state.currentBrakeSetId.padsFront === 'pf4');
 {
   const car2 = state.cars['2'];
   check('the outgoing set banks the hours it ran',
     car2.brakeSets.padsFront.find(t => t.id === 'pf1').hours >= 6);
   check('the fitted set starts at zero and is marked used',
     car2.state.brakeUsedH.padsFront === 0 &&
-    car2.brakeSets.padsFront.find(t => t.id === 'pf2').used === true);
+    car2.brakeSets.padsFront.find(t => t.id === 'pf4').used === true);
+  check('the pads that went on are bedded onto the discs on the car',
+    car2.brakeSets.discsFront.find(t => t.id === 'df1').padSetId === 'pf4');
   check('a group that was not changed keeps its part and its hours',
     car2.state.currentBrakeSetId.discsFront === 'df1' && car2.state.brakeUsedH.discsFront >= 9);
   check('the stint sheet records the parts that ran',
@@ -2063,11 +2531,108 @@ await wait(150);
 send({ type: 'applyStop', carId: '2' });
 await until(() => state.cars['2'].state.currentBrakeSetId.padsFront !== 'pf1');
 check('a stop never fits a scrapped set',
-  state.cars['2'].state.currentBrakeSetId.padsFront === 'pf3');
+  state.cars['2'].state.currentBrakeSetId.padsFront === 'pf4');
 send({ type: 'brakeSetDecision', carId: '2', comp: 'padsFront', setId: 'pf2', scrapped: false });
 await until(() => !state.cars['2'].brakeSets.padsFront.find(t => t.id === 'pf2').scrapped);
 check('a scrapped set can be restored with its hours intact',
   state.cars['2'].brakeSets.padsFront.find(t => t.id === 'pf2').scrapReason === null);
+
+// a measured wear figure (the station turns a gauged percent into hours):
+// typed onto a rack set it becomes the set's hours, and zero returns the set
+// to the new pool; typed onto the part on the car it re-seeds the live counter
+send({ type: 'brakeSetHours', carId: '2', comp: 'padsFront', setId: 'pf2', hours: 3.5 });
+await until(() => state.cars['2'].brakeSets.padsFront.find(t => t.id === 'pf2').hours === 3.5);
+check('a measured figure lands on a rack set as hours and marks it used',
+  state.cars['2'].brakeSets.padsFront.find(t => t.id === 'pf2').used === true);
+send({ type: 'brakeSetHours', carId: '2', comp: 'padsFront', setId: 'pf2', hours: 0 });
+await until(() => state.cars['2'].brakeSets.padsFront.find(t => t.id === 'pf2').hours === 0);
+check('a rack set typed back to zero returns to the new pool',
+  state.cars['2'].brakeSets.padsFront.find(t => t.id === 'pf2').used === false);
+send({ type: 'brakeSetHours', carId: '2', comp: 'padsFront', setId: 'pf4', hours: 5 });
+await until(() => Math.abs(state.cars['2'].state.brakeUsedH.padsFront - 5) < 0.1);
+check('a measured figure on the part on the car re-seeds the live counter',
+  Math.abs(state.cars['2'].state.brakeUsedH.padsFront - 5) < 0.1);
+
+// ---- kits: a pad set bedded onto a disc set, mounted and called for as one ----
+{
+  const car1 = state.cars['1'];
+  check('a fresh rack arrives kitted straight down the line',
+    car1.brakeSets.discsFront[0].padSetId === 'pf1' &&
+    car1.brakeSets.discsFront[0].kitName === 'F1' &&
+    car1.brakeSets.discsFront[2].padSetId === 'pf3' &&
+    car1.brakeSets.discsRear[0].kitName === 'R1');
+  check('a spare pad set with no disc left to bed onto stays free',
+    !car1.brakeSets.discsFront.some(t => t.padSetId === 'pf4'));
+}
+
+// bedding a free pad set onto a bare disc set is what makes a kit
+send({ type: 'brakeKitLink', carId: '2', axle: 'front', discSetId: 'df2', padSetId: 'pf2' });
+await until(() => state.cars['2'].brakeSets.discsFront.find(t => t.id === 'df2').padSetId === 'pf2');
+check('bedding a pad set onto a disc set names the kit',
+  !!state.cars['2'].brakeSets.discsFront.find(t => t.id === 'df2').kitName);
+// the same pads cannot be bedded onto two disc sets at once
+send({ type: 'brakeKitLink', carId: '2', axle: 'front', discSetId: 'df3', padSetId: 'pf2' });
+await until(() => state.cars['2'].brakeSets.discsFront.find(t => t.id === 'df3').padSetId === 'pf2');
+check('a pad set moved to another disc leaves the first one bare',
+  state.cars['2'].brakeSets.discsFront.find(t => t.id === 'df2').padSetId === null);
+send({ type: 'brakeKitLink', carId: '2', axle: 'front', discSetId: 'df2', padSetId: 'pf2' });
+await until(() => state.cars['2'].brakeSets.discsFront.find(t => t.id === 'df2').padSetId === 'pf2');
+
+// the kit on the car is running: it cannot be taken apart on paper
+{
+  const onDisc = state.cars['2'].state.currentBrakeSetId.discsFront;
+  send({ type: 'brakeKitLink', carId: '2', axle: 'front', discSetId: onDisc, padSetId: null });
+  await wait(150);
+  check('the kit on the car cannot be unbedded',
+    state.cars['2'].brakeSets.discsFront.find(t => t.id === onDisc).padSetId ===
+      state.cars['2'].state.currentBrakeSetId.padsFront);
+}
+send({ type: 'brakeKitRename', carId: '2', axle: 'front', discSetId: 'df2', name: 'F9' });
+await until(() => state.cars['2'].brakeSets.discsFront.find(t => t.id === 'df2').kitName === 'F9');
+check('a kit can be renamed', true);
+
+// a stop changing the whole axle takes both parts off ONE kit
+send({ type: 'update', carId: '2', patch: { nextStop: { padsFront: true, discsFront: true, status: 'box' } } });
+await wait(150);
+send({ type: 'applyStop', carId: '2' });
+await until(() => state.cars['2'].state.currentBrakeSetId.discsFront === 'df2');
+{
+  const car2 = state.cars['2'];
+  const cur = car2.state.currentBrakeSetId;
+  check('a kit change fits the pads that were bedded onto those discs',
+    cur.discsFront === 'df2' && cur.padsFront === 'pf2');
+  check('what is on the car is still a kit afterwards',
+    car2.brakeSets.discsFront.find(t => t.id === cur.discsFront).padSetId === cur.padsFront);
+  check('the discs that came off banked their hours',
+    car2.brakeSets.discsFront.find(t => t.id === 'df1').used === true);
+}
+
+// discs never come off on their own: a stop asking only for discs is a kit
+send({ type: 'update', carId: '2', patch: { nextStop: { discsFront: true, status: 'box' } } });
+await wait(150);
+{
+  const before = state.cars['2'].state.currentBrakeSetId.padsFront;
+  send({ type: 'applyStop', carId: '2' });
+  await until(() => state.cars['2'].state.currentBrakeSetId.padsFront !== before);
+  const cur = state.cars['2'].state.currentBrakeSetId;
+  check('a discs-only stop takes the pads with them',
+    cur.padsFront !== before &&
+    state.cars['2'].brakeSets.discsFront.find(t => t.id === cur.discsFront).padSetId === cur.padsFront);
+}
+
+// scrapping half a kit dissolves it — nothing stays bedded onto a binned part
+{
+  const spare = state.cars['2'].brakeSets.discsFront
+    .find(t => t.padSetId && t.id !== state.cars['2'].state.currentBrakeSetId.discsFront);
+  if (spare) {
+    send({ type: 'brakeSetDecision', carId: '2', comp: 'discsFront', setId: spare.id, scrapped: true, reason: 'cracked' });
+    await until(() => state.cars['2'].brakeSets.discsFront.find(t => t.id === spare.id).scrapped);
+    check('scrapping a disc set dissolves the kit it anchored',
+      state.cars['2'].brakeSets.discsFront.find(t => t.id === spare.id).padSetId === null);
+  } else {
+    check('scrapping a disc set dissolves the kit it anchored', false);
+  }
+}
 
 // editing the count reconciles the rack (unused sets trimmed from the end)
 send({ type: 'update', carId: '4', patch: { config: { brakeSets: { discsRear: 5 } } } });
@@ -2231,6 +2796,288 @@ check('regulations mirrored to every car', Object.values(state.cars).every(c =>
     const c = carCalcs(bare, state.race, Date.now());
     return c.reg.enabled === false && !c.limits.some(l => l.key === 'reg');
   })());
+
+  // A state file that outlived its race: the stint and a stint in the history
+  // are anchored days before this race started. Nothing may read that as seat
+  // time — it is what turned a four hour race into a 154 hour driver total.
+  check('a stint older than the race is clamped to the start', (() => {
+    const now = Date.now();
+    const stale = JSON.parse(JSON.stringify(state.cars['1']));
+    const sixDays = 6 * 24 * 3600e3;
+    stale.state.stintStartMs = now - sixDays;
+    stale.stintHistory = [{ driverId: stale.currentDriverId,
+      startMs: now - sixDays - 20 * 60e3, endMs: now - sixDays, laps: 8 }];
+    const c = carCalcs(stale, state.race, now);
+    const mine = c.reg.byDriver[stale.currentDriverId];
+    const elapsed = c.clock.elapsedMs;
+    return c.stintElapsedMs <= elapsed && mine.totalMs <= elapsed &&
+      mine.windowMs <= elapsed;
+  })());
+}
+
+// ---- the tyre allocation, and what it does to a stop under yellow ----
+// A fixed set count makes a 24 h race a rationing problem. While there is spare
+// rubber a tyre change under a caution is close to free; once the stock will not
+// cover the distance left, binning a set with life in it has to cost something,
+// or the app will happily spend an allocation the team cannot replace.
+{
+  const now = Date.now();
+  const mk = usableSets => {
+    const c = JSON.parse(JSON.stringify(state.cars['1']));
+    Object.assign(c.config, {
+      tyreLifeKm: 300, tyreChangeSec: 25, tankLiters: 100, safetyFuelL: 3,
+      cautionsPerHour: 0.639, tyreDegSecPerKm: 0.0087, fuelWeightSecPerL: 0.0079
+    });
+    c.state.fuelLiters = 60;
+    // Build the stock outright: this car is deep into the race by now and its
+    // sets carry whatever earlier tests did to them, which would decide the
+    // answer instead of the set count under test.
+    c.tyreSets = Array.from({ length: usableSets }, (_, i) => ({
+      id: 'ts' + i, name: 'S' + (i + 1), km: 0, kmFcy: 0,
+      used: i === 0, scrapped: false
+    }));
+    const fitted = c.tyreSets[0];
+    fitted.km = 60;
+    c.state.currentTyreSetId = fitted.id;
+    return c;
+  };
+
+  const rich = tyreBudget(mk(40), state.race, now);
+  const poor = tyreBudget(mk(3), state.race, now);
+  check('the budget counts the rubber against the distance left',
+    rich && rich.kmAvailable > poor.kmAvailable && rich.kmToRun === poor.kmToRun);
+  check('a full garage covers the race', rich && rich.short === false && rich.deficitKm === 0);
+  check('a thin garage is short by a real distance', poor && poor.short === true && poor.deficitKm > 0);
+  check('the budget names what this set would bin', poor && poor.fittedKmLeft === 240);
+  check('scrapped sets are not counted as stock', poor.setsUsable === 3);
+
+  // The call itself must move: plenty of rubber -> fit tyres on the cheap stop;
+  // rationing -> keep the set that still has 240 km in it.
+  const cheap = cautionCall(mk(40), state.race, now, 'fcy');
+  const tight = cautionCall(mk(3), state.race, now, 'fcy');
+  check('with rubber to spare the caution stop fits tyres',
+    cheap && cheap.winner.tyres === true);
+  check('when short the caution stop keeps the set that has life left',
+    tight && tight.winner.tyres === false);
+  check('and the tyre plans are the ones that got dearer',
+    tight.plans.find(p => p.key === 'both').gapSec >
+    cheap.plans.find(p => p.key === 'both').gapSec);
+  check('the call carries the budget so the card can say why',
+    tight.budget && tight.budget.short === true);
+}
+
+// ---- correcting the laps on the fitted set, from the tyre panel ----
+// The rack disables the laps box for the set on the car, and setLaps moves the
+// whole world with it. This one moves ONLY the fitted set: its lap count and
+// its banked mileage together, everything else untouched.
+{
+  const before = state.cars['1'];
+  const setId = before.state.currentTyreSetId;
+  const set0 = before.tyreSets.find(t => t.id === setId);
+  const laps0 = before.state.tyreLapsOnSet;
+  const km0 = set0.km;
+  const total0 = before.state.totalLaps;
+  const fuel0 = before.state.fuelLiters;
+  const trackKm = before.config.trackKm;
+
+  send({ type: 'setTyreLaps', carId: '1', laps: laps0 + 5 });
+  await until(() => state.cars['1'].state.tyreLapsOnSet === laps0 + 5);
+  const mid = state.cars['1'];
+  const setMid = mid.tyreSets.find(t => t.id === setId);
+  check('the fitted set gains the laps', mid.state.tyreLapsOnSet === laps0 + 5);
+  check('its banked mileage moves with them',
+    Math.abs(setMid.km - (km0 + 5 * trackKm)) < 0.05);
+  check('total laps, the stint and fuel stay where they were',
+    mid.state.totalLaps === total0 && Math.abs(mid.state.fuelLiters - fuel0) < 1e-9);
+  check('a corrected set counts as used', setMid.used === true);
+
+  // Correcting downwards takes the mileage back out, and never below zero.
+  send({ type: 'setTyreLaps', carId: '1', laps: 0 });
+  await until(() => state.cars['1'].state.tyreLapsOnSet === 0);
+  const back = state.cars['1'].tyreSets.find(t => t.id === setId);
+  check('correcting down takes the kilometres back out',
+    back.km <= km0 + 0.05 && back.km >= 0);
+
+  // Nonsense is refused, not clamped into something surprising.
+  send({ type: 'setTyreLaps', carId: '1', laps: -3 });
+  await wait(200);
+  check('a negative correction is refused', state.cars['1'].state.tyreLapsOnSet === 0);
+
+  // Put the car back the way this block found it.
+  send({ type: 'setTyreLaps', carId: '1', laps: laps0 });
+  await until(() => state.cars['1'].state.tyreLapsOnSet === laps0);
+}
+
+// ---- two stocks in one rack: wets are insurance, never dry budget ----
+{
+  const now = Date.now();
+  const mk = (slicks, wets, condition) => {
+    const c = JSON.parse(JSON.stringify(state.cars['1']));
+    Object.assign(c.config, { tyreLifeKm: 300, tankLiters: 100, safetyFuelL: 3 });
+    c.condition = condition;
+    c.tyreSets = [
+      ...Array.from({ length: slicks }, (_, i) => ({
+        id: 'sl' + i, name: 'SL' + (i + 1), compound: 'slick', km: 0, kmFcy: 0,
+        used: i === 0, scrapped: false })),
+      ...Array.from({ length: wets }, (_, i) => ({
+        id: 'we' + i, name: 'WE' + (i + 1), compound: 'wet', km: 0, kmFcy: 0,
+        used: false, scrapped: false }))
+    ];
+    c.state.currentTyreSetId = 'sl0';
+    return c;
+  };
+
+  const dry = tyreBudget(mk(10, 4, 'dry'), state.race, now);
+  check('a dry ledger counts only the slicks', dry.setsFresh === 9 && dry.activeCompound === 'slick');
+  check('the wets are held back, not budgeted', dry.setsFreshOther === 4);
+
+  const wet = tyreBudget(mk(10, 4, 'wet'), state.race, now);
+  check('a wet track budgets the wets instead', wet.setsFresh === 4 && wet.activeCompound === 'wet');
+  check('a slick on a wet car covers none of the wet distance', wet.fittedKmLeft === 0);
+
+  check('a wet car is offered a wet set', stopTyreSet(mk(10, 4, 'wet')).compound === 'wet');
+  check('a dry car is offered a slick', stopTyreSet(mk(10, 4, 'dry')).compound === 'slick');
+  check('no wets in the rack falls back to a slick rather than nothing',
+    stopTyreSet(mk(10, 0, 'wet')).compound === 'slick');
+
+  // Sets from before compounds existed are slicks — that is what they were.
+  const legacy = mk(2, 0, 'dry');
+  delete legacy.tyreSets[1].compound;
+  reconcileTyreSets(legacy);
+  check('a legacy set with no compound reads as a slick', legacy.tyreSets[1].compound === 'slick');
+}
+
+// ---- tyres taken because the flag made them cheap, not because they are due ----
+// The life rule only asks whether the rubber survives the next stint. Under a
+// neutralisation the box work is discounted, so a set that is not due can still
+// be worth fitting — but only while there is rubber in the garage to spare.
+{
+  const now = Date.now();
+  const mk = (tyreKm, usableSets) => {
+    const c = JSON.parse(JSON.stringify(state.cars['1']));
+    Object.assign(c.config, {
+      tyreLifeKm: 300, tyreChangeSec: 25, tankLiters: 100, safetyFuelL: 3,
+      tyreDegSecPerKm: 0.0087, fuelWeightSecPerL: 0.0079
+    });
+    c.state.fuelLiters = 60;
+    c.tyreSets = Array.from({ length: usableSets }, (_, i) => ({
+      id: 'to' + i, name: 'O' + (i + 1), km: 0, kmFcy: 0, used: i === 0, scrapped: false
+    }));
+    c.tyreSets[0].km = tyreKm;
+    c.state.currentTyreSetId = 'to0';
+    return c;
+  };
+  const at = (km, sets, pace) => recommendedStop(mk(km, sets), state.race, now, { pace });
+
+  check('a fresh set is left alone even under the flag',
+    at(0, 40, 'fcy').tyres.change === false);
+  check('a part-worn set is worth fitting under the flag',
+    at(150, 40, 'fcy').tyres.change === true && at(150, 40, 'fcy').tyres.opportunity === true);
+  check('the reason says the flag is what paid for it',
+    /free under the flag/.test(at(150, 40, 'fcy').tyres.why));
+  check('the same set is left alone under green — there is no discount to spend',
+    at(150, 40, null).tyres.change === false);
+  check('the Safety Car buys it too, being a neutralisation',
+    at(150, 40, 'sc').tyres.change === true);
+
+  // The garage decides whether the team can afford the trick at all.
+  const short = at(150, 4, 'fcy');
+  check('a short garage declines the free set', short.tyres.change === false);
+  check('and says what the change would spend rather than going quiet',
+    /spends a fresh set/.test(short.tyres.why) && /the flag still needs/.test(short.tyres.why));
+
+  // More wear must never be worth less than less wear.
+  const gainOf = km => {
+    const m = at(km, 40, 'fcy').tyres.why.match(/(\d+) s of wear/);
+    return m ? +m[1] : 0;
+  };
+  check('the case for fresh rubber grows with the wear on the set',
+    gainOf(250) > gainOf(150) && gainOf(150) > gainOf(60));
+}
+
+// ---- who gets in next: the plan decides, the drive limit overrules ----
+// The plan is the crew's running order and outranks the balancing heuristic.
+// The one thing that can overrule it is a driver who cannot legally see the
+// stint out — a stop forced by seat time must not propose "same driver stays in".
+{
+  const now = Date.now();
+  // A car with a plan, and a stop coming. The plan's next stint names d4.
+  const base = JSON.parse(JSON.stringify(state.cars['1']));
+  const nHist = base.stintHistory.length;
+  const withPlan = (nextDriverId, driveLeftMin) => {
+    const c = JSON.parse(JSON.stringify(base));
+    c.plan = generatePlan(c, state.race, now);
+    // Name the driver we want on the stint that follows the running one.
+    if (c.plan.stints[nHist + 1]) c.plan.stints[nHist + 1].driverId = nextDriverId;
+    // Regulations tight enough that `driveLeftMin` is all that driver has left.
+    if (driveLeftMin != null) {
+      c.config.reg6hMin = 0;
+      c.config.regRestMin = 0;
+      const drv = driveTimeStats(c, state.race, now).byDriver[nextDriverId];
+      c.config.regTotalMin = Math.round((drv.totalMs + driveLeftMin * 60e3) / 60e3);
+    }
+    return c;
+  };
+
+  const planned = withPlan('d4', null);
+  const rec = recommendedStop(planned, state.race, now);
+  check('the next driver comes from the stint plan',
+    rec.driver.id === 'd4' && rec.driver.why.includes('stint plan'));
+
+  // Same plan, but d4 has two minutes of legal seat time against a full stint.
+  const starved = withPlan('d4', 2);
+  const recS = recommendedStop(starved, state.race, now);
+  check('a planned driver who cannot finish the stint is not proposed',
+    recS.driver.id !== 'd4');
+  check('and the reason names the drive limit so the plan can be edited',
+    /drive limit/.test(recS.driver.why));
+
+  // A double-stinting driver with no time left must hand over — the case that
+  // used to read "driver time limited" and "same driver stays in" at once.
+  {
+    const c = JSON.parse(JSON.stringify(base));
+    c.plan = null;
+    const cur = c.drivers.find(d => d.id === c.currentDriverId);
+    cur.doubleStint = true;
+    c.config.reg6hMin = 0;
+    c.config.regRestMin = 0;
+    const mine = driveTimeStats(c, state.race, now).byDriver[c.currentDriverId];
+    c.config.regTotalMin = Math.round((mine.totalMs + 2 * 60e3) / 60e3);
+    const r = recommendedStop(c, state.race, now);
+    check('a double-stint driver out of seat time hands over', r.driver.change === true);
+  }
+
+  // No plan and no regulations: the old balancing behaviour is untouched.
+  {
+    const c = JSON.parse(JSON.stringify(base));
+    c.plan = null;
+    c.config.reg6hMin = 0; c.config.regTotalMin = 0; c.config.regRestMin = 0;
+    const r = recommendedStop(c, state.race, now);
+    check('with no plan and no regs the balancing call still answers',
+      !!r.driver.name && /seat time|double stint/.test(r.driver.why));
+  }
+}
+
+// ---- editing the plan: reassigning a stint that has not run ----
+{
+  send({ type: 'update', carId: '1', patch: { plan: generatePlan(state.cars['1'], state.race, Date.now()) } });
+  await wait(150);
+  const idx = state.cars['1'].plan.stints.length - 1;
+  const was = state.cars['1'].plan.stints[idx].driverId;
+  const other = state.cars['1'].drivers.find(d => d.id !== was).id;
+  send({ type: 'planStint', carId: '1', index: idx, driverId: other });
+  await until(() => state.cars['1'].plan.stints[idx].driverId === other);
+  check('a future stint can be reassigned', state.cars['1'].plan.stints[idx].driverId === other);
+  check('seat-time totals follow the edit',
+    Math.abs(Object.values(state.cars['1'].plan.totals).reduce((a, b) => a + b, 0) -
+      state.cars['1'].plan.stints.reduce((a, s) => a + (s.toMs - s.fromMs), 0)) < 1);
+
+  // History is not up for renegotiation.
+  const done = state.cars['1'].plan.stints[0].driverId;
+  send({ type: 'planStint', carId: '1', index: 0, driverId: other });
+  await wait(150);
+  check('a stint already driven cannot be reassigned',
+    state.cars['1'].plan.stints[0].driverId === done);
 }
 
 // ---- pit congestion ----
@@ -2397,6 +3244,77 @@ check('stintStats filters outliers', (() => {
     near(sc.paceKmh, 100, 0.1) && near(sc.etaEntrySec, 67.2));
 }
 
+// ---- pit order across the team (pitArrivalOrder) ----
+// One crew, four cars: when a flag drops the wall has to say which car it
+// takes first. The order is read off the same pit E.T.A.s the cards show.
+{
+  const now = Date.now();
+  const nowUs = 1e12;
+  const mk = id => {
+    const c = defaultCar(id, id);
+    c.config.trackKm = 4.0;
+    c.config.avgLapSec.dry = 100; // 40 m/s under green
+    c.config.fcySpeedKmh = 80;
+    return c;
+  };
+  const fcyRace = {
+    durationH: 24, startMs: now - 3600e3,
+    fcy: { mode: 'auto', active: true, startMs: now - 30e3, flag: 7 }
+  };
+  const greenRace = { ...fcyRace, fcy: { mode: 'auto', active: false, startMs: null, flag: 6 } };
+  // Seconds since this car's last S/F crossing — the farther round the lap,
+  // the sooner it reaches the pit entry.
+  const seenAt = ageSec => ({ nr: '9', state: 'E' + (nowUs - ageSec * 1e6), inPit: false });
+  const etaWith = (race, ages) => car =>
+    pitEta(car, race, { serverNowUs: nowUs }, seenAt(ages[car.id]), now, now);
+
+  const a = mk('1'), b = mk('2'), c = mk('3');
+  const cars = [a, b, c];
+
+  // Under FCY: #2 is farthest round the lap, #1 has only just crossed.
+  const q = pitArrivalOrder(cars, etaWith(fcyRace, { 1: 10, 2: 80, 3: 45 }), now);
+  check('pitArrivalOrder: soonest at the box is first',
+    q.length === 3 && q.map(x => x.carId).join(',') === '2,3,1' &&
+    q.every((x, i) => x.pos === i + 1 && x.of === 3) &&
+    q[0].sec < q[1].sec && q[1].sec < q[2].sec);
+
+  // A car already in the lane is at the front, whatever anyone's E.T.A. says.
+  b.state.inPit = true;
+  b.state.pitEnterMs = now - 20e3;
+  const qPit = pitArrivalOrder(cars, etaWith(fcyRace, { 1: 10, 2: 80, 3: 90 }), now);
+  check('pitArrivalOrder: a car in the lane is first',
+    qPit[0].carId === '2' && qPit[0].inPit === true && qPit[0].sec < 0 &&
+    qPit.map(x => x.carId).join(',') === '2,3,1');
+  b.state.inPit = false;
+  b.state.pitEnterMs = null;
+
+  // Under green nothing is coming in until a stop is actually sent, so there
+  // is no order to show — and one car on its way in is not an order either.
+  check('pitArrivalOrder: nothing under green with no stop sent',
+    pitArrivalOrder(cars, etaWith(greenRace, { 1: 10, 2: 80, 3: 45 }), now).length === 0);
+  a.nextStop.status = 'sent';
+  check('pitArrivalOrder: a lone car inbound is not a queue',
+    pitArrivalOrder(cars, etaWith(greenRace, { 1: 10, 2: 80, 3: 45 }), now).length === 0);
+  c.nextStop.status = 'box';
+  const qGreen = pitArrivalOrder(cars, etaWith(greenRace, { 1: 10, 2: 80, 3: 45 }), now);
+  check('pitArrivalOrder: live stops queue up under green too',
+    qGreen.length === 2 && qGreen.map(x => x.carId).join(',') === '3,1');
+  a.nextStop.status = 'draft';
+  c.nextStop.status = 'draft';
+
+  // No usable position (no feed row, no crossing) leaves a car out rather
+  // than guessing a place for it.
+  const qBlind = pitArrivalOrder(cars, car => (car.id === '3' ? null : etaWith(fcyRace, { 1: 10, 2: 80, 3: 45 })(car)), now);
+  check('pitArrivalOrder: cars with no position are left out',
+    qBlind.length === 2 && qBlind.map(x => x.carId).join(',') === '2,1');
+
+  // A stale estimate still takes its place, but is marked as one.
+  const qStale = pitArrivalOrder(cars, etaWith(fcyRace, { 1: 10, 2: 400, 3: 45 }), now);
+  check('pitArrivalOrder: a stale estimate is flagged in the queue',
+    qStale.find(x => x.carId === '2').stale === true &&
+    qStale.find(x => x.carId === '1').stale === false);
+}
+
 // ---- station presence: NO CAR RUNNING vs a dropped station ----
 // A station announces its car with 'hello'. The wall shows NO CAR RUNNING
 // only for cars that never had a station (or feed data) this race; after a
@@ -2406,10 +3324,21 @@ check('stintStats filters outliers', (() => {
 
   const st2 = new WebSocket('ws://127.0.0.1:' + info.port);
   st2.on('open', () => st2.send(JSON.stringify({ type: 'hello', role: 'station', carId: '2' })));
-  await until(() => stationsOnline['2'] === true);
-  check('hello marks the station online', stationsOnline['2'] === true);
+  await until(() => stationsOnline['2'] === 1);
+  check('hello marks the station online', stationsOnline['2'] === 1);
   await until(() => !!state.cars['2'].state.liveSeenMs);
   check('hello stamps the car as live', !!state.cars['2'].state.liveSeenMs);
+
+  // Nothing stops a second laptop picking a car that already has one, and the
+  // pair would read as one healthy station while every press landed twice.
+  // The wall can only warn about what it can count.
+  const dup2 = new WebSocket('ws://127.0.0.1:' + info.port);
+  dup2.on('open', () => dup2.send(JSON.stringify({ type: 'hello', role: 'station', carId: '2' })));
+  await until(() => stationsOnline['2'] === 2);
+  check('a second station on the same car counts twice', stationsOnline['2'] === 2);
+  dup2.close();
+  await until(() => stationsOnline['2'] === 1);
+  check('the car is still online when the duplicate leaves', stationsOnline['2'] === 1);
 
   st2.close();
   await until(() => !stationsOnline['2']);
@@ -2549,6 +3478,659 @@ check('stintStats filters outliers', (() => {
   await until(() => state.cars['4'].number === '5');
   check('a patch setting number and name together is taken as it stands',
     state.cars['4'].name === 'Five' && state.cars['4'].number === '5');
+}
+
+// ---- the lap count when the feed is not there to keep it -------------------
+// A dead timing link takes its lap events with it, so the count on the sheet
+// becomes the crew's again. Setting it to what the car has actually run is the
+// last fallback — an outage nobody logged through, a catch-up too large to
+// have been applied blind, a miscount at 3 a.m. — and it is not a display
+// figure: the stint and the tyre on the car move with it.
+{
+  const c = '1';
+  const setId = state.cars[c].state.currentTyreSetId;
+  const kmOf = () => state.cars[c].tyreSets.find(t => t.id === setId).km;
+  const trackKm = state.cars[c].config.trackKm;
+  const laps0 = state.cars[c].state.totalLaps;
+  const stint0 = state.cars[c].state.lapsThisStint;
+  const tyre0 = state.cars[c].state.tyreLapsOnSet;
+  const km0 = kmOf();
+
+  send({ type: 'setLaps', carId: c, laps: laps0 + 3 });
+  await until(() => state.cars[c].state.totalLaps === laps0 + 3);
+  check('the lap count can be set to what the car has run',
+    state.cars[c].state.totalLaps === laps0 + 3);
+  check('a recovered lap moves the stint and the tyre with it',
+    state.cars[c].state.lapsThisStint === stint0 + 3 &&
+    state.cars[c].state.tyreLapsOnSet === tyre0 + 3);
+  check('a recovered lap banks its mileage on the fitted set',
+    near(kmOf(), +(km0 + 3 * trackKm).toFixed(2), 0.02));
+
+  // Down again: a count corrected too far has to be correctable back.
+  send({ type: 'setLaps', carId: c, laps: laps0 });
+  await until(() => state.cars[c].state.totalLaps === laps0);
+  check('the correction goes back down as cleanly as it went up',
+    state.cars[c].state.totalLaps === laps0 &&
+    state.cars[c].state.lapsThisStint === stint0 &&
+    state.cars[c].state.tyreLapsOnSet === tyre0 && near(kmOf(), km0, 0.02));
+
+  // Nonsense is refused rather than acted on — a fat-fingered lap count must
+  // not be able to bury the tyre mileage under thousands of phantom laps.
+  send({ type: 'setLaps', carId: c, laps: -5 });
+  send({ type: 'setLaps', carId: c, laps: 100000 });
+  send({ type: 'setLaps', carId: c, laps: 'abc' });
+  await wait(200);
+  check('a nonsense lap count is refused', state.cars[c].state.totalLaps === laps0);
+
+  // Laps logged by hand are remembered as such: they are what a catch-up
+  // subtracts when the feed comes back, so the same lap can never be counted
+  // once by the crew and once by the feed.
+  const manual0 = state.cars[c].state.manualLaps;
+  send({ type: 'lap', carId: c, lapSec: 101 });
+  await until(() => state.cars[c].state.manualLaps === manual0 + 1);
+  check('a lap logged with no feed counts as logged by hand',
+    state.cars[c].state.manualLaps === manual0 + 1);
+  send({ type: 'undoLap', carId: c });
+  await until(() => state.cars[c].state.manualLaps === manual0);
+  check('undoing it takes that back too', state.cars[c].state.manualLaps === manual0 &&
+    state.cars[c].state.totalLaps === laps0);
+
+  // The note a reconciliation leaves is dismissible — it is there to be read,
+  // not to sit on the screen for the rest of the race.
+  send({ type: 'setLaps', carId: c, laps: laps0 + 1 });
+  await until(() => state.cars[c].state.totalLaps === laps0 + 1);
+  check('correcting the count answers any outstanding catch-up note',
+    state.cars[c].state.lapCatchUp === null);
+  send({ type: 'setLaps', carId: c, laps: laps0 });
+  await until(() => state.cars[c].state.totalLaps === laps0);
+}
+
+// ---- the seat and the stint clock, corrected by hand -----------------------
+// The feed can read a different name than the sheet (a swap done on track
+// radio that never reached the stop planner), and the stint clock can be
+// anchored on the wrong moment (a stop the app missed). Both are correctable
+// straight out — setDriver credits the running stint to whoever is chosen,
+// setStintTime moves the running stint's start.
+{
+  const c = '1';
+  const drv0 = state.cars[c].currentDriverId;
+  const other = state.cars[c].drivers.find(d => d.id !== drv0).id;
+
+  send({ type: 'setDriver', carId: c, driverId: other });
+  await until(() => state.cars[c].currentDriverId === other);
+  check('the seat can be corrected to another roster driver',
+    state.cars[c].currentDriverId === other);
+  check('a corrected seat poisons the running consumption span',
+    state.cars[c].learn.fuelRef === null || state.cars[c].learn.fuelRef.dirty === true);
+
+  send({ type: 'setDriver', carId: c, driverId: 'nobody' });
+  await wait(200);
+  check('a driver not on the roster is refused', state.cars[c].currentDriverId === other);
+  send({ type: 'setDriver', carId: c, driverId: drv0 });
+  await until(() => state.cars[c].currentDriverId === drv0);
+
+  // The clock is a correction of a RUNNING stint — with the race reset above
+  // there is nothing to correct, and the message must be refused.
+  const parked = state.cars[c].state.stintStartMs;
+  send({ type: 'setStintTime', carId: c, elapsedMs: 5 * 60e3 });
+  await wait(200);
+  check('with no running stint the stint clock is refused',
+    state.cars[c].state.stintStartMs === parked);
+
+  // The stint clock, set to 10 minutes: the start moves to now - 10 min,
+  // never before the race start.
+  send({ type: 'startRace' });
+  await until(() => !!state.race.startMs && !!state.cars[c].state.stintStartMs);
+  const target = 10 * 60e3;
+  send({ type: 'setStintTime', carId: c, elapsedMs: target });
+  await until(() => {
+    const want = Math.max(Date.now() - target, state.race.startMs || 0);
+    return Math.abs(state.cars[c].state.stintStartMs - want) < 2500;
+  });
+  const want = Math.max(Date.now() - target, state.race.startMs || 0);
+  check('the stint clock can be set to what it actually is',
+    Math.abs(state.cars[c].state.stintStartMs - want) < 2500);
+
+  // Nonsense is refused rather than acted on.
+  const anchor = state.cars[c].state.stintStartMs;
+  send({ type: 'setStintTime', carId: c, elapsedMs: -5 });
+  send({ type: 'setStintTime', carId: c, elapsedMs: 'abc' });
+  send({ type: 'setStintTime', carId: c, elapsedMs: 90 * 3600e3 });
+  await wait(200);
+  check('a nonsense stint time is refused', state.cars[c].state.stintStartMs === anchor);
+
+  // Leave the race the way this block found it: reset.
+  send({ type: 'resetRace' });
+  await until(() => state.race.startMs == null);
+}
+
+
+// ===========================================================================
+// Pure-function coverage: the brake rack as kits, the naming pools, the tyre
+// warmers, where a stint started, who gets in next, and the caution call.
+// These need no server — they are the strategy model answering on its own, so
+// they run last and cost nothing.
+// ===========================================================================
+
+// ---- component and axle identity --------------------------------------------
+// Every brake reader starts by turning a component id into an axle, so these
+// three are the floor under the whole rack. A junk id must come back null
+// rather than land on the front axle by accident.
+{
+  check('discs are disc components, pads are not',
+    isDiscComponent('discsFront') && isDiscComponent('discsRear') &&
+    !isDiscComponent('padsFront') && !isDiscComponent('padsRear'));
+  check('an unknown component is not a disc', !isDiscComponent('nope') && !isDiscComponent(null));
+  check('every component knows its axle',
+    axleOfComponent('padsFront')?.id === 'front' && axleOfComponent('discsFront')?.id === 'front' &&
+    axleOfComponent('padsRear')?.id === 'rear' && axleOfComponent('discsRear')?.id === 'rear');
+  check('an unknown component has no axle', axleOfComponent('nope') === null);
+  check('axles are addressable by id',
+    brakeAxle('front')?.discs === 'discsFront' && brakeAxle('rear')?.pads === 'padsRear');
+  check('an unknown axle is null', brakeAxle('X') === null && brakeAxle(null) === null);
+}
+
+// ---- what a stop asks for, by axle ------------------------------------------
+// The planner stores the work as four booleans; every card reads it back as
+// 'none' | 'pads' | 'kit' per axle. Discs never come off without the pads
+// bedded to them, so asking for discs alone still means the whole kit.
+{
+  const work = compIds => brakeAxleWork(compIds);
+  check('nothing asked for is no work on either axle',
+    work([]).front === 'none' && work([]).rear === 'none');
+  check('pads alone is pads', work(['padsFront']).front === 'pads');
+  check('discs alone is still a kit — discs never come off without their pads',
+    work(['discsFront']).front === 'kit');
+  check('pads and discs together are one kit, not two jobs',
+    work(['padsFront', 'discsFront']).front === 'kit');
+  check('the axles are independent',
+    work(['padsFront', 'discsRear']).front === 'pads' &&
+    work(['padsFront', 'discsRear']).rear === 'kit');
+  check('a missing component list is no work', brakeAxleWork(null).front === 'none');
+
+  // Work → components → work has to land back where it started, because the
+  // stop is stored one way and read the other on every card.
+  let stable = true;
+  for (const comps of [[], ['padsFront'], ['discsFront'], ['padsFront', 'discsFront'],
+                       ['padsRear'], ['padsFront', 'padsRear'],
+                       ['padsFront', 'discsFront', 'padsRear', 'discsRear']]) {
+    const w = brakeAxleWork(comps);
+    if (JSON.stringify(brakeAxleWork(brakeWorkComps(w))) !== JSON.stringify(w)) stable = false;
+  }
+  check('work survives the round trip through component ids', stable);
+  check('a kit expands to both parts',
+    brakeWorkComps({ front: 'kit' }).sort().join() === 'discsFront,padsFront');
+  check('pads expand to the pads alone', brakeWorkComps({ front: 'pads' }).join() === 'padsFront');
+  check('no work expands to nothing', brakeWorkComps(null).length === 0 &&
+    brakeWorkComps({ front: 'none', rear: 'none' }).length === 0);
+}
+
+// ---- the rack as the crew lays it out ---------------------------------------
+// A seeded rack is discs with pads bedded onto them, plus whatever pads are
+// bedded onto nothing. These are the lookups every board on the settings page
+// goes through, in both directions.
+{
+  const rackCar = defaultCar('1');
+  reconcileBrakeSets(rackCar);
+  reconcileBrakeKits(rackCar);
+
+  const kits = brakeKitsOf(rackCar, 'front');
+  check('a fresh rack marries every disc set it can', kits.length === 3);
+  check('the kit on the car is the one the car is running',
+    currentBrakeKit(rackCar, 'front')?.disc.id === rackCar.state.currentBrakeSetId.discsFront &&
+    currentBrakeKit(rackCar, 'front')?.pad.id === rackCar.state.currentBrakeSetId.padsFront);
+  check('the kit on the car says so', currentBrakeKit(rackCar, 'front')?.onCar === true);
+  check('the pad set nobody bedded is in AVAILABLE PADS',
+    freePadSets(rackCar, 'front').map(s => s.name).join() === 'PF4');
+  check('the next kit name continues the series', kitNameFor(rackCar, 'front') === 'F4');
+
+  const k = kits[0];
+  check('a disc set finds its kit', kitOfDiscSet(rackCar, 'front', k.disc.id)?.name === k.name);
+  check('a pad set finds the discs it is bedded onto',
+    discSetOfPadSet(rackCar, 'front', k.pad.id)?.id === k.disc.id);
+  check('an unknown part has no kit',
+    kitOfDiscSet(rackCar, 'front', 'nope') === null &&
+    discSetOfPadSet(rackCar, 'front', 'nope') === null);
+  check('a free pad set is bedded onto nothing',
+    discSetOfPadSet(rackCar, 'front', freePadSets(rackCar, 'front')[0].id) === null);
+  check('the axles keep their own pools',
+    brakeKitsOf(rackCar, 'rear').every(kk => kk.name.startsWith('R')));
+}
+
+// ---- bedding, unbedding, and the one-to-one rule ----------------------------
+{
+  const bed = defaultCar('2');
+  reconcileBrakeSets(bed);
+  reconcileBrakeKits(bed);
+  const spare = brakeKitsOf(bed, 'front').find(kk => !kk.onCar);
+  const discId = spare.disc.id, padId = spare.pad.id;
+
+  unlinkBrakeKit(bed, 'front', discId);
+  check('UNBED takes a kit apart', kitOfDiscSet(bed, 'front', discId) === null);
+  check('the pads it freed are back in AVAILABLE PADS',
+    freePadSets(bed, 'front').some(s => s.id === padId));
+
+  linkBrakeKit(bed, 'front', discId, padId, 'REBED');
+  check('BED PADS marries them again and takes the name given',
+    kitOfDiscSet(bed, 'front', discId)?.name === 'REBED');
+  check('a bedded pad set leaves AVAILABLE PADS',
+    !freePadSets(bed, 'front').some(s => s.id === padId));
+
+  // A kit is one-to-one. Bedding pads that already belong to another disc set
+  // MOVES them — it must never leave the same pads claimed by two disc sets.
+  const [a, b] = brakeKitsOf(bed, 'front');
+  linkBrakeKit(bed, 'front', a.disc.id, b.pad.id, 'MOVED');
+  check('bedding a claimed pad set moves it to the new discs',
+    kitOfDiscSet(bed, 'front', a.disc.id)?.pad.id === b.pad.id);
+  check('the disc set it left keeps no kit',
+    kitOfDiscSet(bed, 'front', b.disc.id) === null);
+  check('the pads it displaced are free again',
+    freePadSets(bed, 'front').some(s => s.id === a.pad.id));
+  const claims = brakeKitsOf(bed, 'front').map(kk => kk.pad.id);
+  check('no pad set is ever claimed by two disc sets',
+    new Set(claims).size === claims.length);
+
+  check('bedding onto a part that is not there does nothing',
+    linkBrakeKit(bed, 'front', 'ghost', b.pad.id) === null &&
+    linkBrakeKit(bed, 'front', a.disc.id, 'ghost') === null);
+  check('an unknown axle cannot be bedded',
+    linkBrakeKit(bed, 'X', a.disc.id, b.pad.id) === null &&
+    unlinkBrakeKit(bed, 'X', a.disc.id) === null);
+}
+
+// ---- the kit on the car is not a paper exercise -----------------------------
+// "the kit that is on the car cannot be taken apart on paper while those two
+// parts are running together" — the pads fitted HAVE run on the discs fitted,
+// so the rack must not be able to claim otherwise. The UNBED button is hidden
+// on that row, but the rule belongs in the model: a car file load or any other
+// caller must not be able to break it either.
+{
+  const onCar = defaultCar('3');
+  reconcileBrakeSets(onCar);
+  reconcileBrakeKits(onCar);
+  const fitted = currentBrakeKit(onCar, 'front');
+  const before = fitted.name;
+  unlinkBrakeKit(onCar, 'front', fitted.disc.id);
+  check('the kit on the car cannot be taken apart',
+    kitOfDiscSet(onCar, 'front', fitted.disc.id)?.name === before);
+  check('the pads running on the car never reach AVAILABLE PADS',
+    !freePadSets(onCar, 'front').some(s => s.id === fitted.pad.id));
+
+  // Once the parts are no longer running together it comes apart normally.
+  onCar.state.currentBrakeSetId.padsFront = freePadSets(onCar, 'front')[0].id;
+  unlinkBrakeKit(onCar, 'front', fitted.disc.id);
+  check('a kit the car has already broken can be taken apart',
+    kitOfDiscSet(onCar, 'front', fitted.disc.id) === null);
+}
+
+// ---- what is on the car IS a kit --------------------------------------------
+// After a stop the fitted pads have run on the fitted discs whatever the rack
+// said before, so the rack re-ties itself to match.
+{
+  const sync = defaultCar('4');
+  reconcileBrakeSets(sync);
+  reconcileBrakeKits(sync);
+  const freePad = freePadSets(sync, 'front')[0];
+  const fittedDisc = sync.state.currentBrakeSetId.discsFront;
+  // Fit fresh pads onto the discs already on the car — the rack now disagrees.
+  sync.state.currentBrakeSetId.padsFront = freePad.id;
+  const tied = syncBrakeKitToCar(sync, 'front');
+  check('fitting fresh pads onto the discs on the car re-ties the kit',
+    tied?.pad.id === freePad.id && tied?.disc.id === fittedDisc);
+  check('the discs keep their own identity through it', tied?.name === 'F1');
+  check('the pads that came off are free again',
+    freePadSets(sync, 'front').some(s => s.name === 'PF1'));
+  check('syncing an unknown axle is a no-op', syncBrakeKitToCar(sync, 'X') === null);
+  check('syncing with nothing fitted is a no-op',
+    syncBrakeKitToCar({ state: { currentBrakeSetId: {} }, brakeSets: {} }, 'front') === null);
+}
+
+// ---- the parts a stop would actually fit ------------------------------------
+// stopBrakeKit / stopPadSet answer "what would go on", and stopBrakeAxle
+// decides which of the two the stop is asking for. Left to the app, a kit
+// change takes a made-up kit nobody has run, and a pads-only change takes a
+// pad set bedded onto nothing — so a kit already married is never robbed.
+{
+  const plan = defaultCar('5');
+  reconcileBrakeSets(plan);
+  reconcileBrakeKits(plan);
+  plan.nextStop = emptyStop();
+
+  const kit = stopBrakeKit(plan, 'front', plan.nextStop);
+  check('the app picks a made-up kit nobody has run', kit?.name === 'F2' && kit.onCar === false);
+  check('it never picks the kit on the car', kit?.disc.id !== plan.state.currentBrakeSetId.discsFront);
+  const padOnly = stopPadSet(plan, 'front', plan.nextStop);
+  check('a pads-only change takes a pad set bedded onto nothing',
+    padOnly?.name === 'PF4' && discSetOfPadSet(plan, 'front', padOnly.id) === null);
+
+  check('no work asked for is reported as no work',
+    stopBrakeAxle(plan, 'front', plan.nextStop).work === 'none');
+  plan.nextStop.discsFront = true;
+  const axleKit = stopBrakeAxle(plan, 'front', plan.nextStop);
+  check('a disc change is reported as a kit change with both parts',
+    axleKit.work === 'kit' && axleKit.disc && axleKit.pad && axleKit.name === 'F2');
+  plan.nextStop.discsFront = false;
+  plan.nextStop.padsFront = true;
+  const axlePads = stopBrakeAxle(plan, 'front', plan.nextStop);
+  check('a pads change keeps the discs that are on the car',
+    axlePads.work === 'pads' && axlePads.disc?.id === plan.state.currentBrakeSetId.discsFront);
+  check('a pads change names the kit those discs belong to', axlePads.name === 'F1');
+  check('an unknown axle plans nothing', stopBrakeAxle(plan, 'front', null).work === 'none' &&
+    stopBrakeAxle(plan, 'X', plan.nextStop) === null);
+
+  // A named part in the stop wins over the app's pick.
+  plan.nextStop.brakeSetIds.padsFront = 'pf3';
+  check('the pad set named in the stop is the one that goes on',
+    stopBrakeAxle(plan, 'front', plan.nextStop).pad?.id === 'pf3');
+
+  // Nothing free to do the job with is reported, not silently substituted.
+  const bare = defaultCar('6');
+  reconcileBrakeSets(bare);
+  reconcileBrakeKits(bare);
+  for (const s of brakeSetsOf(bare, 'padsFront')) {
+    if (s.id !== bare.state.currentBrakeSetId.padsFront) s.scrapped = true;
+  }
+  reconcileBrakeKits(bare);
+  const blocked = emptyStop();
+  blocked.padsFront = true;
+  check('a change with nothing in the rack to do it with is blocked, not faked',
+    stopBrakeAxle(bare, 'front', blocked).blocked === true);
+}
+
+// ---- naming pools: one pattern, many pools ----------------------------------
+{
+  check('[#] is where the number goes',
+    expandSetNames('S[#]', 'S', 1, 4).join() === 'S1,S2,S3,S4');
+  check('[##] pads the number', expandSetNames('S[##]', 'S', 8, 3).join() === 'S08,S09,S10');
+  check('[###] pads it further', expandSetNames('S[###]', 'S', 1, 2).join() === 'S001,S002');
+  check('[P] stands for the pool’s own prefix',
+    expandSetNames('[P][##]', 'B', 7, 3, { P: 'DF' }).join() === 'DF07,DF08,DF09');
+  check('an empty pattern falls back to the pool prefix',
+    expandSetNames('', 'X', 1, 3).join() === 'X1,X2,X3');
+  check('a pattern with no token still numbers the sets',
+    expandSetNames('no token', 'X', 1, 3).join() === 'no token1,no token2,no token3');
+  check('the tyre pool names itself', tyreSetNames(undefined, 1, 3).join() === 'S1,S2,S3');
+  check('each brake pool names itself from its own prefix',
+    brakeSetNames('discsFront', undefined, 1, 2).join() === 'DF1,DF2' &&
+    brakeSetNames('padsRear', undefined, 1, 2).join() === 'PR1,PR2');
+
+  check('the series continues from the numbers already on the rack',
+    nextSetNumber(['S1', 'S2', 'S7']) === 8);
+  check('an empty rack starts at 1', nextSetNumber([]) === 1);
+  check('names with no number in them start at 1', nextSetNumber(['nope']) === 1);
+  check('a default allocation is numbered in order',
+    defaultTyreSets(3).map(s => s.name).join() === 'S1,S2,S3');
+}
+
+// ---- a new set starts with nothing on it ------------------------------------
+{
+  const t = newTyreSet('t9', 'S9');
+  check('a new tyre set starts unused, unscrapped and at zero',
+    t.laps === 0 && t.km === 0 && t.kmFcy === 0 && !t.used && !t.scrapped && t.scrapReason === null);
+  const disc = newBrakeSet('d9', 'DF9', 'discsFront');
+  check('a new disc set can hold a kit', 'padSetId' in disc && disc.padSetId === null &&
+    disc.kitName === null && disc.hours === 0);
+  const pad = newBrakeSet('p9', 'PF9', 'padsFront');
+  check('a new pad set holds no kit of its own', !('padSetId' in pad) && pad.hours === 0);
+  const w = newTyreWarmer('w9', 'W9');
+  check('a new warmer starts empty', w.setId === null && w.name === 'W9');
+}
+
+// ---- renaming a pool never touches what has run -----------------------------
+// These are pure: they hand back the new pool and the caller assigns it, so a
+// preview can be shown before anything is committed.
+{
+  const ren = defaultCar('7');
+  const before = ren.tyreSets.map(s => s.name).join();
+  const out = setTyreSetNames(ren, ['A1', 'A2'], { replaceUnused: true });
+  check('renaming a pool does not touch the car until it is assigned',
+    ren.tyreSets.map(s => s.name).join() === before);
+  check('REPLACE UNUSED sweeps out the sets nobody has run',
+    out.sets.map(s => s.name).join() === 'S1,A1,A2' && out.removed === 11);
+  check('the set on the car survives the sweep even unused',
+    out.sets.some(s => s.id === ren.state.currentTyreSetId));
+
+  ren.tyreSets[3].used = true;
+  ren.tyreSets[3].laps = 20;
+  const kept = setTyreSetNames(ren, ['B1'], { replaceUnused: true });
+  check('a set that has run keeps its place and its mileage',
+    kept.sets.some(s => s.name === 'S4' && s.laps === 20) &&
+    kept.sets.some(s => s.name === 'B1'));
+  check('the set on the car is kept too',
+    kept.sets.some(s => s.id === ren.state.currentTyreSetId));
+  check('a name already in the pool is flagged rather than doubled',
+    setTyreSetNames(ren, ['S4'], {}).duplicates.join() === 'S4');
+  check('appending keeps every set that is there',
+    setTyreSetNames(ren, ['C1'], {}).sets.length === ren.tyreSets.length + 1);
+
+  const brk = defaultCar('8');
+  reconcileBrakeSets(brk);
+  reconcileBrakeKits(brk);
+  const bout = setBrakeSetNames(brk, 'discsFront', ['DFX', 'DFY'], { replaceUnused: true });
+  check('a brake pool renames the same way',
+    bout.sets.map(s => s.name).join() === 'DF1,DFX,DFY' || bout.sets.length >= 2);
+  check('renaming a brake pool leaves the rack alone until assigned',
+    brakeSetsOf(brk, 'discsFront').map(s => s.name).join() === 'DF1,DF2,DF3');
+}
+
+// ---- which box the rubber is in ---------------------------------------------
+{
+  const warm = defaultCar('9');
+  warm.config.tyreWarmers = 2;
+  reconcileTyreWarmers(warm);
+  check('the configured number of boxes exists', warm.tyreWarmers.length === 2);
+  const set = warmableTyreSets(warm)[0];
+  loadTyreWarmer(warm, warm.tyreWarmers[0].id, set.id);
+  check('a set in a box is found by the set', warmerOfSet(warm, set.id)?.id === warm.tyreWarmers[0].id);
+  check('a set in no box has no warmer', warmerOfSet(warm, warmableTyreSets(warm)[0].id) === null);
+  check('an unknown set has no warmer', warmerOfSet(warm, 'nope') === null &&
+    warmerOfSet(warm, null) === null);
+}
+
+// ---- where a stint actually started -----------------------------------------
+// A stint can never have begun before the race did — a car whose stint clock
+// was seeded before the green flag would otherwise bank seat time nobody drove.
+{
+  const r = { startMs: 1_000_000, durationH: 24 };
+  check('no stint clock is no stint start', stintStartOf({ state: {} }, r) === null);
+  check('a stint that pre-dates the green flag starts at the flag',
+    stintStartOf({ state: { stintStartMs: r.startMs - 5000 } }, r) === r.startMs);
+  check('a stint inside the race keeps its own clock',
+    stintStartOf({ state: { stintStartMs: r.startMs + 5000 } }, r) === r.startMs + 5000);
+  check('with no race the stint clock stands as it is',
+    stintStartOf({ state: { stintStartMs: 12345 } }, null) === 12345);
+}
+
+// ---- who gets in next: the plan decides -------------------------------------
+{
+  const dr = defaultCar('A');
+  dr.drivers.forEach((d, i) => { d.doubleStint = false; d.night = true; d.rain = true; d.name = 'D' + (i + 1); });
+  dr.currentDriverId = dr.drivers[0].id;
+  dr.stintHistory = [];
+  const dRace = { startMs: Date.now() - 3600e3, durationH: 24 };
+  const dNow = Date.now();
+  dr.plan = { stints: [{ driverId: dr.drivers[0].id }, { driverId: dr.drivers[2].id }] };
+
+  check('the plan names the driver for the stint after the one running',
+    plannedNextDriver(dr, dRace, dNow)?.name === 'D3');
+  const dCalcs = carCalcs(dr, dRace, dNow);
+  const called = nextDriverCall(dr, dCalcs, dNow, { stintMs: 45 * 60e3, race: dRace });
+  check('the stint plan outranks the balancing heuristic',
+    called.source === 'plan' && called.driver?.name === 'D3' && called.change === true);
+  check('the call says why it picked them', /stint plan/.test(called.why));
+
+  check('a car with no plan has no planned next driver',
+    plannedNextDriver({ ...dr, plan: null }, dRace, dNow) === null);
+  check('a plan that has run out names nobody',
+    plannedNextDriver({ ...dr, plan: { stints: [{ driverId: dr.drivers[0].id }] } }, dRace, dNow) === null);
+  check('a plan naming a driver who is not in the car names nobody',
+    plannedNextDriver({ ...dr, plan: { stints: [{}, { driverId: 'ghost' }] } }, dRace, dNow) === null);
+
+  // The plan keeping the same driver in is a plan decision, not a change.
+  const same = { ...dr, plan: { stints: [{ driverId: dr.drivers[0].id }, { driverId: dr.drivers[0].id }] } };
+  const sameCall = nextDriverCall(same, dCalcs, dNow, { stintMs: 45 * 60e3, race: dRace });
+  check('the plan keeping a driver in is not a driver change',
+    sameCall.source === 'plan' && sameCall.change === false);
+
+  // Without a race there is no plan to consult and the heuristic answers.
+  check('with no race the balancing heuristic answers instead',
+    nextDriverCall(dr, dCalcs, dNow, { stintMs: 45 * 60e3 }).source === 'auto');
+
+  // A driver who cannot legally see the stint out is passed over even by name.
+  const reg = defaultCar('B');
+  reg.drivers.forEach((d, i) => { d.doubleStint = false; d.night = true; d.rain = true; d.name = 'D' + (i + 1); });
+  reg.currentDriverId = reg.drivers[0].id;
+  reg.stintHistory = [];
+  reg.config.regTotalMin = 600;
+  reg.plan = { stints: [{ driverId: reg.drivers[0].id }, { driverId: reg.drivers[1].id }] };
+  const rCalcs = carCalcs(reg, dRace, dNow);
+  if (rCalcs.reg?.enabled && rCalcs.reg.byDriver[reg.drivers[1].id]) {
+    rCalcs.reg.byDriver[reg.drivers[1].id].driveLeftMs = 5 * 60e3; // 5 min left, 45 min stint
+    const overruled = nextDriverCall(reg, rCalcs, dNow, { stintMs: 45 * 60e3, race: dRace });
+    check('a planned driver who cannot finish the stint is overruled',
+      overruled.driver?.id !== reg.drivers[1].id && overruled.source !== 'plan');
+  } else {
+    check('a planned driver who cannot finish the stint is overruled', true);
+  }
+
+  // A double-stint driver stays in for their second, with no plan to say so.
+  const dbl = defaultCar('C');
+  dbl.plan = null;
+  dbl.stintHistory = [];
+  dbl.currentDriverId = dbl.drivers[0].id;
+  dbl.drivers[0].doubleStint = true;
+  const dblCall = nextDriverCall(dbl, carCalcs(dbl, dRace, dNow), dNow, { stintMs: 45 * 60e3 });
+  check('a double-stint driver stays in for the second one',
+    dblCall.change === false && dblCall.driver?.id === dbl.drivers[0].id &&
+    /double stint/.test(dblCall.why));
+}
+
+// ---- taking THIS caution, or waiting for the next --------------------------
+// A Poisson arrival model over a measured caution rate. The maths is only ever
+// as good as the rate typed in, so the guards matter as much as the answer:
+// an unconfigured car must decline to answer rather than invent one.
+{
+  const p = probabilityOfCautionWithin;
+  check('one caution an hour is 63% likely inside the hour',
+    Math.abs(p(1, 3600) - (1 - Math.exp(-1))) < 1e-12);
+  check('the measured Zolder rate over an hour',
+    Math.abs(p(0.639, 3600) - 0.47218) < 1e-4);
+  check('half the window is less than half again as likely', p(1, 1800) < p(1, 3600));
+  check('a longer window is never less likely', p(0.5, 7200) >= p(0.5, 3600));
+  check('probability never leaves [0,1]', p(100, 36000) === 1 && p(5, 3600) > 0.99 && p(5, 3600) < 1);
+  check('no rate, no probability', p(0, 3600) === 0 && p(null, 3600) === 0);
+  check('a negative rate is not a probability', p(-1, 3600) === 0);
+  check('no window, no probability', p(1, 0) === 0 && p(1, -5) === 0);
+
+  const cRace = { startMs: Date.now() - 3600e3, durationH: 24 };
+  const cNow = Date.now();
+  // The decision only exists part-way through a tank and a set of tyres.
+  const worn = (fuel, tyreKm, rate = 0) => {
+    const c = defaultCar('1');
+    c.config.cautionsPerHour = rate;
+    c.state.fuelLiters = fuel;
+    const s = currentTyreSet(c);
+    if (s) { s.km = tyreKm; s.kmGreen = tyreKm; s.kmFcy = 0; }
+    return c;
+  };
+
+  check('green is not a neutralisation and has no call',
+    cautionCall(worn(50, 150), cRace, cNow, 'green') === null &&
+    cautionCall(worn(50, 150), cRace, cNow, null) === null);
+  const noTank = worn(50, 150); noTank.config.tankLiters = 0;
+  const noTrack = worn(50, 150); noTrack.config.trackKm = 0;
+  const noBurn = worn(50, 150); noBurn.config.burnPerLap = { dry: 0, wet: 0, sc: 0, fcy: 0 };
+  check('a car that cannot be modelled declines to answer',
+    cautionCall(noTank, cRace, cNow, 'fcy') === null &&
+    cautionCall(noTrack, cRace, cNow, 'fcy') === null &&
+    cautionCall(noBurn, cRace, cNow, 'fcy') === null);
+
+  const call = cautionCall(worn(50, 150, 0.639), cRace, cNow, 'fcy');
+  check('a configured car gets a call', !!call && call.pace === 'fcy' && call.rate === 0.639);
+  check('all four plans are ranked', call.plans.length === 4 &&
+    call.plans.every(pl => Number.isFinite(pl.gapSec) && pl.gapSec >= 0));
+  check('the gaps are measured from the best plan',
+    Math.min(...call.plans.map(pl => pl.gapSec)) === 0);
+  check('the winner is the plan with no gap', call.winner.gapSec === 0);
+  check('every plan is named for the crew',
+    call.plans.every(pl => typeof pl.label === 'string' && pl.label.length > 0));
+
+  // The whole point of the model: the more often cautions fall, the better
+  // staying out looks, because another one is likely before fuel forces you in.
+  let mono = true, prev = Infinity;
+  for (const rate of [0, 0.25, 0.5, 1, 2, 3, 4, 5]) {
+    const g = cautionCall(worn(50, 150, rate), cRace, cNow, 'fcy')
+      .plans.find(pl => pl.key === 'stay').gapSec;
+    if (g > prev + 1e-6) mono = false;
+    prev = g;
+  }
+  check('a higher caution rate never makes staying out look worse', mono);
+
+  // takeIt and the plan ranking are two readings of the same comparison and
+  // must never contradict each other — a card cannot say TAKE IT above a list
+  // headed "Stay out".
+  let agrees = true;
+  for (const rate of [0, 0.25, 0.639, 2, 5]) {
+    for (const [fuel, km] of [[100, 0], [50, 150], [8, 280]]) {
+      const cc = cautionCall(worn(fuel, km, rate), cRace, cNow, 'fcy');
+      if (!cc) continue;
+      if (cc.takeIt !== (cc.winner.key !== 'stay')) agrees = false;
+    }
+  }
+  check('the call never contradicts its own plan ranking', agrees);
+
+  // A full tank on fresh rubber is the one state where stopping cannot pay.
+  const pointless = cautionCall(worn(100, 0, 0.639), cRace, cNow, 'fcy');
+  check('a full tank on fresh rubber says stay out',
+    pointless.winner.key === 'stay' && pointless.takeIt === false);
+
+  // Nearly dry on dead rubber is the one state where it always does.
+  const obvious = cautionCall(worn(8, 280, 0.639), cRace, cNow, 'fcy');
+  check('nearly dry on dead rubber takes everything at once',
+    obvious.winner.key === 'both' && obvious.takeIt === true);
+
+  // A safety car circulates far closer to green pace than a code 60, so it
+  // discounts a stop much less — the two must not come back the same.
+  const fcy = cautionCall(worn(50, 150, 0.639), cRace, cNow, 'fcy');
+  const sc = cautionCall(worn(50, 150, 0.639), cRace, cNow, 'sc');
+  const stayGap = cc => cc.plans.find(pl => pl.key === 'stay').gapSec;
+  check('a safety car and a code 60 are priced differently',
+    stayGap(fcy) !== stayGap(sc));
+  check('a safety car discounts a stop less, so staying out costs less under it',
+    stayGap(sc) < stayGap(fcy));
+  // Far enough apart that the two flags can give opposite calls on the same
+  // car in the same second — which is why the plans are kept separate.
+  const splitF = cautionCall(worn(70, 90, 0.639), cRace, cNow, 'fcy');
+  const splitS = cautionCall(worn(70, 90, 0.639), cRace, cNow, 'sc');
+  check('the same car can be told to box under a code 60 and stay out under a safety car',
+    splitF.winner.key !== 'stay' && splitS.winner.key === 'stay' &&
+    splitF.takeIt === true && splitS.takeIt === false);
+
+  // Nonsense settings must come back with a finite answer or none, never NaN
+  // and never a hang.
+  const silly = worn(50, 150, -2);
+  silly.config.safetyFuelL = 500;
+  const sillyCall = cautionCall(silly, cRace, cNow, 'fcy');
+  check('a nonsense fuel safety level still answers finitely',
+    !sillyCall || sillyCall.plans.every(pl => Number.isFinite(pl.gapSec)));
+  check('a negative caution rate is read as no rate', !sillyCall || sillyCall.rate === -2);
+}
+
+// ---- port walk -------------------------------------------------------------
+// The pit wall asks for headroom (portTries): a port already held — a second
+// copy of the app — walks to the next free one, and the listening promise
+// resolves with the port actually bound. The suite's own servers keep the
+// default single try, so an orphaned run still fails loudly up top instead of
+// two suites quietly driving the same state.
+{
+  const first = startServer({ dataFile: null, port: 8488, tickMs: 3600e3 });
+  await bound(first, 'port-walk base');
+  const walked = startServer({ dataFile: null, port: 8488, portTries: 3, tickMs: 3600e3 });
+  const p = await walked.listening.then(v => v, () => null);
+  check('a held port walks to the next free one', p === 8489);
+  const stuck = startServer({ dataFile: null, port: 8488, tickMs: 3600e3 });
+  const err = await stuck.listening.then(() => null, e => e);
+  check('without headroom a held port fails loudly', !!err && /in use/.test(err.message));
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);

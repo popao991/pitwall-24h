@@ -71,7 +71,7 @@
   <div class="trkview hidden" id="trkview"></div>
 
   <div class="overlay hidden" id="settings-overlay">
-    <div class="modal">
+    <div class="modal tabbed">
       <div class="modal-head">
         <h2><i data-icon="gear"></i> RACE SETTINGS</h2>
         <button id="btn-settings-close"><i data-icon="x"></i> CLOSE</button>
@@ -124,6 +124,13 @@
             is offline can still be corrected. Make and model are set on each
             car's own station (SETTINGS → CAR), which can also change the number
             and the name — last edit wins.
+            <b>SAVE FILE</b> writes that car's whole setup out as a car file, and
+            <b>LOAD FILE</b> reads one back onto it — fuel model, pace, wear limits, the
+            driver table and the tyre/brake racks in one action, applied here so every screen
+            lands on it at the same moment. Event settings are never part of a car file, and
+            nothing the race has written (laps, mileage, seat time, the sets that have run) is
+            touched. It is how three cars get set up from one seat on the Thursday, and how a
+            car whose station was swapped mid-race is put back exactly as it was.
           </p>
           <h3>Event settings — shared by all cars</h3>
           <div class="form-grid">

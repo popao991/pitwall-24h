@@ -25,6 +25,16 @@ export const BRAKE_COMPONENTS = [
   { id: 'discsRear', label: 'DISCS REAR', short: 'DISCS R', prefix: 'DR' }
 ];
 
+// An axle is what the crew actually works on. Pads are bedded onto a disc:
+// once they have run together they are a KIT, and a kit is what gets mounted,
+// run and called for — which is why the plan asks for "FRONT KIT F2", not for
+// four loose part groups. The four component pools above are still the parts
+// (each has its own hours and its own life), the axle is how they are read.
+export const BRAKE_AXLES = [
+  { id: 'front', label: 'FRONT', short: 'F', discs: 'discsFront', pads: 'padsFront', prefix: 'F' },
+  { id: 'rear', label: 'REAR', short: 'R', discs: 'discsRear', pads: 'padsRear', prefix: 'R' }
+];
+
 export const DRIVER_COLORS = ['#4cc2ff', '#ffb454', '#7ee787', '#ff7eb6'];
 
 // Live timing flag enum (getraceresults heat field `f`; other providers are
@@ -135,13 +145,16 @@ export const EVENT_FIELDS = [
   'reg6hMin', 'regTotalMin', 'regRestMin'
 ];
 
+// The defaults are Zolder off its official track map — the circuit this app
+// was built for — so a fresh race is already measuring the right lap. Every
+// figure here is editable on the pit wall for any other track.
 export function defaultEvent() {
   return {
-    trackKm: 4.0,
-    fcySpeedKmh: 80,
+    trackKm: 4.007,
+    fcySpeedKmh: 60,
     scSpeedKmh: 0, // Safety-Car train speed; 0 = derive from the car's SC lap time
     pitSpeedKmh: 60,
-    pitLaneKm: 0.4,
+    pitLaneKm: 0.411, // pit IN to pit OUT, official track map
     pitLossSec: 55,
     // Measured time to drive the pit lane without stopping. Timed at the track
     // it beats the figure derived from lane length and speed limit, and it is
@@ -168,11 +181,14 @@ export function defaultEvent() {
     // Track geometry for the pit-arrival estimate, measured from the S/F line
     // (km). Sector ends place a car by its last completed sector; the pit
     // entry point is where the E.T.A. counts to. 0 = not set (feed geometry
-    // or the S/F line is used instead).
-    s1EndKm: 0,
-    s2EndKm: 0,
+    // or the S/F line is used instead). These are Zolder's own intermediates
+    // off the official track map — Int 1 at 1376,4 m, Int 2 at 2864,6 m, with
+    // the start line at offset 0 m. Sector 3 ends at the line itself, which is
+    // what 0 means here.
+    s1EndKm: 1.3764,
+    s2EndKm: 2.8646,
     s3EndKm: 0,
-    pitInKm: 0,
+    pitInKm: 0, // not on the official sheet — the E.T.A. counts to the S/F line
     // Driver drive-time regulations (series rulebook). 0 = rule not enforced.
     reg6hMin: 0, // max minutes behind the wheel in any rolling 6 h window
     regTotalMin: 0, // max minutes behind the wheel over the whole race
@@ -326,17 +342,127 @@ export function emptyStop() {
 // safety car. `scrapped` takes a set out of the pool for good (until restored):
 // neither the picker nor the app's own choice may fit it again.
 
-export function defaultTyreSets(count = 12) {
-  return Array.from({ length: Math.max(1, count) }, (_, i) => ({
-    id: 't' + (i + 1),
-    name: 'S' + (i + 1),
+export function newTyreSet(id, name, compound = 'slick') {
+  return {
+    id,
+    name,
+    // 'slick' or 'wet'. Two different stocks that happen to share a rack: the
+    // rationing sums must never count a wet set toward dry running, and a wet
+    // switch must never find the wets already spent on a dry whim.
+    compound,
     laps: 0,
     km: 0,
     kmFcy: 0,
     used: false,
     scrapped: false,
     scrapReason: null
-  }));
+  };
+}
+
+/** Sets saved before compounds existed are slicks — that is what they were. */
+export function tyreCompoundOf(set) {
+  return set?.compound === 'wet' ? 'wet' : 'slick';
+}
+
+export function defaultTyreSets(count = 12) {
+  return Array.from({ length: Math.max(1, count) },
+    (_, i) => newTyreSet('t' + (i + 1), 'S' + (i + 1)));
+}
+
+// --- generating a batch of sets ---------------------------------------------
+// A team arrives with an allocation, not with twelve sets called S1..S12: the
+// rubber comes off the truck already marked ("S1_GVP", "24H-01", "R07"), and
+// typing that in one row at a time at 23:00 is how a set ends up mislabelled.
+// So sets are generated the way the allocation is written down — a naming
+// pattern, a starting number and a count.
+//
+// [#] in the pattern is where the number goes; more hashes pad it with zeros
+// ([###] -> 001), which is what the sticker says when the numbers come from a
+// championship. A pattern with no [#] at all gets the number appended, so a
+// crew that just types "GVP" still gets GVP1, GVP2... rather than a dozen sets
+// with the same name.
+
+export const TYRE_SET_PATTERN = 'S[#]';
+export const SET_GEN_MAX = 50;
+export const TYRE_SET_GEN_MAX = SET_GEN_MAX; // kept: the tyre form's own name
+
+// The names a pattern writes. `subst` fills the tokens that are not the
+// number — the brake rack uses [P] for the component's own prefix — and is
+// applied first, so a substituted value can never eat the [#] that follows.
+export function expandSetNames(pattern, fallback, start = 1, count = 1, subst = {}) {
+  const n = Math.max(0, Math.min(SET_GEN_MAX, Math.round(+count || 0)));
+  const from = Math.max(0, Math.round(+start || 0));
+  let raw = String(pattern ?? '').trim() || fallback;
+  for (const [token, value] of Object.entries(subst)) {
+    raw = raw.split('[' + token + ']').join(value);
+  }
+  const numbered = /\[#+\]/.test(raw);
+  const names = [];
+  for (let i = 0; i < n; i++) {
+    const nr = String(from + i);
+    names.push(numbered
+      ? raw.replace(/\[(#+)\]/g, (_, hashes) => nr.padStart(hashes.length, '0'))
+      : raw + nr);
+  }
+  return names;
+}
+
+export function tyreSetNames(pattern = TYRE_SET_PATTERN, start = 1, count = 1) {
+  return expandSetNames(pattern, TYRE_SET_PATTERN, start, count);
+}
+
+// Where a batch should start numbering: one past the highest number already in
+// these names, so a generation continues the series on the rack instead of
+// colliding with it. The last run of digits in a name is its number, which is
+// what reads a suffixed label right — "S12_GVP" is set 12.
+export function nextSetNumber(names) {
+  const nums = (names || [])
+    .map(n => String(n ?? '').match(/(\d+)(?!.*\d)/))
+    .filter(Boolean)
+    .map(m => parseInt(m[1], 10))
+    .filter(n => !isNaN(n));
+  return (nums.length ? Math.max(...nums) : 0) + 1;
+}
+
+// The list a generation would leave behind, without touching the car: the sets
+// that survive, then the new ones. `replaceUnused` sweeps out the sets nobody
+// has run — the default S1..S12 the app seeds a car with, typically — while
+// the set on the car, every used set and every scrapped one stay put: their
+// mileage and their history are race data, not placeholders.
+//
+// New ids continue past the highest one ever handed out in this list, so a
+// generated set can never inherit the id of a set that was just swept away
+// (a stop still pointing at the old id would otherwise fit the wrong rubber).
+// `duplicates` reports names that already exist among the survivors — the
+// caller decides what to do about them; nothing here refuses.
+
+export function generateTyreSets(car, opts = {}) {
+  const {
+    pattern = TYRE_SET_PATTERN, start = 1, count = 1, replaceUnused = false
+  } = opts;
+  return setTyreSetNames(car, tyreSetNames(pattern, start, count), { replaceUnused });
+}
+
+// The same list built from names given outright rather than from a pattern —
+// what a car file carries, where the allocation was written down once and is
+// being read back rather than described again. `skipExisting` is the
+// difference between the two callers: a crew generating a batch wants a name
+// clash reported and nothing dropped, while a file describing the rack means
+// the same physical set — adding a second "S1" next to the one that has
+// already run 180 km would be a second set that does not exist.
+export function setTyreSetNames(car, names, { replaceUnused = false, skipExisting = false } = {}) {
+  const existing = (car.tyreSets || []).map(t => ({ ...t }));
+  const curId = car.state?.currentTyreSetId;
+  const keep = replaceUnused
+    ? existing.filter(t => t.used || t.scrapped || t.id === curId)
+    : existing;
+  const kept = new Set(keep.map(t => t.name));
+  const duplicates = names.filter(n => kept.has(n));
+  const add = skipExisting ? names.filter(n => !kept.has(n)) : names;
+  let nextNr = existing.reduce(
+    (mx, t) => Math.max(mx, parseInt(String(t.id).replace(/^t/, ''), 10) || 0), 0) + 1;
+  const sets = keep.concat(add.map(name => newTyreSet('t' + nextNr++, name)));
+  return { sets, names, duplicates, removed: existing.length - keep.length };
 }
 
 // Mileage of one set, split by how it was driven. Green km = total − yellow.
@@ -368,6 +494,98 @@ export function currentTyreSet(car) {
   return (car.tyreSets || []).find(t => t.id === car.state.currentTyreSetId) || null;
 }
 
+/**
+ * Whether there is enough rubber in the garage to reach the flag.
+ *
+ * <p>Every other tyre figure in here is about the set on the car. This one is
+ * about the stock: a 24 h race on a fixed allocation is a rationing problem,
+ * and once the sums are tight a set binned with 200 km still in it is distance
+ * the car cannot buy back. Nothing else in the app notices that, which is why a
+ * stop under a caution can look free while quietly spending the allocation.
+ *
+ * <p>`deficitKm` is the distance that has no rubber behind it. While it is zero
+ * the crew can fit tyres whenever it is quick to; once it is positive, life
+ * thrown away has to be paid for somewhere.
+ */
+export function tyreBudget(car, race, now, calcs = carCalcs(car, race, now)) {
+  const lifeKm = +car.config?.tyreLifeKm || 0;
+  const trackKm = +car.config?.trackKm || 0;
+  const lapMs = calcs?.lapMs || 0;
+  if (!(lifeKm > 0) || !(trackKm > 0) || !(lapMs > 0)) return null;
+
+  const remainingMs = Math.max(0, calcs.clock?.remainingMs || 0);
+  const kmToRun = (remainingMs / lapMs) * trackKm;
+
+  const fitted = currentTyreSet(car);
+  const allUsable = usableTyreSets(car);
+  // The ledger is per compound: the distance to the flag is run on whatever the
+  // track demands right now, and only sets of that compound can cover it. The
+  // other compound is insurance, not stock — it is counted, never budgeted.
+  const activeCompound = car.condition === 'wet' ? 'wet' : 'slick';
+  const sets = allUsable.filter(t => tyreCompoundOf(t) === activeCompound);
+  const setsFreshOther = allUsable.filter(t =>
+    tyreCompoundOf(t) !== activeCompound && !t.used && (!fitted || t.id !== fitted.id)).length;
+  // The set on the car contributes only what is left in it; every other usable
+  // set contributes whatever it has not already run.
+  let kmAvailable = 0;
+  let setsSpare = 0;
+  for (const s of sets) {
+    const left = Math.max(0, lifeKm - tyreSetMileage(s).km);
+    kmAvailable += left;
+    if (!fitted || s.id !== fitted.id) setsSpare++;
+  }
+
+  const deficitKm = Math.max(0, kmToRun - kmAvailable);
+  // The fitted set only helps the ledger if it is the compound the track wants —
+  // a slick on a car that needs wets covers none of the wet distance.
+  const fittedCounts = fitted && tyreCompoundOf(fitted) === activeCompound;
+  const fittedKmLeft = fittedCounts ? Math.max(0, lifeKm - tyreSetMileage(fitted).km) : 0;
+
+  // The fresh-set ledger — the figure the crew actually rations by. kmAvailable
+  // above counts part-worn sets on the shelf as still worth their remaining
+  // life, which is true in principle; in practice a heat-cycled set is spent,
+  // so what decides whether the team makes the flag is how many NEVER-USED
+  // sets are left against how many the distance still needs.
+  const setsFresh = sets.filter(t => !t.used && (!fitted || t.id !== fitted.id)).length;
+  // Run the fitted set to the end of its life, then each fresh set to the end
+  // of its own: the fewest fresh sets that still cover the distance.
+  const setsNeededMin = Math.ceil(Math.max(0, kmToRun - fittedKmLeft) / lifeKm);
+  // The same distance if a fresh set goes on right now instead — the extra it
+  // costs is what an early change really spends.
+  const setsNeededIfChangeNow = kmToRun > 0 ? 1 + Math.ceil(Math.max(0, kmToRun - lifeKm) / lifeKm) : 0;
+  const setsMargin = setsFresh - setsNeededMin;
+  const marginAfterChange = setsFresh - setsNeededIfChangeNow;
+
+  return {
+    kmToRun: +kmToRun.toFixed(1),
+    kmAvailable: +kmAvailable.toFixed(1),
+    deficitKm: +deficitKm.toFixed(1),
+    setsSpare,
+    setsUsable: sets.length,
+    lifeKm,
+    // Life left in the set currently fitted — what a tyre change right now bins.
+    fittedKmLeft,
+    short: deficitKm > 0,
+    activeCompound,
+    setsFresh,
+    // Fresh sets of the OTHER compound — insurance, shown but never budgeted.
+    setsFreshOther,
+    setsNeededMin,
+    setsNeededIfChangeNow,
+    setsMargin,
+    marginAfterChange,
+    // Two different questions, two thresholds. affordEarlyChange is the
+    // PROPOSAL policy: the app only suggests spending a set when at least one
+    // fresh set stays in hand at the flag, so a puncture or a wet switch late
+    // in the race does not find the shelf empty. changeForcesShort is the
+    // PRICING fact: binning this life only costs an extra stop when it actually
+    // pushes the ledger negative — a change the rounding absorbs forces
+    // nothing, and penalising it would distort every comparison built on top.
+    affordEarlyChange: marginAfterChange >= 1,
+    changeForcesShort: marginAfterChange < 0 || deficitKm > 0
+  };
+}
+
 // The set a stop with tyres would fit: the explicitly chosen one, else the
 // first never-used set that is not already on the car. Scrapped sets are out
 // of the pool — the app must never propose rubber the crew has binned.
@@ -375,7 +593,12 @@ export function stopTyreSet(car, stop = car.nextStop) {
   const sets = car.tyreSets || [];
   const chosen = sets.find(t => t.id === stop?.tyreSetId);
   if (chosen && !chosen.scrapped) return chosen;
-  return sets.find(t => !t.used && !t.scrapped && t.id !== car.state.currentTyreSetId) || null;
+  // The compound follows the track: a wet car gets wets. Only when the rack has
+  // none of the right compound does it fall back to whatever fresh set exists —
+  // wrong rubber beats no rubber, and the engineer sees the set it names.
+  const want = car.condition === 'wet' ? 'wet' : 'slick';
+  const fresh = sets.filter(t => !t.used && !t.scrapped && t.id !== car.state.currentTyreSetId);
+  return fresh.find(t => tyreCompoundOf(t) === want) || fresh[0] || null;
 }
 
 // Sets that may still be fitted: everything but the scrapped ones (the set on
@@ -399,6 +622,7 @@ export function reconcileTyreSets(car) {
     t.laps = Math.max(0, +t.laps || 0);
     t.km = Math.max(0, +t.km || 0);
     t.kmFcy = Math.min(t.km, Math.max(0, +t.kmFcy || 0));
+    t.compound = t.compound === 'wet' ? 'wet' : 'slick';
     t.used = !!t.used || t.laps > 0 || t.km > 0;
     t.scrapped = !!t.scrapped;
     t.scrapReason = t.scrapped ? (t.scrapReason || null) : null;
@@ -407,7 +631,7 @@ export function reconcileTyreSets(car) {
   let nextNr = sets.length + 1;
   while (sets.length < want) {
     while (sets.some(t => t.id === 't' + nextNr)) nextNr++;
-    sets.push({ id: 't' + nextNr, name: 'S' + nextNr, laps: 0, km: 0, kmFcy: 0, used: false, scrapped: false, scrapReason: null });
+    sets.push(newTyreSet('t' + nextNr, 'S' + nextNr));
   }
   for (let i = sets.length - 1; i >= 0 && sets.length > want; i--) {
     if (!sets[i].used && sets[i].id !== car.state.currentTyreSetId) sets.splice(i, 1);
@@ -423,6 +647,98 @@ export function reconcileTyreSets(car) {
   car.config.tyreSets = sets.length;
   car.state.tyreSetsUsed = sets.filter(t => t.used).length;
   return car.tyreSets;
+}
+
+// ---------------------------------------------------------------------------
+// Tyre warmers
+// ---------------------------------------------------------------------------
+// The rack says what rubber the team owns; the warmers say what is ready to go
+// on the car right now. A warmer is a numbered box that holds at most one set
+// out of that same rack, so the question the crew actually asks at 03:00 —
+// "is the set we are calling for hot?" — has an answer on the screen.
+//
+// The invariants are what keep it honest, and they are all enforced in
+// reconcileTyreWarmers rather than at every call site:
+//   * a warmer holds a set that is really on the rack, or nothing;
+//   * the same set is never in two warmers (there is only one of it);
+//   * the set on the car is in no warmer (it is on the car);
+//   * a scrapped set is in no warmer (it is in the bin).
+
+export const TYRE_WARMER_MAX = 12;
+export const TYRE_WARMER_DEFAULT = 0; // a team without warmers sees nothing to manage
+
+export function newTyreWarmer(id, name) {
+  return { id, name, setId: null };
+}
+
+// The list a count would leave behind. Growing appends numbered boxes; shrinking
+// takes empty ones off the end first, so reducing the count never tips a set out
+// of a warmer while an empty box next to it survives.
+export function reconcileTyreWarmers(car) {
+  if (!Array.isArray(car.tyreWarmers)) car.tyreWarmers = [];
+  const warmers = car.tyreWarmers;
+  // No count configured at all (an older saved state) leaves the list as it is.
+  const raw = car.config?.tyreWarmers;
+  const want = raw == null || raw === '' || !Number.isFinite(+raw)
+    ? warmers.length
+    : Math.max(0, Math.min(TYRE_WARMER_MAX, Math.round(+raw)));
+  let nextNr = warmers.length + 1;
+  while (warmers.length < want) {
+    while (warmers.some(w => w.id === 'w' + nextNr)) nextNr++;
+    warmers.push(newTyreWarmer('w' + nextNr, 'W' + nextNr));
+  }
+  while (warmers.length > want) {
+    const empty = warmers.map((w, i) => [w, i]).reverse().find(([w]) => !w.setId);
+    warmers.splice(empty ? empty[1] : warmers.length - 1, 1);
+  }
+  const sets = car.tyreSets || [];
+  const onCar = car.state?.currentTyreSetId;
+  const seen = new Set();
+  for (const w of warmers) {
+    w.name = String(w.name ?? '').trim() || String(w.id).toUpperCase();
+    const set = sets.find(t => t.id === w.setId);
+    if (!set || set.scrapped || set.id === onCar || seen.has(set.id)) w.setId = null;
+    else seen.add(set.id);
+  }
+  if (car.config) car.config.tyreWarmers = warmers.length;
+  return warmers;
+}
+
+// The warmer a set is sitting in, or null — what the picker and the stop card
+// read to say whether the rubber being called for is hot.
+export function warmerOfSet(car, setId) {
+  if (!setId) return null;
+  return (car.tyreWarmers || []).find(w => w.setId === setId) || null;
+}
+
+// Sets that may go into a warmer: on the rack, not binned, not on the car and
+// not already in another box. `keepId` is the set this warmer holds now, which
+// stays in its own list so the picker can show what it is looking at.
+export function warmableTyreSets(car, keepId = null) {
+  const taken = new Set((car.tyreWarmers || []).map(w => w.setId).filter(Boolean));
+  return (car.tyreSets || []).filter(t =>
+    !t.scrapped &&
+    t.id !== car.state?.currentTyreSetId &&
+    (t.id === keepId || !taken.has(t.id)));
+}
+
+// Put a set in a warmer, or empty it (setId = null). Returns whether anything
+// moved. A set already in another box is moved rather than duplicated — the
+// crew carried it across, they did not conjure a second one.
+export function loadTyreWarmer(car, warmerId, setId) {
+  reconcileTyreWarmers(car);
+  const warmer = (car.tyreWarmers || []).find(w => w.id === warmerId);
+  if (!warmer) return false;
+  if (!setId) {
+    if (!warmer.setId) return false;
+    warmer.setId = null;
+    return true;
+  }
+  const set = (car.tyreSets || []).find(t => t.id === setId);
+  if (!set || set.scrapped || set.id === car.state?.currentTyreSetId) return false;
+  for (const w of car.tyreWarmers) if (w.setId === set.id) w.setId = null;
+  warmer.setId = set.id;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -445,16 +761,74 @@ export function brakeComponent(comp) {
   return BRAKE_COMPONENTS.find(b => b.id === comp) || null;
 }
 
+// A disc set is the anchor a kit is named for: it is the part the pads are
+// bedded onto, so the link lives on it (`padSetId`) and so does the kit's
+// name. A pad set is linked from exactly one disc set, or from none.
+export function isDiscComponent(comp) {
+  return comp === 'discsFront' || comp === 'discsRear';
+}
+
+export function newBrakeSet(id, name, comp = null) {
+  const set = { id, name, hours: 0, used: false, scrapped: false, scrapReason: null };
+  if (isDiscComponent(comp)) { set.padSetId = null; set.kitName = null; }
+  return set;
+}
+
 export function defaultBrakeSets(comp, count = DEFAULT_BRAKE_SET_COUNT[comp] || 4) {
   const pre = brakeComponent(comp)?.prefix || 'B';
-  return Array.from({ length: Math.max(1, count) }, (_, i) => ({
-    id: pre.toLowerCase() + (i + 1),
-    name: pre + (i + 1),
-    hours: 0,
-    used: false,
-    scrapped: false,
-    scrapReason: null
-  }));
+  return Array.from({ length: Math.max(1, count) },
+    (_, i) => newBrakeSet(pre.toLowerCase() + (i + 1), pre + (i + 1), comp));
+}
+
+// --- generating a rack ------------------------------------------------------
+// The same idea as the tyre sets, with one token more: [P] is the component's
+// own prefix — PF, PR, DF, DR — so a single pattern writes every pool the crew
+// asks for and each one comes out named for what it is ([P][#] -> PF1, DR3),
+// while [#]/[###] number and pad exactly as they do for tyres.
+
+export const BRAKE_SET_PATTERN = '[P][#]';
+
+export function brakeSetNames(comp, pattern = BRAKE_SET_PATTERN, start = 1, count = 1) {
+  const pre = brakeComponent(comp)?.prefix || 'B';
+  return expandSetNames(pattern, BRAKE_SET_PATTERN, start, count, { P: pre });
+}
+
+// What a generation would leave in each requested pool, without touching the
+// car: one entry per component, shaped like generateTyreSets' result. The set
+// on the car, every used set and every scrapped one survive `replaceUnused` —
+// hours banked on a part are race data, not a placeholder.
+
+export function generateBrakeSets(car, opts = {}) {
+  const {
+    comps = BRAKE_COMPONENTS.map(b => b.id),
+    pattern = BRAKE_SET_PATTERN, start = 1, count = 1, replaceUnused = false
+  } = opts;
+  const out = {};
+  for (const comp of comps) {
+    out[comp] = setBrakeSetNames(car, comp, brakeSetNames(comp, pattern, start, count),
+      { replaceUnused });
+  }
+  return out;
+}
+
+// One pool built from names given outright — the brake half of what a car
+// file reads back (see setTyreSetNames).
+export function setBrakeSetNames(car, comp, names, { replaceUnused = false, skipExisting = false } = {}) {
+  const existing = brakeSetsOf(car, comp).map(t => ({ ...t }));
+  const curId = car.state?.currentBrakeSetId?.[comp];
+  const keep = replaceUnused
+    ? existing.filter(t => t.used || t.scrapped || t.id === curId)
+    : existing;
+  const kept = new Set(keep.map(t => t.name));
+  const duplicates = names.filter(n => kept.has(n));
+  const add = skipExisting ? names.filter(n => !kept.has(n)) : names;
+  const pre = (brakeComponent(comp)?.prefix || 'B').toLowerCase();
+  let nextNr = existing.reduce(
+    (mx, t) => Math.max(mx, parseInt(String(t.id).replace(/^\D+/, ''), 10) || 0), 0) + 1;
+  return {
+    sets: keep.concat(add.map(name => newBrakeSet(pre + nextNr++, name, comp))),
+    names, duplicates, removed: existing.length - keep.length
+  };
 }
 
 // A full rack: every component's pool, with the set that is on the car at the
@@ -464,6 +838,18 @@ export function defaultAllBrakeSets(counts = DEFAULT_BRAKE_SET_COUNT) {
   for (const b of BRAKE_COMPONENTS) {
     out[b.id] = defaultBrakeSets(b.id, counts?.[b.id] ?? DEFAULT_BRAKE_SET_COUNT[b.id]);
     out[b.id][0].used = true;
+  }
+  // A fresh rack arrives kitted straight down the line — DF1 carries PF1 as
+  // kit F1, DF2 carries PF2 as F2 — because that is how a crew lays parts out
+  // for a race. Spare pads with no disc left to bed onto stay free.
+  for (const a of BRAKE_AXLES) {
+    const discs = out[a.discs] || [];
+    const pads = out[a.pads] || [];
+    discs.forEach((d, i) => {
+      if (!pads[i]) return;
+      d.padSetId = pads[i].id;
+      d.kitName = a.prefix + (i + 1);
+    });
   }
   return out;
 }
@@ -527,10 +913,7 @@ export function reconcileBrakeSets(car) {
     const pre = b.prefix;
     while (sets.length < want) {
       while (sets.some(t => t.id === pre.toLowerCase() + nextNr)) nextNr++;
-      sets.push({
-        id: pre.toLowerCase() + nextNr, name: pre + nextNr,
-        hours: 0, used: false, scrapped: false, scrapReason: null
-      });
+      sets.push(newBrakeSet(pre.toLowerCase() + nextNr, pre + nextNr, b.id));
     }
     for (let i = sets.length - 1; i >= 0 && sets.length > want; i--) {
       if (!sets[i].used && sets[i].id !== car.state.currentBrakeSetId[b.id]) sets.splice(i, 1);
@@ -545,7 +928,315 @@ export function reconcileBrakeSets(car) {
     }
     car.config.brakeSets[b.id] = sets.length;
   }
+  reconcileBrakeKits(car);
   return car.brakeSets;
+}
+
+// ---------------------------------------------------------------------------
+// Brake kits — a pad set bedded onto a disc set
+// ---------------------------------------------------------------------------
+// The crew does not fit "front pads" and "front discs"; it fits a kit. The
+// link is one-to-one and lives on the disc set, so every reader can go from
+// the number on the disc to the number on the pads that belong to it, and the
+// stop card can say FRONT KIT F2 with DF2 + PF3 underneath as the parts to
+// pull off the rack. Pads that are not bedded onto anything are free — they
+// are what you link to a bare disc, and what a pads-only stop takes.
+
+// Which axle a component pool belongs to.
+export function axleOfComponent(comp) {
+  return BRAKE_AXLES.find(a => a.discs === comp || a.pads === comp) || null;
+}
+
+export function brakeAxle(axleId) {
+  return BRAKE_AXLES.find(a => a.id === axleId) || null;
+}
+
+// The kit a disc set anchors, or null when nothing is bedded onto it. Every
+// reader gets both parts, the name, and whether this is the kit on the car —
+// nobody should have to join three lists to render one row.
+export function kitOfDiscSet(car, axleId, discSetId) {
+  const a = brakeAxle(axleId);
+  if (!a) return null;
+  const disc = brakeSetsOf(car, a.discs).find(t => t.id === discSetId);
+  if (!disc || !disc.padSetId) return null;
+  const pad = brakeSetsOf(car, a.pads).find(t => t.id === disc.padSetId);
+  if (!pad) return null;
+  const cur = car?.state?.currentBrakeSetId || {};
+  return {
+    axle: a.id,
+    name: disc.kitName || kitNameFor(car, a.id, disc),
+    disc,
+    pad,
+    onCar: cur[a.discs] === disc.id && cur[a.pads] === pad.id,
+    scrapped: !!disc.scrapped || !!pad.scrapped,
+    used: !!disc.used || !!pad.used
+  };
+}
+
+// Every kit on an axle, in rack order.
+export function brakeKitsOf(car, axleId) {
+  const a = brakeAxle(axleId);
+  if (!a) return [];
+  return brakeSetsOf(car, a.discs)
+    .map(d => kitOfDiscSet(car, a.id, d.id))
+    .filter(Boolean);
+}
+
+// The disc set a pad set is bedded onto, if any.
+export function discSetOfPadSet(car, axleId, padSetId) {
+  const a = brakeAxle(axleId);
+  if (!a || !padSetId) return null;
+  return brakeSetsOf(car, a.discs).find(t => t.padSetId === padSetId) || null;
+}
+
+// Pads with no disc under them: what the rack offers for linking, and what a
+// pads-only stop fits onto the discs already on the car.
+export function freePadSets(car, axleId, { includeScrapped = false } = {}) {
+  const a = brakeAxle(axleId);
+  if (!a) return [];
+  const taken = new Set(brakeSetsOf(car, a.discs).map(t => t.padSetId).filter(Boolean));
+  return brakeSetsOf(car, a.pads)
+    .filter(t => !taken.has(t.id) && (includeScrapped || !t.scrapped));
+}
+
+// The kit currently on the car — the disc set fitted, with whatever is bedded
+// onto it. Null while the pads on the car are not linked to those discs (a
+// state the app only ever passes through mid-stop, since applying a stop
+// re-marries what ends up on the car).
+export function currentBrakeKit(car, axleId) {
+  const a = brakeAxle(axleId);
+  if (!a) return null;
+  return kitOfDiscSet(car, a.id, car?.state?.currentBrakeSetId?.[a.discs]);
+}
+
+// The name a kit would carry: what it already has, else the next free number
+// in the axle's series (F1, F2 … / R1, R2 …).
+export function kitNameFor(car, axleId, disc = null) {
+  if (disc?.kitName) return disc.kitName;
+  const a = brakeAxle(axleId);
+  if (!a) return '';
+  const used = new Set(brakeSetsOf(car, a.discs).map(t => t.kitName).filter(Boolean));
+  for (let n = 1; n <= 99; n++) {
+    if (!used.has(a.prefix + n)) return a.prefix + n;
+  }
+  return a.prefix + '?';
+}
+
+// Bed a pad set onto a disc set. The link is one-to-one both ways, so the pads
+// leave whatever disc they were on and the disc drops whatever it was carrying
+// — two kits can never claim the same part. padSetId null just unlinks.
+export function linkBrakeKit(car, axleId, discSetId, padSetId, name = null) {
+  const a = brakeAxle(axleId);
+  if (!a) return null;
+  const discs = brakeSetsOf(car, a.discs);
+  const disc = discs.find(t => t.id === discSetId);
+  if (!disc) return null;
+  if (!padSetId) {
+    disc.padSetId = null;
+    disc.kitName = null;
+    return null;
+  }
+  const pad = brakeSetsOf(car, a.pads).find(t => t.id === padSetId);
+  if (!pad) return null;
+  for (const d of discs) {
+    if (d !== disc && d.padSetId === pad.id) { d.padSetId = null; d.kitName = null; }
+  }
+  disc.padSetId = pad.id;
+  disc.kitName = String(name || disc.kitName || kitNameFor(car, a.id)).slice(0, 12);
+  return kitOfDiscSet(car, a.id, disc.id);
+}
+
+export function unlinkBrakeKit(car, axleId, discSetId) {
+  const a = brakeAxle(axleId);
+  if (!a) return null;
+  // The kit on the car cannot be taken apart on paper while those two parts are
+  // running together. The station hides the UNBED button on that row and the
+  // server refuses the message, but the rule is a property of the rack, so it
+  // holds here too — no other caller can leave the rack denying a marriage the
+  // car is still driving on.
+  const cur = car?.state?.currentBrakeSetId || {};
+  const disc = brakeSetsOf(car, a.discs).find(t => t.id === discSetId);
+  if (disc && cur[a.discs] === disc.id && cur[a.pads] === disc.padSetId) {
+    return kitOfDiscSet(car, a.id, disc.id);
+  }
+  return linkBrakeKit(car, axleId, discSetId, null);
+}
+
+// What is on the car IS a kit, by definition — the pads fitted have run on the
+// discs fitted. Called after every stop so the rack never claims a marriage
+// the car has already broken.
+export function syncBrakeKitToCar(car, axleId) {
+  const a = brakeAxle(axleId);
+  if (!a) return null;
+  const cur = car?.state?.currentBrakeSetId || {};
+  const discId = cur[a.discs];
+  const padId = cur[a.pads];
+  if (!discId || !padId) return null;
+  const disc = brakeSetsOf(car, a.discs).find(t => t.id === discId);
+  if (!disc || disc.padSetId === padId) return kitOfDiscSet(car, a.id, discId);
+  // The pads carry their old kit name onto the discs they now live on only
+  // when the discs have none of their own — a disc set keeps its identity.
+  const oldName = discSetOfPadSet(car, a.id, padId)?.kitName || null;
+  return linkBrakeKit(car, a.id, discId, padId, disc.kitName || oldName);
+}
+
+// Keep every link honest: a link only survives while both parts are still in
+// the rack, no pad set is claimed twice, and a scrapped part is bedded onto
+// nothing. A rack written before kits existed is married up here — the parts
+// on the car first (they have run together, so they are a kit), then straight
+// down the line for the spares.
+export function reconcileBrakeKits(car) {
+  const cur = car?.state?.currentBrakeSetId || {};
+  for (const a of BRAKE_AXLES) {
+    const discs = brakeSetsOf(car, a.discs);
+    const pads = brakeSetsOf(car, a.pads);
+    const padIds = new Set(pads.map(t => t.id));
+    const claimed = new Set();
+    let virgin = true; // nothing in this axle has ever been linked
+    for (const d of discs) {
+      if (d.padSetId != null || d.kitName != null) virgin = false;
+      if (!('padSetId' in d)) d.padSetId = null;
+      if (!('kitName' in d)) d.kitName = null;
+      const pad = pads.find(t => t.id === d.padSetId);
+      // A link to a part that is gone, scrapped or already spoken for is not
+      // a kit — it is a leftover, and it goes.
+      if (!d.padSetId || !padIds.has(d.padSetId) || claimed.has(d.padSetId) ||
+          d.scrapped || pad?.scrapped) {
+        d.padSetId = null;
+        d.kitName = null;
+        continue;
+      }
+      claimed.add(d.padSetId);
+      d.kitName = String(d.kitName || '').trim().slice(0, 12) || kitNameFor(car, a.id);
+    }
+    if (!virgin) continue;
+    const onDisc = discs.find(t => t.id === cur[a.discs]);
+    const onPad = pads.find(t => t.id === cur[a.pads]);
+    if (onDisc && onPad && !onDisc.scrapped && !onPad.scrapped) {
+      onDisc.padSetId = onPad.id;
+      onDisc.kitName = a.prefix + '1';
+      claimed.add(onPad.id);
+    }
+    let n = onDisc?.padSetId ? 2 : 1;
+    const free = pads.filter(t => !claimed.has(t.id) && !t.scrapped);
+    for (const d of discs) {
+      if (d.padSetId || d.scrapped) continue;
+      const pad = free.shift();
+      if (!pad) break;
+      d.padSetId = pad.id;
+      d.kitName = a.prefix + n++;
+    }
+  }
+  return car?.brakeSets;
+}
+
+// The kit a stop changing a whole axle would fit. The engineer's pick wins;
+// otherwise the app takes the first kit that is complete, never used and not
+// on the car. With no made-up kit left it pairs the next free disc with the
+// next free pad and says so (`formed`) — the crew grabbing both off the rack
+// is a kit being made, and refusing to plan a stop over bookkeeping would be
+// the wrong call at three in the morning.
+export function stopBrakeKit(car, axleId, stop = car?.nextStop) {
+  const a = brakeAxle(axleId);
+  if (!a) return null;
+  const cur = car?.state?.currentBrakeSetId || {};
+  const pickedDiscId = stop?.brakeSetIds?.[a.discs] || null;
+  if (pickedDiscId) {
+    const kit = kitOfDiscSet(car, a.id, pickedDiscId);
+    if (kit && !kit.scrapped) return { ...kit, formed: false };
+    const disc = brakeSetsOf(car, a.discs).find(t => t.id === pickedDiscId && !t.scrapped);
+    if (disc) {
+      const pad = brakeSetsOf(car, a.pads).find(t => t.id === stop?.brakeSetIds?.[a.pads] && !t.scrapped) ||
+        freePadSets(car, a.id).find(t => !t.used && t.id !== cur[a.pads]) ||
+        freePadSets(car, a.id).find(t => t.id !== cur[a.pads]);
+      if (pad) return { axle: a.id, name: kitNameFor(car, a.id, disc), disc, pad, onCar: false, formed: true };
+    }
+  }
+  const ready = brakeKitsOf(car, a.id).find(k => !k.scrapped && !k.used && !k.onCar &&
+    k.disc.id !== cur[a.discs] && k.pad.id !== cur[a.pads]);
+  if (ready) return { ...ready, formed: false };
+  const disc = brakeSetsOf(car, a.discs).find(t => !t.used && !t.scrapped && t.id !== cur[a.discs]);
+  const pad = freePadSets(car, a.id).find(t => !t.used && t.id !== cur[a.pads]);
+  if (disc && pad) {
+    return { axle: a.id, name: kitNameFor(car, a.id, disc), disc, pad, onCar: false, formed: true };
+  }
+  // Nothing fresh: the least-worn kit still in the rack beats nothing at all.
+  const worn = brakeKitsOf(car, a.id)
+    .filter(k => !k.scrapped && !k.onCar && k.disc.id !== cur[a.discs])
+    .sort((x, y) => (x.disc.hours + x.pad.hours) - (y.disc.hours + y.pad.hours))[0];
+  return worn ? { ...worn, formed: false } : null;
+}
+
+// The pad set a pads-only stop fits — free pads bed onto the discs that are
+// already on the car, so a set claimed by another kit is not offered.
+export function stopPadSet(car, axleId, stop = car?.nextStop) {
+  const a = brakeAxle(axleId);
+  if (!a) return null;
+  const cur = car?.state?.currentBrakeSetId || {};
+  // The pads on the car are bedded to the discs on the car, so they are not
+  // "free" — but every other unclaimed set in the pool is fair game.
+  const usable = freePadSets(car, a.id).filter(t => t.id !== cur[a.pads]);
+  const picked = brakeSetsOf(car, a.pads).find(t => t.id === stop?.brakeSetIds?.[a.pads]);
+  if (picked && !picked.scrapped && picked.id !== cur[a.pads]) return picked;
+  return usable.find(t => !t.used) ||
+    usable.slice().sort((x, y) => x.hours - y.hours)[0] ||
+    stopBrakeSet(car, a.pads, stop);
+}
+
+// The three things an axle can be asked for, and the component flags that say
+// it. Discs never come off on their own: fresh discs need pads bedded to them,
+// so a disc change IS a kit change. This pair of functions is the only place
+// the two vocabularies meet — every screen speaks axles, the stop record and
+// the history keep speaking components.
+export const BRAKE_WORK = ['none', 'pads', 'kit'];
+
+export function brakeAxleWork(compIds) {
+  const ids = Array.isArray(compIds) ? compIds : [];
+  const out = {};
+  for (const a of BRAKE_AXLES) {
+    out[a.id] = ids.includes(a.discs) ? 'kit' : ids.includes(a.pads) ? 'pads' : 'none';
+  }
+  return out;
+}
+
+export function brakeWorkComps(work) {
+  const out = [];
+  for (const a of BRAKE_AXLES) {
+    const w = work?.[a.id];
+    if (w === 'kit') out.push(a.pads, a.discs);
+    else if (w === 'pads') out.push(a.pads);
+  }
+  return out;
+}
+
+// What one axle of a stop asks for, ready to print: the work, the kit name,
+// and the two parts with the hours on them. Every card that has to say what
+// the crew grabs goes through here, so the wall and the station cannot drift.
+export function stopBrakeAxle(car, axleId, stop) {
+  const a = brakeAxle(axleId);
+  if (!a) return null;
+  const work = stop?.[a.discs] ? 'kit' : stop?.[a.pads] ? 'pads' : 'none';
+  if (work === 'none') return { axle: a.id, label: a.label, work, name: '', disc: null, pad: null, blocked: false };
+  if (work === 'kit') {
+    const kit = stopBrakeKit(car, a.id, stop) || stopBrakeKit(car, a.id, { brakeSetIds: {} });
+    return {
+      axle: a.id, label: a.label, work,
+      name: kit?.name || '',
+      disc: kit?.disc || null,
+      pad: kit?.pad || null,
+      formed: !!kit?.formed,
+      blocked: !kit || !kit.disc || !kit.pad
+    };
+  }
+  const pad = brakeSetsOf(car, a.pads).find(t => t.id === stop?.brakeSetIds?.[a.pads] && !t.scrapped) ||
+    stopPadSet(car, a.id, stop);
+  const disc = currentBrakeSet(car, a.discs);
+  return {
+    axle: a.id, label: a.label, work,
+    name: disc?.kitName || '',
+    disc, pad, formed: false,
+    blocked: !pad
+  };
 }
 
 export function defaultDriver(n) {
@@ -573,13 +1264,18 @@ export function defaultDriver(n) {
 // against the roster is what lets every screen say WHO is in the car — and
 // flag it when the feed disagrees with the strategy state.
 
-// Short driver tag for compact readouts: the entered abbreviation, else the
-// first three letters of the name's last word (surname, racing convention).
+// Short driver tag for compact readouts: the entered abbreviation, else one
+// derived from the name — first letter of the first name plus the first two
+// of the last ("Roman Rusinov" → RRU); a single-word name gives its first
+// three letters. The settings pane proposes the same derivation as the
+// abbreviation field's placeholder.
 export function driverAbbrev(d) {
   const ab = String(d?.abbrev || '').trim().toUpperCase();
   if (ab) return ab;
   const words = String(d?.name || '').trim().split(/\s+/).filter(Boolean);
-  return words.length ? words[words.length - 1].slice(0, 3).toUpperCase() : '';
+  if (!words.length) return '';
+  if (words.length === 1) return words[0].slice(0, 3).toUpperCase();
+  return (words[0][0] + words[words.length - 1].slice(0, 2)).toUpperCase();
 }
 
 // Fold a name to a comparable form: accents stripped, case and punctuation
@@ -692,6 +1388,9 @@ export function defaultCar(id, number) {
     currentDriverId: 'd1',
     plan: null,
     tyreSets: defaultTyreSets(12).map((t, i) => (i === 0 ? { ...t, used: true } : t)),
+    // Numbered boxes, each holding at most one of those sets. Empty until the
+    // crew says how many they brought.
+    tyreWarmers: [],
     brakeSets: defaultAllBrakeSets(),
     learn: { byDriver: {}, fuelRef: null },
     config: {
@@ -709,8 +1408,19 @@ export function defaultCar(id, number) {
       // Tyre life as a distance — laps come from the track length (see
       // tyreLifeLapsOf). tyreLifeLaps stays for states saved before that.
       tyreLifeKm: 300,
+      // Deciding whether to take the neutralisation that is running, or gamble
+      // on the next one. Like the track figures above these are Zolder's own:
+      // 0.639 usable Code 60 per hour measured across 2019-2025, and the lap
+      // time a litre of fuel and a kilometre on the tyres are each worth, off
+      // the reference sheet. Editable per car on the NEXT PIT STOP card; 0 on
+      // the rate means no view, and the plans are ranked without the gamble.
+      cautionsPerHour: 0.639,
+      tyreDegSecPerKm: 0.0087,
+      fuelWeightSecPerL: 0.0079,
       tyreLifeLaps: 90,
       tyreSets: 12,
+      // How many tyre warmers are in the garage (0 = the team runs without).
+      tyreWarmers: TYRE_WARMER_DEFAULT,
       brakeLifeH: { padsFront: 8, padsRear: 10, discsFront: 14, discsRear: 16 },
       // How many numbered sets of each are in the rack.
       brakeSets: { ...DEFAULT_BRAKE_SET_COUNT },
@@ -731,11 +1441,11 @@ export function defaultCar(id, number) {
       pitEntryToBoxSec: 0,
       minStopSec: 0,
       tyreChangeSec: 25,
-      trackKm: 4.0,
-      fcySpeedKmh: 80,
+      trackKm: 4.007,
+      fcySpeedKmh: 60,
       scSpeedKmh: 0,
-      s1EndKm: 0,
-      s2EndKm: 0,
+      s1EndKm: 1.3764,
+      s2EndKm: 2.8646,
       s3EndKm: 0,
       pitInKm: 0,
       finishFuelL: 5,
@@ -770,7 +1480,24 @@ export function defaultCar(id, number) {
       // Last time live data arrived for this car — a station connecting or a
       // linked timing-feed event. null = nothing yet this race, so the wall
       // can tell an unused car entry from a station that dropped mid-race.
-      liveSeenMs: null
+      liveSeenMs: null,
+      // ---- lap reconciliation across a feed outage --------------------------
+      // The feed counts laps by event (a changed LAST cell), so laps run while
+      // the link is down are simply never seen — and a reconnect rebuilds the
+      // board from scratch, which is what keeps them from being replayed. The
+      // lap NUMBER the feed publishes survives that, so it is kept here as the
+      // anchor: `feedLaps` is the count last seen from the feed, `feedGap`
+      // marks that the link has been interrupted since and owes a catch-up,
+      // and `manualLaps` counts what the crew logged by hand in the meantime
+      // so a lap can never be counted by both.
+      feedLaps: null,
+      feedGap: false,
+      manualLaps: 0,
+      // What the last reconciliation did: { laps, atMs } for laps recovered,
+      // or { laps: 0, gap, atMs } when the discrepancy was too large to apply
+      // blind and the crew has to answer it. A lap count that jumps must say
+      // why it jumped.
+      lapCatchUp: null
     },
     nextStop: emptyStop(),
     // Which situation columns this car shows on the wall's grab list. Both
@@ -800,6 +1527,357 @@ export function startFuelOf(car) {
   const tank = Number(car?.config?.tankLiters) || 0;
   const start = Number(car?.config?.startFuelL) || 0;
   return start > 0 ? Math.min(start, tank) : tank;
+}
+
+// ---------------------------------------------------------------------------
+// Car files
+// ---------------------------------------------------------------------------
+// Which settings belong to the CAR and which to the EVENT is the one thing
+// everybody gets wrong in the settings pages: both are on screen, both look
+// alike, and the difference only shows up when a number is changed on one
+// station and silently ignored because the pit wall owns it. A car file is
+// that line written down. It holds everything that IS this car — its fuel
+// model, its pace, its wear figures, its drivers, its tyre and brake racks —
+// and nothing that is the event (track length, pit lane, regulations: those
+// are set once on the pit wall and mirrored into every car). Generate it once
+// per car, keep it with the car, load it on any station or from the wall, and
+// the car is set up in one action.
+//
+// The file is plain JSON, grouped and named the way the settings tabs are, so
+// it can also be read — and filled in — in a text editor the week before the
+// event by somebody who never opens the app.
+
+export const CAR_FILE_KIND = 'pitwall-24h.car';
+export const CAR_FILE_VERSION = 1;
+export const CAR_FILE_EXT = 'pitcar.json';
+
+// Printed into every file, so the thing explains itself when it is opened
+// somewhere the app is not.
+export const CAR_FILE_README =
+  'PitWall 24H car file. Everything in here belongs to this one car and is applied to ' +
+  'whichever car slot it is loaded into: car identity, fuel model, pace, wear figures, ' +
+  'the driver table, the tyre/brake racks and how many tyre warmers the garage ' +
+  'has. Event settings (track length, pit lane, ' +
+  'refuelling rig, drive-time regulations) are deliberately NOT in this file — they are ' +
+  'the same for every car and are set once on the pit wall. Values may be edited by hand; ' +
+  'unknown fields are ignored and missing ones leave the car as it is. Loading never ' +
+  'touches race data: laps, mileage, banked hours, seat time and the sets that have ' +
+  'already run all stay.';
+
+// The car's own config, grouped as the settings tabs group it. Every
+// car-specific config key appears in exactly one group or in the racks below —
+// the smoke test holds that true, so a setting added later cannot quietly fall
+// out of the file.
+export const CAR_FILE_GROUPS = [
+  {
+    key: 'fuel',
+    label: 'Fuel',
+    fields: ['fuelModel', 'tankLiters', 'startFuelL', 'burnPerLap',
+      'finishFuelL', 'safetyFuelL', 'fuelWarnLaps']
+  },
+  {
+    key: 'pace',
+    label: 'Pace',
+    fields: ['avgLapSec', 'greenSpeedKmh', 'paceAvgLaps']
+  },
+  {
+    key: 'wear',
+    label: 'Wear & pit',
+    fields: ['tyreLifeKm', 'tyreLifeLaps', 'brakeLifeH', 'tyreChangeSec']
+  },
+  {
+    key: 'caution',
+    label: 'Neutralisation call',
+    // What decides taking the Code 60 that is running over gambling on the next
+    // one. They travel with the car: the two coefficients are the car's own
+    // sensitivity to fuel and rubber, and the rate is how the crew reads the
+    // event they are running.
+    fields: ['cautionsPerHour', 'tyreDegSecPerKm', 'fuelWeightSecPerL']
+  }
+];
+
+// Set counts are not loose numbers in a file: they travel with the names of
+// the sets themselves, in tyreRack / brakeRack.
+export const CAR_FILE_RACK_FIELDS = ['tyreSets', 'brakeSets', 'tyreWarmers'];
+
+// Which driver fields describe the driver rather than what they have done.
+// Seat time is race data and never travels in a file.
+export const CAR_FILE_DRIVER_FIELDS = [
+  'id', 'name', 'abbrev', 'timingName', 'doubleStint', 'night', 'rain',
+  'fuelDry', 'fuelWet', 'fuelCurve'
+];
+
+// Every config key that belongs to the car and not to the event. Derived from
+// the defaults, so the two lists can never drift apart.
+export function carConfigFields() {
+  return Object.keys(defaultCar('1', '1').config).filter(f => !EVENT_FIELDS.includes(f));
+}
+
+// A file name that says which car it is without being opened, and that sorts
+// sensibly in a folder holding four of them.
+export function carFileName(car) {
+  const label = [car?.number ? '#' + car.number : '', car?.name || '']
+    .map(s => String(s).trim()).filter(Boolean).join(' ');
+  const slug = (label || 'car')
+    .replace(/[^A-Za-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase() || 'car';
+  return slug + '.' + CAR_FILE_EXT;
+}
+
+// Everything this car is, as a file. `savedMs` is passed in rather than read
+// off the clock, so the same car always writes the same bytes in a test.
+export function buildCarFile(car, { app = '', savedMs = Date.now() } = {}) {
+  const cfg = car?.config || {};
+  const file = {
+    kind: CAR_FILE_KIND,
+    version: CAR_FILE_VERSION,
+    app: String(app || ''),
+    savedMs,
+    savedIso: new Date(savedMs).toISOString(),
+    _readme: CAR_FILE_README,
+    car: {
+      name: String(car?.name ?? ''),
+      number: String(car?.number ?? ''),
+      make: String(car?.make ?? ''),
+      model: String(car?.model ?? '')
+    }
+  };
+  for (const g of CAR_FILE_GROUPS) {
+    const out = {};
+    for (const f of g.fields) {
+      const v = cfg[f];
+      out[f] = v && typeof v === 'object' ? { ...v } : v;
+    }
+    file[g.key] = out;
+  }
+  file.drivers = (car?.drivers || []).map(d => {
+    const out = {};
+    for (const f of CAR_FILE_DRIVER_FIELDS) {
+      out[f] = f === 'fuelCurve' ? normalizeCurve(d?.fuelCurve) : d?.[f];
+    }
+    return out;
+  });
+  const tyres = car?.tyreSets || [];
+  file.tyreRack = { count: tyres.length, names: tyres.map(t => String(t?.name ?? '')) };
+  // The warmers are equipment, so how many there are and what they are called
+  // travels with the car. What is in them right now is race data and does not.
+  const warmers = car?.tyreWarmers || [];
+  file.warmerRack = { count: warmers.length, names: warmers.map(w => String(w?.name ?? '')) };
+  file.brakeRack = {};
+  for (const b of BRAKE_COMPONENTS) {
+    const sets = brakeSetsOf(car, b.id);
+    file.brakeRack[b.id] = { count: sets.length, names: sets.map(t => String(t?.name ?? '')) };
+  }
+  // Which pads are bedded onto which discs travels with the rack, by the
+  // numbers written on the parts — ids are this car's private business.
+  file.brakeRack.kits = BRAKE_AXLES.flatMap(a => brakeKitsOf(car, a.id)
+    .map(k => ({ axle: a.id, name: k.name, disc: k.disc.name, pad: k.pad.name })));
+  return file;
+}
+
+// Is this a car file, and one this build understands? Text or object both go
+// in — the renderer has a string off disk, the server has a parsed message.
+// A file from a NEWER app still loads: unknown fields are ignored and the
+// warning says so, which beats refusing a file that is 95% readable.
+export function readCarFile(input) {
+  let data = input;
+  if (typeof input === 'string') {
+    try {
+      data = JSON.parse(input);
+    } catch (e) {
+      return { ok: false, error: 'that file is not JSON (' + e.message + ')' };
+    }
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return { ok: false, error: 'that file does not contain a car setup' };
+  }
+  if (data.kind !== CAR_FILE_KIND) {
+    return { ok: false, error: 'that is not a PitWall 24H car file (a race setup or a state backup, perhaps)' };
+  }
+  const version = Math.round(+data.version || 0);
+  if (!(version >= 1)) return { ok: false, error: 'that car file has no version and cannot be read' };
+  const warnings = [];
+  if (version > CAR_FILE_VERSION) {
+    warnings.push('written by a newer version of the app (file v' + version + ', this build reads v' +
+      CAR_FILE_VERSION + ') — settings it does not know are ignored');
+  }
+  return { ok: true, file: data, warnings };
+}
+
+// Take a value out of a file in the shape of the default it replaces. A file
+// is hand-editable, so "2,8", a true where a number belongs and a missing key
+// are all normal input — none of them may corrupt a car.
+function coerceSetting(def, v) {
+  if (v === undefined || v === null) return undefined;
+  if (typeof def === 'number') {
+    const n = typeof v === 'string' ? Number(v.replace(',', '.')) : Number(v);
+    return Number.isFinite(n) ? Math.max(0, n) : undefined;
+  }
+  if (typeof def === 'boolean') return !!v;
+  if (typeof def === 'string') return typeof v === 'string' ? v : undefined;
+  if (def && typeof def === 'object') {
+    if (!v || typeof v !== 'object') return undefined;
+    const out = { ...def };
+    let any = false;
+    for (const k of Object.keys(def)) {
+      const sub = coerceSetting(def[k], v[k]);
+      if (sub !== undefined) { out[k] = sub; any = true; }
+    }
+    return any ? out : undefined;
+  }
+  return undefined;
+}
+
+const FUEL_MODELS = ['driver-avg', 'driver-laptime'];
+
+// Load a file onto a car, in place. Only settings travel: laps, mileage,
+// banked hours, seat time, the sets that have run and everything else the race
+// has written stay exactly as they are — so a file can be loaded at 3 a.m. to
+// correct a wrong tank size without costing the car its history.
+export function applyCarFile(car, input, { identity = true } = {}) {
+  const read = readCarFile(input);
+  if (!read.ok) return { ok: false, error: read.error, applied: [], warnings: [] };
+  const file = read.file;
+  const warnings = [...read.warnings];
+  const applied = [];
+  const defCfg = defaultCar('1', '1').config;
+
+  // Identity. The number is what live timing matches on and what heads the
+  // car's column on the board, so a file that carries none must not blank it.
+  if (identity && file.car && typeof file.car === 'object') {
+    const nm = String(file.car.name ?? '').trim();
+    const nr = String(file.car.number ?? '').trim();
+    if (nr) car.number = nr;
+    if (nm) car.name = nm;
+    if (typeof file.car.make === 'string') car.make = file.car.make.trim();
+    if (typeof file.car.model === 'string') car.model = file.car.model.trim();
+    applied.push('car information');
+  }
+
+  // Config, group by group.
+  car.config ??= { ...defCfg };
+  for (const g of CAR_FILE_GROUPS) {
+    const src = file[g.key];
+    if (!src || typeof src !== 'object') continue;
+    let hits = 0;
+    for (const f of g.fields) {
+      const v = coerceSetting(defCfg[f], src[f]);
+      if (v === undefined) continue;
+      car.config[f] = v;
+      hits++;
+    }
+    if (hits) applied.push(g.label.toLowerCase());
+  }
+  // The three a wrong file could make nonsense of.
+  if (!FUEL_MODELS.includes(car.config.fuelModel)) car.config.fuelModel = 'driver-avg';
+  if (!(car.config.tankLiters > 0)) car.config.tankLiters = defCfg.tankLiters;
+  car.config.paceAvgLaps = Math.min(PACE_WINDOW_MAX,
+    Math.max(PACE_WINDOW_MIN, Math.round(car.config.paceAvgLaps) || PACE_WINDOW_DEFAULT));
+
+  // Drivers. The roster is positional — it is the seat, not the person: seat 1
+  // keeps the seat time seat 1 has banked, so loading a file mid-race corrects
+  // names and consumption figures without rewriting the race.
+  if (Array.isArray(file.drivers) && file.drivers.length) {
+    const defDriver = defaultDriver(1);
+    car.drivers = file.drivers.map((d, i) => {
+      const base = car.drivers?.[i] || defaultDriver(i + 1);
+      const out = { ...base };
+      for (const f of CAR_FILE_DRIVER_FIELDS) {
+        if (f === 'id') continue; // the seat keeps its id — stops and plans point at it
+        if (f === 'fuelCurve') {
+          if (Array.isArray(d?.fuelCurve)) out.fuelCurve = normalizeCurve(d.fuelCurve);
+          continue;
+        }
+        const v = coerceSetting(defDriver[f], d?.[f]);
+        if (v !== undefined) out[f] = v;
+      }
+      out.id = base.id || 'd' + (i + 1);
+      out.totalMs = Math.max(0, +base.totalMs || 0);
+      return out;
+    });
+    if (!car.drivers.some(d => d.id === car.currentDriverId)) {
+      car.currentDriverId = car.drivers[0].id;
+    }
+    applied.push('driver table');
+  }
+
+  // Racks. Only sets nobody has run are replaced — the set on the car, every
+  // used set and every scrapped one survive with their mileage, exactly as
+  // they do when the GENERATE SETS form is used.
+  const rackNames = list => (Array.isArray(list) ? list : [])
+    .map(n => String(n ?? '').trim())
+    .filter(Boolean)
+    .slice(0, SET_GEN_MAX);
+  const tyreNames = rackNames(file.tyreRack?.names);
+  if (tyreNames.length) {
+    if ((file.tyreRack?.names || []).length > SET_GEN_MAX) {
+      warnings.push('the file lists ' + file.tyreRack.names.length +
+        ' tyre sets — only the first ' + SET_GEN_MAX + ' were taken');
+    }
+    const res = setTyreSetNames(car, tyreNames, { replaceUnused: true, skipExisting: true });
+    car.tyreSets = res.sets;
+    car.config.tyreSets = res.sets.length;
+    reconcileTyreSets(car);
+    applied.push('tyre rack');
+    // A name the file and the car share is the same physical set, so it stays
+    // as it is. Only say so when that set carries mileage — on a fresh car the
+    // placeholder it lands on is not news.
+    const worn = res.sets.filter(t => res.duplicates.includes(t.name) && (t.km > 0 || t.laps > 0));
+    if (worn.length) {
+      warnings.push('sets the car has already run kept their mileage: ' +
+        worn.map(t => t.name).join(', '));
+    }
+  }
+  // Warmers. The file says how many boxes there are and what is written on
+  // them; the rubber inside stays with whichever box survives the count.
+  if (file.warmerRack && typeof file.warmerRack === 'object') {
+    const names = rackNames(file.warmerRack.names);
+    const count = Math.max(0, Math.min(TYRE_WARMER_MAX,
+      Math.round(+file.warmerRack.count) || names.length));
+    const had = car.tyreWarmers || [];
+    car.tyreWarmers = Array.from({ length: count }, (_, i) => ({
+      ...(had[i] || newTyreWarmer('w' + (i + 1), 'W' + (i + 1))),
+      name: names[i] || had[i]?.name || 'W' + (i + 1)
+    }));
+    car.config.tyreWarmers = count;
+    reconcileTyreWarmers(car);
+    applied.push('tyre warmers');
+  }
+  let brakeHits = 0;
+  for (const b of BRAKE_COMPONENTS) {
+    const names = rackNames(file.brakeRack?.[b.id]?.names);
+    if (!names.length) continue;
+    const res = setBrakeSetNames(car, b.id, names, { replaceUnused: true, skipExisting: true });
+    car.brakeSets ??= {};
+    car.brakeSets[b.id] = res.sets;
+    car.config.brakeSets ??= { ...DEFAULT_BRAKE_SET_COUNT };
+    car.config.brakeSets[b.id] = res.sets.length;
+    brakeHits++;
+  }
+  if (brakeHits) {
+    reconcileBrakeSets(car);
+    applied.push('brake rack');
+    // Kits from the file are re-tied by part number. A file that names no kit
+    // leaves the rack as reconcile married it up — never unlinked, since that
+    // would silently break pairs the crew bedded in.
+    const kits = Array.isArray(file.brakeRack?.kits) ? file.brakeRack.kits.slice(0, SET_GEN_MAX * 2) : [];
+    const missed = [];
+    for (const k of kits) {
+      const a = brakeAxle(k?.axle);
+      if (!a) continue;
+      const disc = brakeSetsOf(car, a.discs).find(t => t.name === String(k.disc ?? '').trim());
+      const pad = brakeSetsOf(car, a.pads).find(t => t.name === String(k.pad ?? '').trim());
+      if (!disc || !pad) { missed.push(String(k.name || k.disc || '?')); continue; }
+      linkBrakeKit(car, a.id, disc.id, pad.id, k.name);
+    }
+    if (missed.length) {
+      warnings.push('kits the rack has no parts for were skipped: ' + missed.join(', '));
+    }
+    if (kits.length) reconcileBrakeKits(car);
+  }
+
+  return { ok: true, applied, warnings };
 }
 
 export function defaultState() {
@@ -964,6 +2042,18 @@ export function paceLapSec(car, pace) {
 
 export const REG_WINDOW_MS = 6 * 3600e3;
 
+// Where the running stint really began: never before the race did. A stint
+// anchored ahead of the race start belongs to an earlier session — a state
+// file carried over, or the clock re-anchored onto a session the old stint
+// knew nothing about — and reading it raw is what turns a four hour race into
+// a 154 hour seat time. Clamping is the honest reading: everything this race
+// has seen of that stint happened after the flag.
+export function stintStartOf(car, race) {
+  const ms = car.state.stintStartMs;
+  if (!ms) return null;
+  return race?.startMs ? Math.max(ms, race.startMs) : ms;
+}
+
 export function driveTimeStats(car, race, now) {
   const cfg = car.config;
   const clock = raceClock(race, now);
@@ -977,8 +2067,12 @@ export function driveTimeStats(car, race, now) {
   for (const d of car.drivers) {
     byDriver[d.id] = { windowMs: 0, totalMs: 0, lastEndMs: null, driving: false, restMs: null };
   }
+  const raceStart = race?.startMs || 0;
   const addSpan = (id, from, to) => {
     const s = byDriver[id];
+    // Seat time is time driven in THIS race; a span from a previous session
+    // is not the driver's, however long the state file has been around.
+    from = Math.max(from, raceStart);
     if (!s || !(to > from)) return;
     s.totalMs += to - from;
     s.windowMs += Math.max(0, Math.min(to, now) - Math.max(from, winStart));
@@ -986,7 +2080,7 @@ export function driveTimeStats(car, race, now) {
   };
   for (const h of car.stintHistory) addSpan(h.driverId, h.startMs, h.endMs);
   if (clock.running && car.state.stintStartMs && byDriver[car.currentDriverId]) {
-    addSpan(car.currentDriverId, car.state.stintStartMs, now);
+    addSpan(car.currentDriverId, stintStartOf(car, race), now);
     byDriver[car.currentDriverId].driving = true;
   }
 
@@ -1053,7 +2147,8 @@ export function carCalcs(car, race, now) {
   const lapMs = (projLapSec || 100) * 1000;
   const clock = raceClock(race, now);
 
-  const stintElapsedMs = clock.running && s.stintStartMs ? Math.max(0, now - s.stintStartMs) : 0;
+  const stintStartMs = stintStartOf(car, race);
+  const stintElapsedMs = clock.running && stintStartMs ? Math.max(0, now - stintStartMs) : 0;
 
   // Fuel above the safety level is what strategy can actually spend; the
   // finish margin is what should still be on board at the flag.
@@ -1062,6 +2157,9 @@ export function carCalcs(car, race, now) {
   const usableFuel = Math.max(0, s.fuelLiters - safety);
   const lapsToEmpty = Math.floor(usableFuel / burn);
   const msToEmpty = lapsToEmpty * lapMs;
+  // Unfloored twin of msToEmpty for countdowns: the tank drains continuously,
+  // so a clock built on whole laps holds still and then jumps a lap at a time.
+  const msToSafety = burn > 0 ? (usableFuel / burn) * lapMs : 0;
 
   // Tyre life is configured as a distance; the lap figure follows the track.
   const tyreLifeLaps = tyreLifeLapsOf(car);
@@ -1087,6 +2185,22 @@ export function carCalcs(car, race, now) {
       pct: Math.min(1, usedH / lifeH),
       set,
       setName: set?.name || ''
+    };
+  }
+  // The same numbers read the way the crew works: per axle, under the name of
+  // the kit that is on it. The axle is done when its first part is done.
+  const brakeAxles = {};
+  for (const a of BRAKE_AXLES) {
+    const kit = currentBrakeKit(car, a.id);
+    brakeAxles[a.id] = {
+      axle: a.id,
+      label: a.label,
+      kit,
+      name: kit?.name || '',
+      discs: brakes[a.discs],
+      pads: brakes[a.pads],
+      leftH: Math.min(brakes[a.discs].leftH, brakes[a.pads].leftH),
+      pct: Math.max(brakes[a.discs].pct, brakes[a.pads].pct)
     };
   }
 
@@ -1121,12 +2235,12 @@ export function carCalcs(car, race, now) {
   );
 
   return {
-    clock, stintElapsedMs, burn, burnInfo, refLapSec, lapMs, fcyActive, condition,
+    clock, stintStartMs, stintElapsedMs, burn, burnInfo, refLapSec, lapMs, fcyActive, condition,
     safety, finishMargin, usableFuel,
-    lapsToEmpty, msToEmpty,
+    lapsToEmpty, msToEmpty, msToSafety,
     tyreLifeLaps, tyreLapsLeft, msToTyres, tyreMileage, tyreKmRemaining,
     msDriverLeft,
-    brakes,
+    brakes, brakeAxles,
     limit, limits,
     reg,
     lapsRemainingRace, fuelToEnd, fullStintLaps,
@@ -1146,14 +2260,18 @@ export function projectStints(car, race, now) {
   const blocks = [];
 
   for (const h of car.stintHistory) {
-    blocks.push({ from: h.startMs - start, to: h.endMs - start, kind: 'past', driverId: h.driverId });
+    blocks.push({ from: h.startMs - start, to: h.endMs - start, kind: 'past', driverId: h.driverId, laps: h.laps ?? null });
   }
 
   const s = car.state;
   if (s.stintStartMs) {
     const stopAt = Math.min(now + calcs.limit.ms, end);
-    blocks.push({ from: s.stintStartMs - start, to: now - start, kind: 'current', driverId: car.currentDriverId });
-    blocks.push({ from: now - start, to: stopAt - start, kind: 'projected', driverId: car.currentDriverId });
+    // Proposed laps for the running stint: laps banked plus what is left until
+    // the limiting factor forces the stop (down to the safety level when fuel
+    // is the limit). One figure for both halves of the stint on the timeline.
+    const curLaps = s.lapsThisStint + Math.max(0, Math.round(calcs.limit.ms / calcs.lapMs));
+    blocks.push({ from: calcs.stintStartMs - start, to: now - start, kind: 'current', driverId: car.currentDriverId, laps: curLaps });
+    blocks.push({ from: now - start, to: stopAt - start, kind: 'projected', driverId: car.currentDriverId, laps: curLaps });
 
     // Future stints, fuel-limited full tanks.
     const stintMs = Math.max(calcs.fullStintLaps * calcs.lapMs, 10 * 60e3);
@@ -1161,7 +2279,9 @@ export function projectStints(car, race, now) {
     let i = 0;
     while (t < end && i < 60) {
       const to = Math.min(t + stintMs, end);
-      blocks.push({ from: t - start, to: to - start, kind: 'future', driverId: null });
+      // The last stint is cut by the flag — show the laps it actually holds.
+      blocks.push({ from: t - start, to: to - start, kind: 'future', driverId: null,
+        laps: Math.min(calcs.fullStintLaps, Math.round((to - t) / calcs.lapMs)) });
       t = to + (car.config.pitLossSec || 0) * 1000;
       i++;
     }
@@ -1599,7 +2719,10 @@ export function pitEta(car, race, timing, entry, rxMs = Date.now(), now = Date.n
           us += sUs;
           n++;
         }
-        if (!cross || us > cross.us) cross = { mm: n ? norm(sectorEndMm(n)) : 0, us };
+        // No sector time has completed yet: that is the lap clock talking, not
+        // a sector fix. Leave it to the lap-clock source below — same position,
+        // but the card then says which one it really is.
+        if (n > 0 && (!cross || us > cross.us)) cross = { mm: norm(sectorEndMm(n)), us };
       }
     }
     if (cross) {
@@ -1690,6 +2813,51 @@ export function pitEta(car, race, timing, entry, rxMs = Date.now(), now = Date.n
 }
 
 // ---------------------------------------------------------------------------
+// Pit order: which of our cars reaches the box first
+// ---------------------------------------------------------------------------
+// One crew, four cars. The moment something happens — a flag drops, or a stop
+// goes live — the question in the box stops being "is this car coming in" and
+// becomes "which one do we take first". That answer is already in pitEta: the
+// car with the shortest run left to the box is the car the crew sees first.
+// Nothing new is measured here; the arrivals are simply put in order.
+//
+// A car joins the queue on exactly the terms its E.T.A. is shown on — it is in
+// the pit lane, its stop is live (sent / box), or the race is neutralised and
+// the E.T.A. therefore answers the crew's question. A car already in the lane
+// is at the front by definition, and two of them keep the order they entered
+// in. Cars with no usable position (no feed, no crossing yet) are left out: an
+// order that guesses where a car is would be worse than no order at all.
+//
+// `etaOf(car)` hands over that car's pitEta (null when there is none), so the
+// estimate is computed once per car and read here rather than made twice.
+// Returns [] for fewer than two cars — a queue of one is not an order.
+export function pitArrivalOrder(cars, etaOf, now = Date.now()) {
+  const queue = [];
+  for (const car of cars) {
+    if (car.state.inPit) {
+      // Negative seconds: already there, and the longest-standing car first.
+      const waited = car.state.pitEnterMs ? (now - car.state.pitEnterMs) / 1000 : 0;
+      queue.push({ carId: car.id, sec: -1 - waited, inPit: true, stale: false, eta: null });
+      continue;
+    }
+    // The same gate the E.T.A. line uses: only under a neutralisation, or once
+    // this car's stop is on its way to the crew.
+    const eta = etaOf(car);
+    if (!eta || !(eta.neutral || car.nextStop.status !== 'draft')) continue;
+    queue.push({
+      carId: car.id,
+      sec: eta.etaBoxSec != null ? eta.etaBoxSec : eta.etaEntrySec,
+      inPit: false,
+      stale: eta.stale,
+      eta
+    });
+  }
+  if (queue.length < 2) return [];
+  queue.sort((a, b) => a.sec - b.sec || String(a.carId).localeCompare(String(b.carId)));
+  return queue.map((q, i) => ({ ...q, pos: i + 1, of: queue.length }));
+}
+
+// ---------------------------------------------------------------------------
 // Fuel strategy: the pit window
 // ---------------------------------------------------------------------------
 // The one fuel question that matters when a flag flies: does refuelling RIGHT
@@ -1768,7 +2936,7 @@ export function fuelStrategy(car, race, now, calcs = carCalcs(car, race, now)) {
   const lapsLeft = calcs.lapsToEmpty;
   const warn = {
     lapsLeft,
-    msLeft: calcs.msToEmpty,
+    msLeft: calcs.msToSafety,
     warnLaps,
     level: warnLaps > 0 && lapsLeft <= 2 ? 'crit'
       : warnLaps > 0 && lapsLeft <= warnLaps ? 'warn' : 'ok'
@@ -1945,15 +3113,294 @@ export function fuelBreakEven(car, pace) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Taking THIS caution, or waiting for the next one
+// ---------------------------------------------------------------------------
+// fuelBreakEven above answers "is the fill big enough to pay for the extra stop
+// this buys" — a litre threshold off track geometry. It cannot answer the other
+// half of the question: if we do not take this one, how likely is another before
+// fuel forces us in at full green cost? That depends on how often cautions
+// actually fall at this event, which is a measured number (Zolder 2019-2025:
+// 0.639 usable Code 60 per hour) and the one input none of the maths above has.
+//
+// Cautions are treated as a Poisson process — they arrive independently at an
+// average rate, so the chance of at least one inside a window of t hours is
+// 1 - exp(-rate*t). That assumes a flat rate: no clustering, no night effect.
+// probabilityOfCautionWithin is the single place to change if that stops being
+// good enough.
+//
+// The answer is a BREAK-EVEN RATE: how frequent cautions would have to be
+// before staying out beats taking the one that is running. Compare it against
+// the event's real rate and the call falls out. It is deliberately not a
+// function of how long the race has left — see the cycle averaging below.
+
+const CAUTION_SIM_HOURS = 12;
+const CAUTION_MAX_RATE = 5; // above this, waiting never pays — do not search further
+
+export function probabilityOfCautionWithin(ratePerHour, windowSec) {
+  if (!(ratePerHour > 0) || !(windowSec > 0)) return 0;
+  return 1 - Math.exp(-ratePerHour * (windowSec / 3600));
+}
+
+// The four things that can be done at a stop under caution. Only the decision
+// stop varies; every stop after it fills and fits tyres, which is the standing
+// best call once the flag is gone.
+const CAUTION_PLANS = [
+  { key: 'stay', fuel: false, tyres: false, label: 'Stay out' },
+  { key: 'fuel', fuel: true, tyres: false, label: 'Fuel only' },
+  { key: 'tyres', fuel: false, tyres: true, label: 'Tyres only' },
+  { key: 'both', fuel: true, tyres: true, label: 'Fuel + tyres' }
+];
+
+// One plan rolled forward far enough to cover many stint cycles. Returns the
+// elapsed time at the end of each lap, plus which laps carried a stop.
+function simulateCautionPlan(car, pace, plan, ratePerHour, anchor) {
+  const cfg = car.config;
+  const { refLapSec, fuel0, tyreKm0, trackKm, tank, safety, tyreLifeKm, burnPerLap } = anchor;
+  // Lap time relative to the car's own reference lap, so this can never drift
+  // from the pace the car is actually running.
+  const lapSec = (fuelL, tyreKm) => refLapSec
+    + (cfg.fuelWeightSecPerL || 0) * (fuelL - fuel0)
+    + (cfg.tyreDegSecPerKm || 0) * (tyreKm - tyreKm0);
+
+  const expectedStopSec = (windowSec, refuelSec, boxWorkSec) => {
+    const green = pitCostSec(car, null, { refuelSec, boxWorkSec }).lossGreen;
+    const neutral = pitCostSec(car, pace, { refuelSec, boxWorkSec }).lossNeutral;
+    const p = probabilityOfCautionWithin(ratePerHour, windowSec);
+    return p * neutral + (1 - p) * green;
+  };
+
+  let fuel = fuel0;
+  let tyreKm = tyreKm0;
+  let t = 0;
+  const laps = [];
+
+  // Lap 0 — the hypothetical "a caution is running right now" lap.
+  const cautionLapSec = (cfg.avgLapSec && cfg.avgLapSec[pace]) || refLapSec;
+  const cautionBurn = (cfg.burnPerLap && cfg.burnPerLap[pace]) || burnPerLap;
+  if (plan.fuel || plan.tyres) {
+    const addL = plan.fuel ? Math.max(0, tank - fuel) : 0;
+    // The stop is taken UNDER the caution, which is the whole point of it.
+    t += cautionLapSec + pitCostSec(car, pace, {
+      refuelSec: plan.fuel ? refuelTimeSec(cfg, addL) : 0,
+      boxWorkSec: plan.tyres ? (cfg.tyreChangeSec || 0) : 0
+    }).lossNeutral;
+    if (plan.fuel) fuel = tank; else fuel -= cautionBurn;
+    // Binning a set with life still in it is free while there is spare rubber
+    // in the garage, and expensive once there is not: on a fixed allocation the
+    // discarded kilometres come straight off the distance the car can still
+    // cover on fresh tyres, and buying them back means another set it does not
+    // have. Priced as the fraction of a set thrown away, valued at one stop —
+    // which is what running out actually costs.
+    if (plan.tyres) {
+      if (anchor.scarcity > 0 && tyreKm > 0) {
+        const wasted = Math.max(0, anchor.tyreLifeKm - tyreKm);
+        t += (wasted / anchor.tyreLifeKm) * anchor.scarcity;
+      }
+      tyreKm = 0;
+    }
+  } else {
+    t += cautionLapSec;
+    fuel -= cautionBurn;
+  }
+  tyreKm += trackKm;
+  laps.push({ t, stop: plan.fuel || plan.tyres });
+
+  // Everything after runs green, stopping whenever fuel or rubber runs out.
+  // Those stops are priced as an EXPECTED value: a caution may well be running
+  // by the time they come due, and how likely that is is the thing being tested.
+  let lastStopT = laps[0].stop ? t : 0;
+  const horizon = CAUTION_SIM_HOURS * 3600;
+  let guard = 0;
+  while (t < horizon && guard++ < 2000) {
+    const forced = fuel < safety || (tyreLifeKm > 0 && tyreKm >= tyreLifeKm);
+    let d = lapSec(fuel, tyreKm);
+    let stopped = false;
+    if (forced) {
+      const addL = Math.max(0, tank - fuel);
+      d += expectedStopSec(t - lastStopT, refuelTimeSec(cfg, addL), cfg.tyreChangeSec || 0);
+      fuel = tank;
+      tyreKm = 0;
+      lastStopT = t;
+      stopped = true;
+    } else {
+      fuel -= burnPerLap;
+    }
+    tyreKm += trackKm;
+    t += d;
+    laps.push({ t, stop: stopped });
+  }
+  return laps;
+}
+
+// Mean elapsed time to reach each lap count, averaged over exactly one stop
+// cycle. Comparing at a single lap count measures where each plan happens to
+// sit in its own fuel cycle — worth a whole pit stop either way — rather than
+// what the decision actually bought. A whole number of cycles cancels that
+// oscillation; anything else leaves a residual that can flip close calls.
+function cycleMeanTime(laps, cycleLaps, lapTarget) {
+  const start = Math.max(1, lapTarget - cycleLaps + 1);
+  let sum = 0;
+  for (let n = start; n <= lapTarget; n++) sum += laps[n - 1].t;
+  return sum / (lapTarget - start + 1);
+}
+
+function cautionGaps(car, pace, ratePerHour, anchor) {
+  const sims = CAUTION_PLANS.map(p => simulateCautionPlan(car, pace, p, ratePerHour, anchor));
+  const lapTarget = Math.max(1, Math.min(...sims.map(s => s.length)) - 1);
+  // Every plan settles into the same stop rhythm, so any of them gives the cycle.
+  let cycle = lapTarget;
+  for (const s of sims) {
+    let last = -1, prev = -1;
+    for (let i = 0; i < Math.min(lapTarget, s.length); i++) {
+      if (s[i].stop) { prev = last; last = i; }
+    }
+    if (prev >= 0 && last > prev) { cycle = last - prev; break; }
+  }
+  const means = sims.map(s => cycleMeanTime(s, cycle, lapTarget));
+  const best = Math.min(...means);
+  return CAUTION_PLANS.map((p, i) => ({ ...p, gapSec: means[i] - best }));
+}
+
+/**
+ * The standing call for a neutralisation: take it, or wait for the next one.
+ * `pace` is 'fcy' or 'sc'. Returns null when the car is not configured well
+ * enough to answer (no tank, no lap time, no degradation figure).
+ */
+export function cautionCall(car, race, now, pace, calcs = carCalcs(car, race, now)) {
+  const cfg = car.config;
+  if (pace !== 'fcy' && pace !== 'sc') return null;
+  const trackKm = cfg.trackKm || 0;
+  const tank = cfg.tankLiters || 0;
+  const refLapSec = (calcs.lapMs || 0) / 1000 || (cfg.avgLapSec && cfg.avgLapSec.dry) || 0;
+  const burnPerLap = effectiveBurn(car, 'dry') || (cfg.burnPerLap && cfg.burnPerLap.dry) || 0;
+  if (!(trackKm > 0) || !(tank > 0) || !(refLapSec > 0) || !(burnPerLap > 0)) return null;
+
+  // What a wasted set is worth. Zero while the garage has rubber to spare, so
+  // the call is unchanged for a team that is not rationing; once binning a
+  // set's remaining life would actually push the ledger negative, it is the
+  // cost of the extra stop the shortfall will force. (The card's proposal rule
+  // is stricter — it also keeps a one-set reserve — but pricing follows the
+  // sums, not the policy.)
+  const budget = tyreBudget(car, race, now, calcs);
+  const scarcity = budget && budget.changeForcesShort
+    ? pitCostSec(car, null, {
+        refuelSec: refuelTimeSec(cfg, cfg.tankLiters || 0),
+        boxWorkSec: cfg.tyreChangeSec || 0
+      }).lossGreen
+    : 0;
+
+  const anchor = {
+    refLapSec,
+    scarcity,
+    fuel0: car.state.fuelLiters,
+    // tyreSetMileage returns {km, kmFcy, kmGreen} — the total is what wears.
+    tyreKm0: tyreSetMileage(currentTyreSet(car)).km || 0,
+    trackKm,
+    tank,
+    safety: cfg.safetyFuelL || 0,
+    tyreLifeKm: cfg.tyreLifeKm || 0,
+    burnPerLap
+  };
+
+  // Staying out is behind while this is positive; it crosses zero at the rate
+  // where waiting starts to pay.
+  const margin = rate => {
+    const gaps = cautionGaps(car, pace, rate, anchor);
+    const stay = gaps.find(g => g.key === 'stay').gapSec;
+    const bestStopper = Math.min(...gaps.filter(g => g.key !== 'stay').map(g => g.gapSec));
+    return stay - bestStopper;
+  };
+
+  let breakEven = null; // null = staying out never wins below CAUTION_MAX_RATE
+  if (margin(CAUTION_MAX_RATE) <= 0) {
+    let lo = 0, hi = CAUTION_MAX_RATE;
+    for (let i = 0; i < 32; i++) {
+      const mid = (lo + hi) / 2;
+      if (margin(mid) > 0) lo = mid; else hi = mid;
+    }
+    breakEven = (lo + hi) / 2;
+  }
+
+  const rate = cfg.cautionsPerHour || 0;
+  const gaps = cautionGaps(car, pace, rate, anchor);
+  const winner = gaps.reduce((a, b) => (b.gapSec < a.gapSec ? b : a));
+  const runnerUp = Math.min(...gaps.filter(g => g.key !== winner.key).map(g => g.gapSec));
+  return {
+    pace,
+    rate,
+    breakEven,
+    // Carried out so the card can say why fitting tyres has gone expensive.
+    budget,
+    // takeIt and the ranking are two readings of the same comparison, so it is
+    // read straight off the ranking rather than off the break-even rate. The
+    // bisection floors at 5/2^33 rather than a true zero, so a car with no rate
+    // configured — the default — used to satisfy `rate <= breakEven` and say
+    // TAKE IT above a list headed "Stay out".
+    takeIt: winner.key !== 'stay',
+    winner,
+    plans: gaps,
+    marginSec: runnerUp
+  };
+}
+
 // Who sits in the car after a stop taken now: a double-stint driver stays for
 // their second stint, otherwise the eligible driver (night / rain / drive-time
 // regulations permitting) with the least seat time takes over.
-export function nextDriverCall(car, calcs, now) {
+// The driver the stint plan puts in the car for the stint AFTER the one running.
+// Returns null when there is no plan, or the plan has run out of stints.
+export function plannedNextDriver(car, race, now) {
+  const plan = car.plan;
+  if (!plan?.stints?.length) return null;
+  // The running stint sits at stintHistory.length; the stop being planned for
+  // ends it, so the stint that follows is the next row after that.
+  const idx = car.stintHistory.length + (raceClock(race, now).running ? 1 : 0);
+  const st = plan.stints[idx];
+  if (!st) return null;
+  return car.drivers.find(d => d.id === st.driverId) || null;
+}
+
+export function nextDriverCall(car, calcs, now, opts = {}) {
   const cur = car.drivers.find(d => d.id === car.currentDriverId) || null;
   const night = isNightAt(now);
   const wet = car.condition === 'wet';
+  const stintMs = opts.stintMs || 0;
+  const reg = calcs.reg;
+
+  // Seat time a driver may still legally run, measured against the stint this
+  // stop would START — not merely "has any time left". A driver eight minutes
+  // from their limit is no use at the front of a sixty-minute stint, which is
+  // the same test the tyres two blocks up already apply to themselves.
+  const shortfallOf = d => {
+    if (!reg?.enabled) return null;
+    const s = reg.byDriver[d.id];
+    if (!s) return null;
+    if (s.eligible === false) return 0;
+    if (s.driveLeftMs == null) return null;
+    return s.driveLeftMs < stintMs ? s.driveLeftMs : null;
+  };
+  const canTake = d => shortfallOf(d) == null;
+
   const fits = d => (!night || d.night) && (!wet || d.rain) &&
-    (!calcs.reg?.enabled || calcs.reg.byDriver[d.id]?.eligible !== false);
+    (!reg?.enabled || reg.byDriver[d.id]?.eligible !== false);
+
+  // The stint plan is the crew's own running order — generated from the driver
+  // table, then edited by hand through the race — so it decides who gets in,
+  // not the balancing heuristic below. The heuristic is only the fallback for
+  // a car with no plan, and the safety net when the plan names someone who
+  // cannot legally finish the stint.
+  const planned = opts.race ? plannedNextDriver(car, opts.race, now) : null;
+  if (planned && canTake(planned)) {
+    const change = !cur || planned.id !== cur.id;
+    return {
+      change,
+      driver: planned,
+      source: 'plan',
+      why: change ? 'next in the stint plan' : 'stint plan keeps the same driver in'
+    };
+  }
+  const planShortfall = planned ? shortfallOf(planned) : null;
+
   let pool = car.drivers.filter(fits);
   const forced = pool.length === 0;
   if (forced) pool = car.drivers.slice();
@@ -1964,18 +3411,29 @@ export function nextDriverCall(car, calcs, now) {
     if (car.stintHistory[i].driverId === car.currentDriverId) run++;
     else break;
   }
-  if (cur && cur.doubleStint && run === 1 && pool.some(d => d.id === cur.id)) {
-    return { change: false, driver: cur, why: 'double stint — same driver stays in' };
+  if (cur && cur.doubleStint && run === 1 && pool.some(d => d.id === cur.id) && canTake(cur)) {
+    return { change: false, driver: cur, source: 'auto', why: 'double stint — same driver stays in' };
   }
   let cands = pool.filter(d => !cur || d.id !== cur.id);
   if (!cands.length) cands = pool;
-  cands.sort((a, b) => (calcs.reg?.byDriver[a.id]?.totalMs || 0) - (calcs.reg?.byDriver[b.id]?.totalMs || 0));
+  // Anyone who can see the whole stint out comes first; within each group the
+  // least seat time still wins, so the balancing is untouched.
+  cands.sort((a, b) => (canTake(b) - canTake(a)) ||
+    ((reg?.byDriver[a.id]?.totalMs || 0) - (reg?.byDriver[b.id]?.totalMs || 0)));
   const pick = cands[0];
-  return {
-    change: !cur || pick.id !== cur.id,
-    driver: pick,
-    why: forced ? 'no eligible driver — least seat time' : 'least seat time of the eligible drivers'
-  };
+  const pickShort = shortfallOf(pick);
+  let why;
+  if (planShortfall != null) {
+    // The plan is editable and this is the engineer's cue to edit it.
+    why = `${planned.name} is ${fmtMinSec(planShortfall)} from the drive limit — plan needs a change`;
+  } else if (planned) {
+    why = 'plan driver unavailable — least seat time';
+  } else if (pickShort != null) {
+    why = `no driver covers the stint — ${fmtMinSec(pickShort)} of drive time left`;
+  } else {
+    why = forced ? 'no eligible driver — least seat time' : 'least seat time of the eligible drivers';
+  }
+  return { change: !cur || pick.id !== cur.id, driver: pick, source: planned ? 'plan-override' : 'auto', why };
 }
 
 // One plan. `pace` is the situation it answers for: null = green, 'fcy' =
@@ -2023,21 +3481,63 @@ export function recommendedStop(car, race, now, opts = {}) {
   // ---- tyres: change when the set on the car cannot cover the stint that
   // would follow this stop, and never when it already reaches the flag.
   const reachFlag = calcs.msToTyres >= rem && rem > 0;
-  const change = running && !reachFlag && calcs.msToTyres < stintMs;
+  const due = running && !reachFlag && calcs.msToTyres < stintMs;
+
+  // A set that is not due can still be worth fitting under a neutralisation.
+  // The life rule above only asks whether the rubber survives the next stint;
+  // it never notices that the flag has just made the box work cheap. Fresh
+  // rubber starts the coming stint however many kilometres younger, and stays
+  // that much younger every lap of it — once that beats the discounted box
+  // time, the change pays for itself.
+  //
+  // Two things hold it back. There has to be a set free, and the garage has to
+  // be able to afford it: on a fixed allocation a set binned early is distance
+  // that cannot be bought back, so while the stock is short the life rule
+  // stands and the reason says so.
+  let opportunity = false;
+  let oppWhy = '';
+  if (neutral && running && !due && !reachFlag && calcs.lapMs > 0) {
+    const spare = stopTyreSet(car);
+    const budget = tyreBudget(car, race, now, calcs);
+    const kmOn = tyreSetMileage(currentTyreSet(car)).km;
+    const lapsAhead = Math.max(0, Math.round(stintMs / calcs.lapMs));
+    const gainSec = (cfg.tyreDegSecPerKm || 0) * kmOn * lapsAhead;
+    const rig = refuelTimeSec(cfg, fuel.addL);
+    const costSec = pitCostSec(car, pace, { refuelSec: rig, boxWorkSec: cfg.tyreChangeSec || 0 }).lossNeutral
+      - pitCostSec(car, pace, { refuelSec: rig }).lossNeutral;
+    if (gainSec > costSec && spare) {
+      if (budget && !budget.affordEarlyChange) {
+        // The gain is real but the shelf cannot pay for it: an early change
+        // spends a fresh set the flag distance still needs.
+        oppWhy = `worth ${Math.round(gainSec)} s under the flag, but that spends a fresh set — `
+          + `${budget.setsFresh} left for ~${budget.setsNeededMin} the flag still needs. Keep the set`;
+      } else {
+        opportunity = true;
+        oppWhy = `free under the flag — ${Math.round(gainSec)} s of wear for `
+          + `${Math.round(costSec)} s of box time`
+          + (budget ? ` · leaves ${budget.setsFresh - 1} fresh for ~${Math.max(0, budget.setsNeededIfChangeNow - 1)} needed` : '');
+      }
+    }
+  }
+
+  const change = due || opportunity;
   const fit = change ? stopTyreSet(car) : null;
   const tyres = {
     change: !!change,
     set: fit,
     setId: fit?.id || null,
+    // True when the rubber is not due and the flag is what makes it worth doing.
+    opportunity,
     why: !running ? 'race not started'
       : reachFlag ? `${calcs.tyreLapsLeft} laps left — reaches the flag`
-      : change ? (fit ? `${calcs.tyreLapsLeft} laps left, next stint ${Math.round(stintMs / calcs.lapMs)}`
+      : opportunity ? (fit ? oppWhy : 'no set free — every spare is used or scrapped')
+      : due ? (fit ? `${calcs.tyreLapsLeft} laps left, next stint ${Math.round(stintMs / calcs.lapMs)}`
                       : 'no set free — every spare is used or scrapped')
-      : `${calcs.tyreLapsLeft} laps left — good for another stint`
+      : oppWhy || `${calcs.tyreLapsLeft} laps left — good for another stint`
   };
 
   // ---- driver
-  const dc = nextDriverCall(car, calcs, now);
+  const dc = nextDriverCall(car, calcs, now, { race, stintMs });
   const drvMs = Math.min(...calcs.limits.filter(l => l.key === 'driver' || l.key === 'reg').map(l => l.ms));
   const driver = {
     change: running && dc.change,
@@ -2048,12 +3548,18 @@ export function recommendedStop(car, race, now, opts = {}) {
       : dc.why
   };
 
-  // ---- brakes: components that cannot survive another stint
+  // ---- brakes: parts that cannot survive another stint, read by axle.
+  // Discs that are done take their pads with them — a kit comes off as a kit,
+  // and fresh discs would only chew through the old pads anyway.
   const brakes = [];
-  for (const b of BRAKE_COMPONENTS) {
-    const leftMs = calcs.brakes[b.id].leftH * 3600e3;
-    if (leftMs >= rem && rem > 0) continue; // reaches the flag
-    if (leftMs < stintMs) brakes.push(b.id);
+  const dueOf = comp => {
+    const leftMs = calcs.brakes[comp].leftH * 3600e3;
+    if (leftMs >= rem && rem > 0) return false; // reaches the flag
+    return leftMs < stintMs;
+  };
+  for (const a of BRAKE_AXLES) {
+    if (dueOf(a.discs)) brakes.push(a.pads, a.discs);
+    else if (dueOf(a.pads)) brakes.push(a.pads);
   }
 
   // ---- what this stop costs, and what the neutralisation takes off it.
@@ -2199,19 +3705,26 @@ export function resolveStop(car, plan) {
     ? (plan.driver.change ? plan.driver.id : null)
     : (pin.driver === 'stay' ? null : pin.driver);
 
-  const brakeIds = pin.brakes == null ? plan.brakes : pin.brakes;
+  // Read the call by axle, so a pin naming discs alone still comes out as the
+  // kit it has to be, and both halves of a kit come off the SAME kit rather
+  // than each being answered on its own.
+  const work = brakeAxleWork(pin.brakes == null ? plan.brakes : pin.brakes);
+  const brakeIds = brakeWorkComps(work);
   const brakes = {};
+  for (const b of BRAKE_COMPONENTS) brakes[b.id] = brakeIds.includes(b.id);
   // Which numbered set each changed component gets: the one the engineer
   // picked, else whatever the app would take off the rack. A component that is
   // not being changed carries no set.
-  const brakeSetIds = {};
-  for (const b of BRAKE_COMPONENTS) {
-    const change = brakeIds.includes(b.id);
-    brakes[b.id] = change;
-    const pinId = pin.brakeSets?.[b.id] || null;
-    brakeSetIds[b.id] = change
-      ? (pinId || stopBrakeSet(car, b.id, { brakeSetIds: {} })?.id || null)
-      : null;
+  const brakeSetIds = { padsFront: null, padsRear: null, discsFront: null, discsRear: null };
+  const pinned = { brakeSetIds: { ...(pin.brakeSets || {}) } };
+  for (const a of BRAKE_AXLES) {
+    if (work[a.id] === 'kit') {
+      const kit = stopBrakeKit(car, a.id, pinned);
+      brakeSetIds[a.discs] = kit?.disc?.id || null;
+      brakeSetIds[a.pads] = kit?.pad?.id || null;
+    } else if (work[a.id] === 'pads') {
+      brakeSetIds[a.pads] = stopPadSet(car, a.id, pinned)?.id || null;
+    }
   }
 
   return {
@@ -2372,18 +3885,19 @@ export function replanFromNow(car, race, now) {
   let prevRun = 0;
   if (car.state.stintStartMs) {
     const calcs = carCalcs(car, race, now);
+    const stintFromMs = calcs.stintStartMs;
     const stopAt = Math.min(now + calcs.limit.ms, startMs + clock.totalMs);
     stints.push({
       driverId: car.currentDriverId,
-      fromMs: car.state.stintStartMs - startMs,
+      fromMs: stintFromMs - startMs,
       toMs: stopAt - startMs,
       laps: car.state.lapsThisStint + Math.max(0, Math.round(calcs.limit.ms / calcs.lapMs)),
       fuelL: null,
-      night: isNightAt(car.state.stintStartMs),
+      night: isNightAt(stintFromMs),
       current: true
     });
     if (totals[car.currentDriverId] != null) {
-      totals[car.currentDriverId] += stopAt - car.state.stintStartMs;
+      totals[car.currentDriverId] += stopAt - stintFromMs;
     }
     fromMs = stopAt - startMs + (car.config.pitLossSec || 0) * 1000;
     prevDriverId = car.currentDriverId;
@@ -2434,7 +3948,7 @@ export function planVsActual(car, race, now) {
         planned: s,
         status: 'current',
         actualDriverId: car.currentDriverId,
-        actualFromMs: car.state.stintStartMs - startMs,
+        actualFromMs: stintStartOf(car, race) - startMs,
         actualLaps: car.state.lapsThisStint,
         driverMismatch: car.currentDriverId !== s.driverId
       };

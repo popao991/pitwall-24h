@@ -26,8 +26,68 @@ mid-race loses nothing.
    same PC (handy for testing both roles on one machine). The address, port
    and car slot can be changed later from the running station under
    **⚙ SETTINGS → CONNECTION**.
-3. On the pit wall, press **START RACE** when the race goes green. That starts
+3. **Load each car's car file** — on the station under
+   **⚙ SETTINGS → CAR FILE → LOAD CAR FILE…**, or for all four from the pit
+   wall under **⚙ SETTINGS → RACE → LOAD FILE** on each car's row. That is the
+   whole car setup (fuel, pace, wear, drivers, tyre and brake racks) in one
+   action; the files are written before the event, see
+   [Car files](#car-files--the-setup-that-belongs-to-the-car).
+4. On the pit wall, press **START RACE** when the race goes green. That starts
    the 24h clock and every car's first stint.
+
+## Car files — the setup that belongs to the car
+
+Two kinds of setting live in this app and they are easy to confuse:
+
+- **Event settings** — track length, pit lane, refuelling rig, drive-time
+  regulations. The same for all four cars, set **once on the pit wall** (RACE
+  tab), pushed to every car instantly; stations show them read-only.
+- **Car settings** — the tank, the burn rates, the average laps, the tyre and
+  brake life, the tyre-change time, the driver line-up with their own
+  consumption figures, and the tyre and brake racks. Different for every car,
+  and set on the car.
+
+A **car file** is that second list written down: one JSON file per car holding
+everything that is the car and nothing that is the event, so the line between
+the two is no longer something you have to remember — it is what is in the
+file.
+
+**Prepared before the event, with no pit wall running.** Start a station on any
+PC and open **⚙ SETTINGS**. With no link the pages do not sit empty waiting for
+a server: they fill in a **draft car** kept on that PC — car information, fuel,
+pace, wear, the driver table, and the full tyre and brake racks (ADD SET and
+GENERATE SETS… work exactly as they do live). An amber banner says so, so a
+setup typed into the draft can never be mistaken for one sent to a car. When it
+is right, **CAR FILE → SAVE CAR FILE…** writes it out.
+
+**Loaded in one action.** On the day:
+
+- From the car's own station: **⚙ SETTINGS → CAR FILE → LOAD CAR FILE…**.
+- From the pit wall: **⚙ SETTINGS → RACE → LOAD FILE** on that car's row —
+  all four cars can be set up from one seat.
+
+Either way the pit wall applies it, so every screen lands on the same setup at
+the same moment.
+
+**What a load does not touch.** Laps, mileage, banked brake hours, seat time
+and every tyre or brake set that has already run stay exactly as they are, and
+the event settings are never overwritten — so a file can be loaded at 3 a.m.
+to correct a wrong tank size without costing the car its race. Rack names from
+the file replace only the sets nobody has run; a set that is on the car, used
+or scrapped keeps its place and its mileage.
+
+**The file itself** is plain JSON, grouped the way the settings tabs are
+(`car`, `fuel`, `pace`, `wear`, `drivers`, `tyreRack`, `warmerRack`,
+`brakeRack`), with a `_readme` line inside explaining itself. It can be read,
+diffed and filled in in a text editor by somebody who never opens the app — a
+decimal comma, a missing section or an unknown field are all handled: what is
+there is read, what is not leaves the car as it is. Files are saved as
+`<number>-<name>.pitcar.json`, so four of them sort sensibly in one folder.
+
+**Presets vs car files.** A preset does the same job for a car setup but lives
+inside the shared state on the pit wall PC: instant to load on any car, and it
+needs a running pit wall. A car file is a file — it survives a rebuilt PC, goes
+in an e-mail, and can be written the week before with nothing running at all.
 
 ## How a station works
 
@@ -148,22 +208,55 @@ mid-race loses nothing.
   time — and when. The **timeline** shows driven stints (solid, coloured per
   driver), the projected rest of the current stint (faded), and projected
   future stops (red ticks) to the end of the 24 hours.
-- **Brakes** accrue running hours per component (pads F/R, discs F/R) against
+- **Brakes** accrue running hours per part (pads F/R, discs F/R) against
   the life you set; meters go amber at 75 %, red at 90 %.
-- **Brake sets are numbered**, one pool per component group — front discs are a
-  numbered pair, rear discs another, and so are the front and rear pads. The
-  brake panel shows the number on the car next to each gauge; SETTINGS → TYRES
-  & BRAKES has the full rack, where you type the number written on the part,
-  correct its hours, and add, remove, scrap or restore sets. A stop that changes
-  a component banks its hours into the outgoing set and fits the one chosen in
-  the stop planner (**SELECT PARTS…** — default: the next unused set);
-  refitting a used set starts it pre-worn with its recorded hours. The wall card
-  tells the crew exactly which numbers to have on the trolley.
+- **Pads are bedded onto discs, and that pair is a KIT.** A pad set bedded onto
+  a disc set is what the car runs and what a stop calls for by name — F1, F2,
+  R1 — with the two part numbers as the detail underneath. The brake panel is
+  read by axle under the name of the kit on it; SETTINGS → TYRES & BRAKES shows
+  the rack the way the crew lays it out: one board per axle, every disc set a
+  line of its own with the pads bedded onto it indented underneath, and the pad
+  sets that are bedded onto nothing collected under **AVAILABLE PADS**.
+  **BED PADS…** on a disc line (or **BED ONTO…** on a free pad set) marries a
+  pair and names the kit; **UNBED** takes it apart. A kit is one-to-one: bedding
+  pads that already belong to another disc set moves them, and the kit that is
+  on the car cannot be taken apart on paper while those two parts are running
+  together. Whatever comes out of the box is a kit — fit fresh pads onto the
+  discs already on the car and the rack re-ties itself to match.
+- **Brake sets are numbered**, one pool per part group — front discs are a
+  numbered pair, rear discs another, and so are the front and rear pads. You
+  type the number written on the part, correct its hours, and add, remove,
+  scrap or restore sets. Scrapping half a kit dissolves it: nothing stays bedded
+  onto a part that is in the bin. **GENERATE SETS…**
+  writes whole pools at once: tick the component groups a delivery covers, then
+  give a naming pattern, a starting number and a count. `[P]` is each group's own
+  prefix (PF, PR, DF, DR), so one pattern names the lot — `[P][#]` → PF7, PR7,
+  DF7, DR7, and `[P] [##]` → PF 07. The starting number continues the series
+  already on the rack, every pool previews on its own line, a part number that
+  already exists is flagged instead of duplicated, and **REPLACE UNUSED** sweeps
+  out the sets nobody has run while the parts on the car, every used set and
+  every scrapped one stay with their hours. A stop that changes
+  a part banks its hours into the outgoing set and fits the one chosen in
+  the stop planner (**SELECT PARTS…** — kits for an axle having its kit changed,
+  free pad sets for one only having pads); refitting a used set starts it
+  pre-worn with its recorded hours. Left to the app, a kit change takes the
+  first made-up kit nobody has run, and a pads-only change takes a pad set that
+  is bedded onto nothing — so a kit already married up is never robbed of its
+  pads. The wall card tells the crew the kit and exactly which numbers to have
+  on the trolley.
 - **Tyre sets are named** (S1, S2, …): the tyre panel shows which set is on the
   car, its laps, and how many fresh sets are left. SETTINGS → TYRES & BRAKES
   has the full set list — rename sets, correct their lap counts, add or remove
-  sets. A stop with TYRES moves the current wear into the outgoing set and fits
-  the set chosen in the stop planner (**FIT SET** — default: the next new set);
+  sets. **GENERATE SETS…** writes the whole allocation in one go: a naming
+  pattern (`[#]` is where the number goes, `[###]` pads it to 001), a starting
+  number and a count, with a live preview of the names before anything is
+  committed — so the list reads the way the stickers on the rubber do
+  (`S[#]_GVP` → S1_GVP, S2_GVP…). A name already in the pool is flagged instead
+  of silently doubled, and **REPLACE UNUSED** sweeps out the sets nobody has run
+  yet (the placeholder S1–S12 a car starts with) while the set on the car, every
+  used set and every scrapped one stay, mileage and all. A stop with TYRES
+  moves the current wear into the outgoing set and fits the set chosen in the
+  stop planner (**FIT SET** — default: the next new set);
   refitting a used set starts it pre-worn with its recorded laps, so the wear
   meter always reads total laps on the rubber. The wall card tells the crew
   exactly which set to have ready.
@@ -175,6 +268,18 @@ mid-race loses nothing.
   neutralisation. Yellow kilometres are far gentler on the rubber, so at the
   flag the split is what says whether a 280 km set is worn out or has spent an
   hour crawling behind a safety car. UNDO LAP takes the mileage back too.
+- **Tyre warmers** — the icon at the top right of the station's TYRES & BRAKES
+  card. The rack says what rubber the team owns; the warmers say what is ready
+  to go on. Clicking it opens the boxes: **+ / −** sets how many warmers the
+  garage has (0 for a team that runs without, up to 12), and each one has a
+  picker holding at most one set out of that same stock. The badge on the icon
+  reads how many are loaded (2/4), and turns amber when the set the next stop
+  is fitting is in none of them — which is the question the crew actually asks
+  at 03:00. The rules are the ones the garage already works to: a set is only
+  ever in one place (carrying it to another box moves it), the set on the car
+  is never in a warmer, a scrapped set comes straight out of the one it was in,
+  and a set fitted at a stop leaves its box the moment it goes on. The count and
+  the names travel in a car file; what is in them is race data and does not.
 - **KEEP or SCRAP, asked at the stop**: when a set comes off, the station shows
   what it banked (laps, km, green/yellow split, % of life) and asks. The app
   offers an opinion — scrap past 90 % of life — but never decides. Scrapping
@@ -230,8 +335,11 @@ mid-race loses nothing.
     four rows in your head.
   - **Four lines, every option on screen**: FUEL (APP / FULL / TO END / SET),
     TYRES (APP / KEEP / NEW SET / SELECT SET…), DRIVER (APP / STAYS IN / each
-    driver), BRAKES (APP / NONE / each component / SELECT PARTS…). Each line
-    names the numbered set it will fit. Each line either **follows
+    driver), BRAKES (APP / NONE / F PADS / F KIT / R PADS / R KIT / SELECT
+    PARTS…). Brakes are called by axle: **PADS** onto the discs already on the
+    car, or the whole **KIT** — discs never come off without the pads bedded to
+    them, so a disc change is a kit change. Each line names the kit and the
+    numbered parts it will fit. Each line either **follows
     the app** — recomputed as fuel burns, tyres wear and the flag changes — or
     is **pinned** by you and held exactly there. Pinning one line never freezes
     the others, and never touches the other two situations' plans.
@@ -242,7 +350,7 @@ mid-race loses nothing.
     hours before the yellow that needs it. If that plan moves materially
     afterwards its own tick clears itself and both screens say so.
   - **SEND TO CREW** → the wall card goes amber ("NEXT STOP — PREPARE").
-  - **BOX BOX** → the wall card flashes red ("CAR COMING IN"). That is the last
+  - **BOX BOX** → the wall card flashes green ("CAR COMING IN"). That is the last
     button the engineer has to press: with live timing running, the pit-entry
     loop stages the stop and **the pit-exit loop applies it** — tank reset to
     the planned level, tyres/brakes/driver, stint recorded with the *measured*
@@ -256,8 +364,9 @@ mid-race loses nothing.
   - **WENT TO PLAN** signs it into the stint sheet with who said so and when.
   - **NO — SOMETHING CHANGED** opens the same four lines filled in with what
     was applied, for the engineer to change into what the crew actually did:
-    fuel left with, which set really went on (or none), who really got in,
-    which brake parts were really changed and which numbers went on them.
+    fuel left with, which set really went on (or none), who really got in, and
+    per axle whether nothing, the pads or the whole kit was changed — with the
+    numbers that really went on.
     **SAVE WHAT HAPPENED** moves every
     figure to match — as a delta on the state as it stands, so the laps run
     since the stop keep their fuel, mileage and wear, and a correction ten
@@ -313,21 +422,32 @@ mid-race loses nothing.
     used, real L/lap, and the tyre set it ran on — with per-driver rollups.
     It fills itself from the live timing feed (or manual lap times).
 - **⚙ SETTINGS** (top bar) opens the car settings page, organised in tabs
-  (CAR / FUEL / WEAR & PIT / DRIVERS / PRESETS / CONNECTION / DISPLAY):
+  (CAR / FUEL / WEAR & PIT / DRIVERS / CAR FILE / CONNECTION / DISPLAY). With
+  no pit wall to talk to, these pages edit this PC's **draft car** instead of
+  the live one and an amber banner says so — which is how a car file is built
+  before the event:
   - **Car information**: name, number, make, model — shown on the pit wall too.
   - **Fuel consumption model**: per-driver average (the driver table) today; a
     per-driver-per-lap-time model is prepared for when live timing arrives.
   - **Fuel & lap model**: tank size, burn rates and average lap per condition,
     finish margin and safety fuel level.
   - **Degradation & limits**: tyre life, tyre sets, brake pad/disc life hours
-    front & rear, and how many numbered sets of each are in the rack.
+    per axle, and how many numbered sets of each are in the rack.
+  - **Tyre sets**: the named pool — add one set, or GENERATE SETS… for the whole
+    allocation from a naming pattern, a starting number and a count.
+  - **Brake rack**: the axle boards — disc sets with their bedded pads nested
+    under them, free pad sets underneath — where kits are made, named and taken
+    apart, with the same GENERATE SETS… across as many part groups as a delivery
+    covers ([P] = the group's prefix).
   - **Driver table**: per driver — name, abbreviation, timing name, double
     stints yes/no, night yes/no, rain yes/no, and personal fuel consumption in
     dry and wet (L/lap). While a driver is in the car, their own dry/wet figure
     drives the fuel burn and every projection; 0 falls back to the car default.
     Capability flags show as ⏩ 🌙 🌧 badges in the Drivers panel. The
     **abbreviation** is the short code shown in compact readouts (empty =
-    derived from the surname); the **timing name** is the driver's name exactly
+    derived from the name: first letter of the first name + first two of the
+    last, "Roman Rusinov" → RRU — the field's placeholder proposes it); the
+    **timing name** is the driver's name exactly
     as the live timing feed prints it (a surname is enough, empty = match on
     the name). When the feed's driver text matches a roster driver, the
     standings rows for the team's cars carry the driver's code, and the NOW
@@ -345,10 +465,16 @@ mid-race loses nothing.
     legs in the event settings. The per-lap delta and the discount are separate
     figures on purpose: the first is what the neutralisation does to the race,
     the second is what pitting under it does for you.
-  - **Setup presets**: save the car's complete setup (car info, fuel model,
-    wear, pit timing, driver table) under a name and load it back instantly —
-    on any car. Presets are stored in the shared state on the pit wall PC, so
-    every station sees the same list.
+  - **Car file**: SAVE CAR FILE… writes everything that belongs to this car —
+    car info, fuel model, pace, wear limits, tyre-change time, the whole driver
+    table with its fuel curves, and the tyre and brake racks by name — to one
+    JSON file; LOAD CAR FILE… reads one back. Event settings are deliberately
+    not in it, and loading never touches laps, mileage, seat time or any set
+    that has run. See [Car files](#car-files--the-setup-that-belongs-to-the-car).
+  - **Setup presets**: the same setup saved under a name instead of to a file,
+    loadable instantly on any car. Presets are stored in the shared state on the
+    pit wall PC, so every station sees the same list — and so they need a
+    connected station, where a car file does not.
   - **Connection**: shows which pit wall PC this station is connected to
     (`ws://<ip>:<port>` and live status) and lets you change the address, port
     or car slot without going back to the start screen — APPLY & RECONNECT
@@ -399,7 +525,21 @@ thing carrying colour: under a splash-and-dash that is the whole message.
 Figures are the ones
 a mechanic acts on — FULL rather than a litre count that keeps moving, the rig
 figure and seconds, the set number with its mileage, the driver's name, which
-brake parts and the number of each. The row that forces the next stop is marked.
+brake work by axle — the kit's name, then the numbers to pull off the rack. The
+row that forces the next stop is marked.
+
+**Colour on a card is the instruction, not a health score.** The board is read
+by people with parts in their hands, so it uses the only two colours everybody
+already reads the same way: **green means it changes** — the car comes in, that
+set comes off, that driver gets out — and **red means it stays as it is** —
+stay out, KEEP, STAYS IN, NO FUEL. Green cells carry a tint as well as the
+figure, so what has to be fetched is what pulls the eye from across the garage;
+red is text alone, because a car with nothing to change must not read as an
+alarm. **Amber** never answers box-or-stay: it only warns about the answer —
+the stop is sent and the crew should prepare, the fuel is running low, the row
+that forces the next stop, or a change that is asked for with nothing free in
+the rack to do it with. **Blue** is the stop already happening (car in the pit
+lane). The words always say it too, so nobody has to know the code.
 
 Under the list, the card says whether an engineer has read the plan the stop
 would actually follow — the flag that is flying, or the plan the engineer is
@@ -413,8 +553,25 @@ Nothing on a card scrolls or ends in an ellipsis: the verdict line, the
 station warnings and the crew's note for the stop wrap onto a second line
 instead, because the crew glances up once and has to have the whole answer.
 
+**When more than one car is coming in, the head of each card says who goes
+first.** One crew services four cars, so the moment something happens — a flag
+drops, or a second stop is sent — the question stops being *is this car coming
+in* and becomes *which one do we take first*. The answer sits next to the car
+number, where the eye already is: **1st**, **2nd**, **3rd** *of 3 to box*, with
+the car the crew can act on right now in green. It is not a guess. The order is
+read straight off the same pit arrival estimate the card's own sub-line shows —
+the car's position reconstructed from its last timing-loop crossing, carried
+forward at green pace up to the flag and at the neutralisation speed after it —
+so the car with the shortest run left to the box is the one that gets the box
+first. A car already in the pit lane is at the front by definition (*in the
+lane*, longest-standing first), and an estimate that has been dead-reckoning for
+more than a lap without a fresh crossing is marked as the estimate it is
+(*~3rd*). A car the feed cannot place is left out rather than given a made-up
+slot. The badge is on screen only while two or more cars are actually inbound —
+a queue of one is not an order — so its appearing is itself the news.
+
 Once a stop is sent the card collapses to that one work order, goes amber
-("NEXT STOP — PREPARE") and then red ("CAR COMING IN"). A blue card means the
+("NEXT STOP — PREPARE") and then flashing green ("CAR COMING IN"). A blue card means the
 car is in the pit lane (fuel burn paused); when the stop completes the card
 returns to idle and the new stint starts. The wall card's own 🅿 / ✔ buttons
 exist only as a backup (e.g. a station PC dies mid-stop).
@@ -430,9 +587,14 @@ settings** — track length, FCY / Code-60 speed, pit lane speed limit, pit lane
 length, pit-lane loss, refuel pump speed, rig dead time, max stint, and the **drive-time
 regulations** (max drive per rolling 6 h, max drive total, min rest between
 stints; 0 = not enforced) — values that are by nature the same for every car:
-change one here and it is pushed to all four cars instantly (presets and
-station patches can never override them; stations show them read-only under
-PIT & FCY). From the pit lane length and speed limit
+change one here and it is pushed to all four cars instantly (presets, car files
+and station patches can never override them; stations show them read-only under
+PIT & FCY). The same tab's car rows carry **LOAD FILE** / **SAVE FILE**: one
+car's whole setup read from or written to a car file, from the wall, for any of
+the four. They start on Zolder's official figures — 4,007 km, pit IN to pit
+OUT 411 m, intermediates at 1376,4 m and 2864,6 m from a start line at offset
+0 — so a fresh race is already measuring the right lap; type over them for any
+other circuit. From the pit lane length and speed limit
 it shows how long the lane takes to drive at the limit, and how much of the
 pit-lane loss that leaves for entry/exit braking and the detour — a quick sanity
 check on the loss figure every other calculation depends on.
@@ -607,6 +769,38 @@ Turn AUTO off to keep a car on manual lap logging. AUTO only counts laps
 while the race clock runs, and survives a pit wall restart: a feed that was
 connected reconnects automatically on boot.
 
+### When the feed dies mid-race
+
+The timing link is somebody else's network and it will not ask before it goes.
+Losing it costs the app nothing that cannot be done by hand, and it hands the
+work back on its own — no setting to find, no mode to switch.
+
+- **The race keeps running.** The clock is the app's own again (it never
+  freezes with the feed), the flag falls back to whatever the pit wall calls
+  by hand, and a manual FCY / SC / RED made before the drop is kept. The
+  reconnect is automatic, 5 s backing off to 30 s, and the top bar says
+  **FEED RETRYING** the whole time.
+- **Lap logging comes back by itself.** The **+ LAP** card returns on every
+  station within a second and the Inputs panel says `manual · N laps` instead
+  of `feed · N laps`.
+- **The stop is markable by hand at any point.** **CAR IN PIT LANE** appears
+  wherever it is needed — not only on a stop that was boxed — so an unplanned
+  arrival (damage, a puncture, a driver called in off-plan) is logged in one
+  press, and **STOP DONE — CAR RELEASED** closes it.
+- **The laps run during the outage are put back.** Lap *events* are lost with
+  the link, but the lap *number* the feed publishes is not: it is tracked per
+  car, held across the outage, and the difference when the feed returns —
+  less whatever the crew logged by hand in the meantime, so nothing is ever
+  counted twice — goes back onto the counters and the tyre. The station says
+  what happened (`3 laps put back — run while the timing feed was down`), and
+  a discrepancy too large to trust is reported rather than applied.
+- **The count is settable outright.** **Correct total laps → SET** on the
+  station is the floor under all of it, feed or no feed: the stint, the tyre
+  on the car and its banked mileage all move with the number.
+- **The start time is editable again.** Ticking *keep locked to the feed* no
+  longer greys the field out once the feed is gone — the lock stays on and
+  resumes when the link is back.
+
 **Tracker** (TRACKER tab, pit wall and stations): a live track map of Circuit
 Zolder with every car as a moving dot — our four cars in the accent colour, a
 pulsing ring on cars in the pit lane, and a running-order rail (position, car,
@@ -619,8 +813,9 @@ arrives. The track is coloured by timing sector (S1 red, S2 yellow-green,
 S3 cyan, matching the official sector map) with a badge per sector and the
 boundary loops and start/finish line drawn on the map; the rail's sector chip
 uses the same colours. Sector boundaries come from the feed's timing-loop
-distances when a tracker feed is live, and fall back to Zolder's traced
-sector fractions otherwise. On feeds without tracker data (Al Kamel), dots fall back to the running
+distances when a tracker feed is live, and fall back to Zolder's official
+intermediates otherwise — Int 1 at 1376,4 m and Int 2 at 2864,6 m of 4007 m,
+straight off the circuit's own track map. On feeds without tracker data (Al Kamel), dots fall back to the running
 lap clock (lap start + last lap time), which is coarser but keeps the map
 alive. The circuit outline is traced from `Zolder.svg` (the feed carries no
 geometry); if the start/finish anchor or running direction ever look wrong
@@ -673,7 +868,20 @@ Every installed copy on the 5 PCs picks the new version up on its next launch.
 npm start        # run the app
 npm test         # headless server/strategy-model test suite
 npm run test:ui  # loads every screen in hidden windows, fails on console errors
+npm run test:brakes  # drives the brake rack board on a real station, writes test/brake-rack*.png
 ```
+
+**Two copies on one PC** (a station beside the pit wall — demos, test days):
+the second copy needs its own profile folder or the two instances fight over
+the same localStorage. `test\demo-station.cmd` starts one set up that way, or
+set `PITWALL_USER_DATA=<dir>` before `npm start`.
+
+**Demoing the app**: `node test/demo-setup.mjs` (against a running pit wall)
+configures the four cars as the LMP2 entries of the recorded
+getraceresults demo session and links them to its race numbers, so a session
+replay (SETTINGS → REPLAYS) drives standings, tracker and driver-matching for
+a realistic, pausable presentation. The presenter script lives in
+`docs/demo-run-of-show.html`.
 
 Layout: `main.js` + `preload.cjs` + `app-protocol.cjs` (Electron shell),
 `server/server.js` (WebSocket hub + persistence, runs inside the pit wall

@@ -1,0 +1,532 @@
+<title>PitWall Demo Runbook</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --ground: #f4f5f2;
+    --surface: #fdfdfc;
+    --surface-2: #eceee9;
+    --ink: #171d26;
+    --muted: #5a6472;
+    --line: #d9ddd6;
+    --amber: #a06c07;
+    --amber-soft: #f6ead0;
+    --green: #1e7a44;
+    --green-soft: #ddefe3;
+    --red: #b23b32;
+    --red-soft: #f7e2e0;
+    --blue: #2563a8;
+    --blue-soft: #dfe9f5;
+    --chip-ink: #171d26;
+    --mono-bg: #eceee9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #10141a;
+      --surface: #171d26;
+      --surface-2: #1e2631;
+      --ink: #e9ecef;
+      --muted: #9aa4b0;
+      --line: #2a323c;
+      --amber: #e0a52e;
+      --amber-soft: #3a2f14;
+      --green: #4cbf7c;
+      --green-soft: #15321f;
+      --red: #e06a5f;
+      --red-soft: #3b1d1a;
+      --blue: #6aa5e8;
+      --blue-soft: #16283d;
+      --chip-ink: #e9ecef;
+      --mono-bg: #1e2631;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #10141a;
+    --surface: #171d26;
+    --surface-2: #1e2631;
+    --ink: #e9ecef;
+    --muted: #9aa4b0;
+    --line: #2a323c;
+    --amber: #e0a52e;
+    --amber-soft: #3a2f14;
+    --green: #4cbf7c;
+    --green-soft: #15321f;
+    --red: #e06a5f;
+    --red-soft: #3b1d1a;
+    --blue: #6aa5e8;
+    --blue-soft: #16283d;
+    --chip-ink: #e9ecef;
+    --mono-bg: #1e2631;
+  }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: 'Barlow', 'Segoe UI', system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.55;
+    margin: 0;
+    padding: 2.2rem 1.2rem 4rem;
+  }
+  main { max-width: 780px; margin: 0 auto; }
+
+  h1, h2, h3 {
+    font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif;
+    text-wrap: balance;
+    margin: 0;
+  }
+  h1 { font-size: 2.6rem; font-weight: 700; letter-spacing: .01em; line-height: 1.05; }
+  h2 { font-size: 1.45rem; font-weight: 600; letter-spacing: .02em; }
+  h3 { font-size: 1.12rem; font-weight: 600; letter-spacing: .02em; }
+
+  .eyebrow {
+    font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif;
+    font-weight: 600;
+    font-size: .82rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--amber);
+  }
+  header.masthead { margin-bottom: 1.6rem; }
+  .masthead p.lede { color: var(--muted); max-width: 60ch; margin: .6rem 0 0; }
+  .masthead .meta {
+    display: flex; gap: .55rem; flex-wrap: wrap; margin-top: .9rem;
+  }
+
+  .chip, kbd.ui {
+    font-family: 'IBM Plex Mono', Consolas, monospace;
+    font-size: .78rem;
+    font-weight: 500;
+    padding: .1rem .5rem;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .chip { background: var(--surface-2); border: 1px solid var(--line); color: var(--muted); }
+  .chip.time { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  /* button-of-the-app chips — read like the control you are about to press */
+  kbd.ui {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-bottom-width: 2px;
+    color: var(--chip-ink);
+    font-weight: 600;
+    letter-spacing: .02em;
+  }
+  kbd.ui.go { border-color: var(--green); color: var(--green); background: var(--green-soft); }
+  kbd.ui.warn { border-color: var(--amber); color: var(--amber); background: var(--amber-soft); }
+  kbd.ui.stop { border-color: var(--red); color: var(--red); background: var(--red-soft); }
+
+  code, .mono {
+    font-family: 'IBM Plex Mono', Consolas, monospace;
+    font-size: .85em;
+    background: var(--mono-bg);
+    padding: .08rem .35rem;
+    border-radius: 3px;
+  }
+  pre {
+    font-family: 'IBM Plex Mono', Consolas, monospace;
+    font-size: .82rem;
+    background: var(--mono-bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: .7rem .9rem;
+    overflow-x: auto;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+
+  section.card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--line);
+    border-radius: 8px;
+    padding: 1.1rem 1.3rem 1.2rem;
+    margin: 1.1rem 0;
+  }
+  section.card.green { border-left-color: var(--green); }
+  section.card.amber { border-left-color: var(--amber); }
+  section.card.red { border-left-color: var(--red); }
+  section.card.blue { border-left-color: var(--blue); }
+
+  .scene-head {
+    display: flex; align-items: baseline; gap: .7rem; flex-wrap: wrap;
+    margin-bottom: .55rem;
+  }
+  .scene-no {
+    font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif;
+    font-weight: 700; font-size: 1.05rem;
+    color: var(--muted);
+    letter-spacing: .05em;
+  }
+  .scene-head .spacer { flex: 1; }
+
+  ul, ol { margin: .5rem 0; padding-left: 1.3rem; }
+  li { margin: .3rem 0; }
+  li::marker { color: var(--muted); }
+
+  .say {
+    border-left: 3px solid var(--surface-2);
+    padding: .1rem 0 .1rem .8rem;
+    margin: .55rem 0;
+    color: var(--muted);
+    font-style: italic;
+  }
+  .say strong { color: var(--ink); font-style: normal; }
+
+  .do-label, .say-label {
+    font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif;
+    font-weight: 700; font-size: .78rem;
+    letter-spacing: .12em; text-transform: uppercase;
+  }
+  .do-label { color: var(--green); }
+  .say-label { color: var(--muted); }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: .92rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .table-wrap { overflow-x: auto; }
+  th, td {
+    text-align: left;
+    padding: .4rem .7rem .4rem 0;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  th {
+    font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif;
+    font-weight: 600; font-size: .82rem;
+    letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted);
+  }
+  td.t { font-family: 'IBM Plex Mono', Consolas, monospace; font-size: .8rem; white-space: nowrap; }
+
+  .flag {
+    display: inline-block;
+    font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif;
+    font-weight: 700; font-size: .78rem;
+    letter-spacing: .08em;
+    padding: .05rem .45rem;
+    border-radius: 3px;
+  }
+  .flag.g { background: var(--green-soft); color: var(--green); }
+  .flag.y { background: var(--amber-soft); color: var(--amber); }
+  .flag.r { background: var(--red-soft); color: var(--red); }
+  .flag.b { background: var(--blue-soft); color: var(--blue); }
+  .flag.k { background: var(--surface-2); color: var(--ink); }
+
+  .controls {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: .7rem;
+    margin-top: .7rem;
+  }
+  .controls > div {
+    background: var(--surface-2);
+    border-radius: 6px;
+    padding: .6rem .8rem;
+    font-size: .92rem;
+  }
+  .controls b {
+    display: block;
+    font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif;
+    font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+    font-size: .8rem; margin-bottom: .2rem;
+  }
+
+  .qa dt { font-weight: 600; margin-top: .7rem; }
+  .qa dd { margin: .15rem 0 0 0; color: var(--muted); }
+
+  hr.rule { border: 0; border-top: 1px solid var(--line); margin: 2rem 0 1.4rem; }
+  a { color: var(--blue); }
+</style>
+
+<main>
+<header class="masthead">
+  <div class="eyebrow">Run of show &middot; meeting at 16:00</div>
+  <h1>PitWall 24H, shown as a race</h1>
+  <p class="lede">A guided demo built on a real recorded timing session — the Asian Le Mans
+  Series feed, 24 cars, 2 h 08 of racing with two neutralisations. The recording drives the
+  screens; you drive the story, and everything pauses when you do.</p>
+  <div class="meta">
+    <span class="chip">4 team cars: #26 · #34 · #45 · #96 (LMP2)</span>
+    <span class="chip">replay: <span class="time">22 Aug &nbsp;22:15:22 &nbsp;·&nbsp; 127:59 &nbsp;·&nbsp; 878 kB</span></span>
+    <span class="chip">~18 min + Q&amp;A</span>
+  </div>
+</header>
+
+<section class="card amber">
+  <h2>Your three pause levers</h2>
+  <p style="margin:.4rem 0 0">Nothing in this demo runs away from you. The strategy side only
+  moves when you click — the two things that move on their own each have a brake:</p>
+  <div class="controls">
+    <div><b>The timing feed</b> <kbd class="ui">⏸ PAUSE</kbd> in SETTINGS → REPLAYS freezes the
+    replay — standings, tracker, session clock. <kbd class="ui go">PLAY</kbd> resumes; the speed
+    box (1–300×) and the slider jump the story.</div>
+    <div><b>The fuel burn</b> Press <kbd class="ui stop">RED</kbd> (flag buttons, any screen):
+    burn stops race-wide — which is itself a feature to show. Press it again to go racing.</div>
+    <div><b>Everything, back to the start</b> SETTINGS → BACKUPS →
+    <kbd class="ui">RESTORE</kbd> on your snapshot rewinds the whole race state. Your reset
+    button between rehearsals — or mid-meeting.</div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Before the meeting <span class="chip time">15:30</span></h2>
+  <ol>
+    <li>Close every running copy of the app.</li>
+    <li>Terminal in the project folder: <code>npm start</code> → <kbd class="ui go">START PIT WALL</kbd>.</li>
+    <li>Second terminal: <code>node test/demo-setup.mjs</code> — wait for the
+      <span class="mono">DEMO READY</span> block. It names the four cars, links them to the feed,
+      fills the driver tables, and leaves the race un-started.
+      <em>(If the wall's top bar shows a port other than 8484, pass it:
+      <code>node test/demo-setup.mjs &lt;port&gt;</code>.)</em></li>
+    <li>Double-click <code>test\demo-station.cmd</code> → pick <b>Car 1</b>, leave the address
+      empty → <kbd class="ui go">START STATION</kbd>. The badge top-right must read
+      <span class="mono">connected</span> and the header <b>#26 G-Drive Racing By Algarve</b>.</li>
+    <li>On the wall: ⚙ SETTINGS → REPLAYS → open the big entry
+      <span class="mono">22/08 22:15:22 · 127:59 · 878 kB</span> (the list dates each
+      recording by when it <em>ended</em>), OK the confirmation. Press
+      <kbd class="ui go">PLAY</kbd>, let it run to about <span class="mono">1:00</span> so the
+      board fills with the 24-car field, then <kbd class="ui">⏸ PAUSE</kbd>.</li>
+    <li>⚙ SETTINGS → BACKUPS → <kbd class="ui">SAVE SNAPSHOT NOW</kbd> — this is the state
+      every reset returns to.</li>
+    <li>Windows: pit wall on the screen you share; the station one Alt-Tab away
+      (or side by side). This page on a phone or second screen.</li>
+  </ol>
+  <p style="margin:.5rem 0 0"><span class="do-label">Worth one rehearsal</span> — run scenes
+  3–6 once before the meeting, then <kbd class="ui">RESTORE</kbd> the snapshot. Ten minutes,
+  and the stop flow will be in your fingers.</p>
+</section>
+
+<hr class="rule">
+
+<section class="card">
+  <div class="scene-head"><span class="scene-no">SCENE 1</span><h2>The one-app pitch</h2>
+    <span class="spacer"></span><span class="chip time">1 min</span><span class="chip">replay ⏸ 1:00</span></div>
+  <p><span class="say-label">Say</span></p>
+  <p class="say"><strong>One app on five PCs.</strong> Four engineers each run a station for
+  their car; the fifth PC is the pit wall — the big board the mechanics read. The wall hosts
+  the data; stations connect over the local network. Every change is written to disk the
+  moment it happens, so a crash mid-race loses nothing.</p>
+  <p class="say">What's frozen on screen is a <strong>recorded timing session</strong> being
+  re-simulated through the app's own engine — the same path a live feed takes on race day.</p>
+</section>
+
+<section class="card green">
+  <div class="scene-head"><span class="scene-no">SCENE 2</span><h2>The board comes alive</h2>
+    <span class="spacer"></span><span class="chip time">2 min</span><span class="chip">replay ▸ 1:00 → 7:30</span></div>
+  <p><span class="do-label">Do</span></p>
+  <ul>
+    <li>REPLAYS: set speed <b>5×</b>, press <kbd class="ui go">PLAY</kbd>. The field is running
+      behind the safety car.</li>
+    <li>Show the top bar: flag chip, session clock. Show the <b>RACE CONTROL</b> strip and its
+      <kbd class="ui">HISTORY</kbd>.</li>
+    <li>Open the <b>TRACKER</b> tab: 24 dots on the map, running order rail beside it. Click a
+      dot. Back to the cards afterwards.</li>
+  </ul>
+  <p class="say"><span class="say-label">Say</span> Standings, sectors, gaps, pit stops, race
+  control messages, even the track map — decoded once on the wall PC and rebroadcast to every
+  station. The stations never touch the internet.</p>
+  <p><span class="do-label">Cue</span> — at replay <span class="mono">7:30</span> the flag chip
+  goes <span class="flag g">GREEN</span>. Set speed back to <b>1×</b>.</p>
+</section>
+
+<section class="card green">
+  <div class="scene-head"><span class="scene-no">SCENE 3</span><h2>Lights out</h2>
+    <span class="spacer"></span><span class="chip time">2 min</span><span class="chip">replay ▸ 1×</span></div>
+  <p><span class="do-label">Do</span></p>
+  <ul>
+    <li>Press <kbd class="ui go">START RACE</kbd> on the wall.</li>
+    <li>Walk one wall card: the parts down the side (fuel, tyres, driver, brakes), one column
+      per situation — the planned green stop, and what the car needs <em>if a yellow drops this
+      second</em>. Green cells = it changes, red = it stays.</li>
+  </ul>
+  <p class="say"><span class="say-label">Say</span> The 24-hour clock is running and every tank
+  is draining in real time. From this second the app is never without an answer: each card
+  already carries a complete next stop, recomputed every second — the engineer only changes
+  what they disagree with.</p>
+</section>
+
+<section class="card blue">
+  <div class="scene-head"><span class="scene-no">SCENE 4</span><h2>A car station</h2>
+    <span class="spacer"></span><span class="chip time">3 min</span><span class="chip">station · #26</span></div>
+  <p><span class="do-label">Do</span> — Alt-Tab to the station.</p>
+  <ul>
+    <li><b>Fuel panel</b>: burn per lap and per minute, laps to the safety level, the fewest
+      stops that reach the flag, and the pit window (closed — opens in N laps).</li>
+    <li><b>Live timing panel</b>: #26's position, laps and gaps straight off the replayed feed.</li>
+    <li>Press <kbd class="ui">+ LAP</kbd> two or three times with a lap time typed
+      (<span class="mono">1:59.0</span>) — tyre wear and the stint sheet move.</li>
+    <li><b>NEXT PIT STOP</b> card: the plan in a sentence, then the four lines — fuel, tyres,
+      driver, brakes — each following the app until pinned. Show the GREEN / CODE 60 / SAFETY
+      CAR tabs: three separate work orders, each with its own approval.</li>
+    <li><b>Drivers panel</b>: legality clocks against the drive-time rules (2 h per rolling
+      6 h, 8 h total, 1 h rest).</li>
+  </ul>
+  <p class="say"><span class="say-label">Say</span> Fuel burns by time, laps drive the tyres —
+  and with a live feed the laps log themselves; the <b>+ LAP</b> card only exists because the
+  feed can die. Everything here can be corrected mid-race from a real reading.</p>
+</section>
+
+<section class="card amber">
+  <div class="scene-head"><span class="scene-no">SCENE 5</span><h2>A yellow drops</h2>
+    <span class="spacer"></span><span class="chip time">4 min</span><span class="chip">replay ▸ 9:00</span></div>
+  <p><span class="do-label">Do</span></p>
+  <ul>
+    <li>Point at the green-lap strip first: <b>IF A FLAG DROPS NOW</b> — what a Code 60 and a
+      Safety Car would each be worth on this lap, computed in advance.</li>
+    <li>Drag the replay to <span class="mono">9:00</span>, PLAY at 1×. At
+      <span class="mono">9:10</span> the feed's chip flashes <span class="flag y">FCY</span>.</li>
+    <li>Press the <kbd class="ui warn">FCY</kbd> button. Banner on every screen; each car's
+      verdict appears: <em>STAY OUT — box now adds a stop</em>.</li>
+    <li>On the station, time-travel the car 45 minutes into its stint with the two
+      correction controls: <b>Correct total laps</b> → <span class="mono">18</span> →
+      <kbd class="ui">SET</kbd> (stint laps and tyre mileage jump with it), then
+      <b>Correct fuel reading</b> → <span class="mono">18</span> → <kbd class="ui">SET</kbd>.
+      The low-fuel banner comes up amber, the window is OPEN, and the verdict flips:
+      <em>BOX NOW — saves N s · fill to X L</em>.</li>
+  </ul>
+  <p class="say"><span class="say-label">Say</span> The corrections are race-day tools — a
+  real reading beats an estimate any time — which is why they double as the demo's
+  fast-forward: the app happily accepts that 45 minutes just happened. With a live feed all four cars switch
+  automatically the moment the flag flies — the button is the fallback when the feed is late,
+  and whoever sees the boards first makes the call for every screen. A stop costs the same
+  seconds under any flag; what changes is how much track those seconds cost you. Under Code 60
+  the field crawls, so the stop is discounted — the app prices it per car, tyres and driver
+  change included, and it prices the Safety Car differently because the queue runs faster.
+  That difference is where 24-hour races are won.</p>
+</section>
+
+<section class="card blue">
+  <div class="scene-head"><span class="scene-no">SCENE 6</span><h2>The stop, wall and station</h2>
+    <span class="spacer"></span><span class="chip time">4 min</span><span class="chip">replay ⏸ anywhere</span></div>
+  <p><span class="do-label">Do</span> — you can <kbd class="ui">⏸</kbd> the replay here; the
+  stop is yours to pace. Keep the wall visible while clicking on the station.</p>
+  <ul>
+    <li>On the stop card: fuel <kbd class="ui">FULL</kbd>, tyres <kbd class="ui">NEW SET</kbd>,
+      driver <b>Roman Rusinov</b>, brakes <kbd class="ui">NONE</kbd>.</li>
+    <li><kbd class="ui go">APPROVE</kbd> — the plan freezes, signed with name and time; the
+      wall card notes it.</li>
+    <li><kbd class="ui warn">SEND TO CREW</kbd> — wall card goes amber:
+      <span class="flag y">NEXT STOP — PREPARE</span>, with set number and litres.</li>
+    <li><kbd class="ui go">BOX BOX</kbd> — flashing green: <span class="flag g">CAR COMING IN</span>.</li>
+    <li><kbd class="ui">🅿 CAR IN PIT LANE</kbd> — card turns blue, fuel burn pauses.</li>
+    <li><kbd class="ui">STOP DONE — CAR RELEASED</kbd> — the stint closes, and two questions
+      appear in turn:
+      the set that came off (<kbd class="ui">KEEP</kbd> — show the scrap reasons first), then
+      <em>did it go to plan?</em> → <kbd class="ui go">WENT TO PLAN</kbd>.</li>
+    <li>Show the stint sheet row it wrote, and the timeline: the driven stint solid, the rest
+      of the race projected.</li>
+  </ul>
+  <p class="say"><span class="say-label">Say</span> On race day the last human press is BOX BOX
+  — the timing loops mark the car into the lane and apply the whole stop on the way out. The
+  buttons I used are the fallback for a dead feed. Either way, no stop is ever silently assumed
+  right: it keeps asking until an engineer signs it off — and "no, something changed" rewrites
+  the numbers to what the crew actually did.</p>
+</section>
+
+<section class="card amber">
+  <div class="scene-head"><span class="scene-no">SCENE 7</span><h2>The long safety car</h2>
+    <span class="spacer"></span><span class="chip time">2 min</span><span class="chip">replay ▸ 56:30</span></div>
+  <p><span class="do-label">Do</span></p>
+  <ul>
+    <li>Drag the replay to <span class="mono">56:30</span>, PLAY. At
+      <span class="mono">56:40</span> the second neutralisation starts — it runs nine minutes.</li>
+    <li>Press <kbd class="ui warn">FCY</kbd> again and read the wall alone: four cars, four
+      verdicts, one glance. Point at the fixed-litres call: <em>window shut? box under Code 60
+      only from N litres.</em></li>
+    <li>End it (press the flag button again) when you're done — the feed goes green at
+      <span class="mono">65:40</span>.</li>
+  </ul>
+  <p class="say"><span class="say-label">Say</span> Nine minutes of yellow, and the answer for
+  every car was standing on the board before the flag flew. When more than one car comes in,
+  the cards even say who the crew takes first.</p>
+</section>
+
+<section class="card green">
+  <div class="scene-head"><span class="scene-no">SCENE 8</span><h2>Depth, then close</h2>
+    <span class="spacer"></span><span class="chip time">3 min</span><span class="chip">replay ⏸</span></div>
+  <p><span class="do-label">Do</span> — quick hits, don't linger:</p>
+  <ul>
+    <li>📋 PLAN → <kbd class="ui">GENERATE FROM DRIVER SETTINGS</kbd>: a full 24-hour stint
+      plan — night stints to night drivers, seat time balanced — then plan-vs-actual and
+      <kbd class="ui">REPLAN REST FROM NOW</kbd>.</li>
+    <li>⚙ SETTINGS, one breath each: car files prepared at home with nothing running · tyre
+      and brake racks with <kbd class="ui">GENERATE SETS…</kbd> · tyre warmers · backups —
+      <em>press <kbd class="ui">RESTORE</kbd> on the snapshot as the finale: the whole race
+      rewinds in front of them, on every screen at once.</em></li>
+  </ul>
+  <p class="say"><span class="say-label">Say</span> The theme of all of it: the feed can die,
+  a PC can die, a human can mis-click — and the app hands the work back, keeps every number,
+  and never decides alone. It updates itself from releases, and the whole thing runs on the
+  LAN — no cloud, nothing to subscribe to.</p>
+  <p class="say">Pause the replay, leave the wall up for Q&amp;A.</p>
+</section>
+
+<hr class="rule">
+
+<section class="card">
+  <h2>The recording, minute by minute</h2>
+  <div class="table-wrap">
+  <table>
+    <tr><th>Replay</th><th>On the feed</th></tr>
+    <tr><td class="t">0:00</td><td><span class="flag k">SC</span> field circulating behind the safety car, board fills</td></tr>
+    <tr><td class="t">7:30</td><td><span class="flag g">GREEN</span> race start</td></tr>
+    <tr><td class="t">9:10 – 13:50</td><td><span class="flag y">FCY</span> first neutralisation (scene 5)</td></tr>
+    <tr><td class="t">39 – 42:00</td><td><span class="flag b">PIT</span> stop wave — #45 → Barnicoat, #26 → <b>Rusinov</b>, #34 → Winslow</td></tr>
+    <tr><td class="t">56:40 – 65:40</td><td><span class="flag y">FCY</span> the long one, nine minutes (scene 7)</td></tr>
+    <tr><td class="t">91:30</td><td><span class="flag b">PIT</span> #45 → Tincknell</td></tr>
+    <tr><td class="t">2:01:10</td><td><span class="flag k">FINISH</span> chequered flag</td></tr>
+  </table>
+  </div>
+  <p style="margin:.6rem 0 0; color:var(--muted); font-size:.92rem">Flourish, if the moment
+  offers itself: after your scene-6 driver change to Rusinov, scrub past
+  <span class="mono">41:00</span> — the feed's driver column now says Rusinov too, and the
+  station confirms the feed agrees about who is in the car. The same check warns when a radio
+  driver change was never logged.</p>
+</section>
+
+<section class="card red">
+  <h2>If something goes sideways</h2>
+  <ul>
+    <li><b>Numbers look wrong / clicked yourself into a corner</b> — SETTINGS → BACKUPS →
+      <kbd class="ui">RESTORE</kbd> the snapshot. Every screen resets in a second. Say it's a
+      feature — because it is.</li>
+    <li><b>Replay list is empty</b> — <kbd class="ui">REFRESH LIST</kbd>; make sure you're on
+      the pit wall's settings, not the station's.</li>
+    <li><b>Station badge not <span class="mono">connected</span></b> — station ⚙ SETTINGS →
+      CONNECTION → <kbd class="ui">APPLY &amp; RECONNECT</kbd> (address empty, port 8484).</li>
+    <li><b>demo-setup says timeout</b> — the wall isn't started or is on another port; the
+      wall's top bar shows the port to pass.</li>
+    <li><b>Nuclear option</b> — close both copies, <code>npm start</code>, START PIT WALL,
+      BACKUPS → RESTORE, reopen the replay, relaunch the station. Under two minutes.</li>
+  </ul>
+</section>
+
+<section class="card">
+  <h2>Likely questions, one-line answers</h2>
+  <dl class="qa">
+    <dt>What happens when the timing feed dies mid-race?</dt>
+    <dd>The race keeps running on the app's own clock, manual lap logging reappears by itself,
+    and when the feed returns the laps run during the outage are put back on the counters.</dd>
+    <dt>And if the pit wall PC dies?</dt>
+    <dd>State is written to disk on every change plus timestamped snapshots every five minutes;
+    restart, restore, and the stations reconnect on their own.</dd>
+    <dt>Which timing feeds does it speak?</dt>
+    <dd>getraceresults.com pages, Al Kamel pages, and the paid TeamStream team feed directly —
+    and every live session is recorded for replay, which is what you watched today.</dd>
+    <dt>Other circuits than Zolder?</dt>
+    <dd>Track length, pit lane, sectors are event settings typed in once on the wall; Zolder's
+    official figures are just the defaults.</dd>
+    <dt>How does it get to five PCs?</dt>
+    <dd>A Windows installer with auto-update from releases — every PC picks new versions up on
+    launch.</dd>
+    <dt>What does it cost to run?</dt>
+    <dd>It's ours, it runs on the garage LAN, and nothing leaves the building except the
+    connection to the timekeeper's feed.</dd>
+  </dl>
+</section>
+</main>

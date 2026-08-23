@@ -4,12 +4,13 @@
 // The only action here is confirming a completed stop.
 
 import {
-  PORT, carCalcs, raceClock, stopServiceTime, fuelStrategy, pitLaneCalc, pitEta, fmtClock, fmtMinSec,
-  stopTyreSet, tyreSetMileage, isNightAt, BRAKE_COMPONENTS, brakeSetsOf, stopBrakeSet,
+  PORT, carCalcs, raceClock, stopServiceTime, fuelStrategy, pitLaneCalc, pitEta, pitArrivalOrder,
+  fmtClock, fmtMinSec,
+  stopTyreSet, tyreSetMileage, isNightAt, BRAKE_AXLES, stopBrakeAxle,
   recommendedStops, resolveStop, PIT_SERVICE_MARGIN_SEC, PLAN_LABEL, activePlanKey, wallShowsPlan,
   TIMING_FLAGS, fmtLapUs, fmtGapUs, timingNrOf, createFeedSeen, carPickLabel,
   driverAbbrev, matchTimingDriver, pitSegments, pitLaneTimeSec, refuelTimeSec,
-  fuelBreakEven
+  fuelBreakEven, buildCarFile, readCarFile, carFileName
 } from '../../shared/model.js';
 import { connect } from './net.js';
 import { renderConditionBar } from './condition.js';
@@ -40,7 +41,7 @@ let state = null;
 let timing = null;
 let timingRxMs = 0; // when the last timing snapshot arrived (E.T.A. ticking)
 const feedSeen = createFeedSeen(); // timing nrs the feed has posted this session
-let stations = {}; // carId → true while that car's station socket is open
+let stations = {}; // carId → how many station sockets are open on that car
 let net = null;
 let serverInfo = null; // { ips, port } once the embedded server is up, { error } if not
 let wsOk = false; // this page's own socket to the server
@@ -57,6 +58,14 @@ async function boot() {
     $('server-ips').textContent = info.ips.length
       ? 'Stations connect to: ' + info.ips.join('  or  ') + `  (port ${info.port})`
       : `port ${info.port}`;
+    // The server walked off the default port (it was already held). Stations
+    // assume the default, so each one needs this port typed into its
+    // SETTINGS → CONNECTION tab — said here, on the screen the crew reads
+    // the address off anyway.
+    if (info.port !== PORT) {
+      $('server-ips').textContent +=
+        ` — port ${PORT} was taken, set port ${info.port} on each station (SETTINGS → CONNECTION)`;
+    }
     $('server-ips').classList.add('ok');
   } catch (e) {
     serverInfo = { error: e.message };
@@ -80,6 +89,12 @@ async function boot() {
       if (m.type === 'stations') { stations = m.online || {}; if (state) render(); }
       if (m.type === 'timingReplays') renderReplayList(m.list || []);
       if (m.type === 'timingReplayResult' && !m.ok) alert('Replay failed: ' + m.error);
+      if (m.type === 'carFileResult') {
+        alert(m.ok
+          ? `Car file loaded onto ${m.name} — ${(m.applied || []).join(', ')}.` +
+            ((m.warnings || []).length ? '\n\n' + m.warnings.join('\n') : '')
+          : 'Car file refused: ' + (m.error || 'unknown error'));
+      }
     }
   });
 }
@@ -133,6 +148,25 @@ menuPop.addEventListener('click', e => { if (e.target.closest('button')) closePo
 document.addEventListener('click', e => { if (!e.target.closest('.tb-pop')) closePops(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closePops(); });
 
+// Two laptops can pick the same car — nothing on either screen says so, and
+// the pair read as one healthy station while every LAP or APPLY STOP press
+// lands twice. A station whose WiFi dropped also leaves its old socket on the
+// server until the heartbeat prunes it, which counts as two for a few seconds;
+// that reconnect is the common case and must not cry wolf, so the doubling has
+// to hold before the wall shouts about it.
+const DOUBLE_HOLD_MS = 10000;
+const doubledSince = {}; // carId → when its station count first went above one
+function doubledCars() {
+  const now = Date.now();
+  const out = [];
+  for (const id of Object.keys(state.cars)) {
+    if ((stations[id] || 0) < 2) { delete doubledSince[id]; continue; }
+    if (!doubledSince[id]) doubledSince[id] = now;
+    if (now - doubledSince[id] >= DOUBLE_HOLD_MS) out.push(id);
+  }
+  return out;
+}
+
 // One pill answers "is everything connected?". Green only when genuinely all
 // live; setup time shows the join count plus the address stations need;
 // anything degraded names itself. Full detail sits in the popover.
@@ -150,6 +184,7 @@ function renderHealth() {
   // Same rule as the cards: a station that never sent live data isn't "lost",
   // the entry simply isn't used (or hasn't joined yet).
   const lost = carIds.filter(id => !stations[id] && state.cars[id].state.liveSeenMs);
+  const doubled = doubledCars();
   const running = raceClock(state.race, Date.now()).running;
 
   const probs = [];
@@ -158,6 +193,9 @@ function renderHealth() {
   if (serverInfo?.error) push('SERVER FAILED', 2);
   if (!wsOk) push('LINK DOWN', 2);
   if (lost.length) push('STATION LOST ' + lost.map(id => '#' + state.cars[id].number).join(' '), 1);
+  if (doubled.length) {
+    push('DOUBLE STATION ' + doubled.map(id => `#${state.cars[id].number}×${stations[id]}`).join(' '), 1);
+  }
   const conn = timing?.conn || 'off';
   if (conn === 'replay') push('REPLAY', 0);
   else if (conn !== 'connected' && conn !== 'off') push('FEED ' + conn.toUpperCase(), 1);
@@ -177,11 +215,14 @@ function renderHealth() {
 
   // popover: one chip per car station
   const det = carIds.map(id => {
-    const on = !!stations[id];
+    const n = stations[id] || 0;
+    const dbl = doubled.includes(id);
     const was = state.cars[id].state.liveSeenMs;
-    const cls = on ? ' ok' : was ? ' bad' : '';
-    const t = on ? 'online' : was ? 'connection lost' : 'never connected';
-    return `<span class="conn${cls}" title="${t}">#${esc(state.cars[id].number)}</span>`;
+    const cls = dbl ? ' warn' : n ? ' ok' : was ? ' bad' : '';
+    const t = dbl ? `${n} stations on this car — every button press lands ${n} times`
+      : n ? 'online' : was ? 'connection lost' : 'never connected';
+    return `<span class="conn${cls}" title="${t}">#${esc(state.cars[id].number)}` +
+      `${dbl ? ' ×' + n : ''}</span>`;
   }).join('');
   if (det !== healthStationsKey) {
     healthStationsKey = det;
@@ -236,7 +277,8 @@ function renderSessionAlert() {
 const overlay = $('settings-overlay');
 $('btn-settings').addEventListener('click', () => { ltFormDirty = false; overlay.classList.remove('hidden'); refreshBackups(); refreshReplays(); });
 $('btn-settings-close').addEventListener('click', () => overlay.classList.add('hidden'));
-overlay.addEventListener('click', e => { if (e.target === overlay) overlay.classList.add('hidden'); });
+// No click-outside close either: race settings is a form, and a stray click on
+// the backdrop mid-edit throws the page away. CLOSE is the way out.
 
 // settings tabs
 const tabbar = $('settings-tabs');
@@ -480,16 +522,39 @@ function renderTiming() {
   renderTimingCards();
 }
 
+// The feed row a car's pit E.T.A. is reconstructed from. Nothing to go on
+// while the feed is down, and nothing left to estimate once the car is in the
+// lane — either way the E.T.A. and the pit order simply leave the car out.
+function pitFeedEntry(car) {
+  const live = timing?.conn === 'connected' || timing?.conn === 'replay';
+  const e = live ? timingEntryFor(car) : null;
+  return e && !car.state.inPit && !e.inPit ? e : null;
+}
+
+// One tick's worth of pit arrivals: every car's E.T.A. worked out once, plus
+// the order they put the cars in. `rank` is empty unless two or more cars are
+// on their way in — a queue of one is not an order — while `eta` always
+// carries whatever each card's own sub-line needs.
+function pitArrivals(now) {
+  const eta = new Map();
+  if (!state) return { eta, rank: new Map() };
+  for (const car of Object.values(state.cars)) {
+    const e = pitFeedEntry(car);
+    eta.set(car.id, e ? pitEta(car, state.race, timing, e, timingRxMs, now) : null);
+  }
+  const list = pitArrivalOrder(Object.values(state.cars), car => eta.get(car.id), now);
+  return { eta, rank: new Map(list.map(q => [q.carId, q])) };
+}
+
+const ORDINALS = ['', '1st', '2nd', '3rd', '4th', '5th', '6th', '7th', '8th'];
+const ordinal = n => ORDINALS[n] || n + 'th';
+
 // Pit arrival estimate: where the car is and when it reaches the pit, from
 // its last timing-loop / sector crossing (green pace to the flag, FCY pace
 // after). Shown while a stop is live or the race is neutralised — exactly
 // when the crew in the box needs to know how long they have. Returns the
 // verdict sub-line for the card, or null when there is nothing to show.
-function pitEtaLine(car, now) {
-  const e = timing?.conn === 'connected' || timing?.conn === 'replay' ? timingEntryFor(car) : null;
-  const eta = e && !car.state.inPit && !e.inPit
-    ? pitEta(car, state.race, timing, e, timingRxMs, now)
-    : null;
+function pitEtaLine(car, eta) {
   if (!eta || !(eta.neutral || car.nextStop.status !== 'draft')) return null;
   const dist = eta.distM >= 1000 ? (eta.distM / 1000).toFixed(2) + ' km' : Math.round(eta.distM) + ' m';
   if (eta.stale) {
@@ -626,7 +691,17 @@ function renderCarNames() {
           &nbsp;name
           <input data-car-name="${esc(id)}" type="text" style="width:220px" />
         </span>
+        <span style="margin-left:auto;display:flex;gap:6px">
+          <button data-car-file-load="${esc(id)}" title="Load a car file onto this car — its whole setup in one action">${icon('folder')} LOAD FILE</button>
+          <button data-car-file-save="${esc(id)}" title="Write this car's setup out as a car file">${icon('save')} SAVE FILE</button>
+        </span>
       </div>`).join('');
+    for (const btn of wrap.querySelectorAll('button[data-car-file-load]')) {
+      btn.addEventListener('click', () => loadCarFileInto(btn.dataset.carFileLoad));
+    }
+    for (const btn of wrap.querySelectorAll('button[data-car-file-save]')) {
+      btn.addEventListener('click', () => saveCarFileFrom(btn.dataset.carFileSave));
+    }
     for (const inp of wrap.querySelectorAll('input[data-car-nr]')) {
       inp.addEventListener('change', () => {
         const id = inp.dataset.carNr;
@@ -727,6 +802,48 @@ $('btn-sync-lt-clock').addEventListener('click', () => {
 
 // ---- saved race setups (race name + duration + event settings) ----
 
+// ---- car files ----
+// A car's whole setup as one file. The wall can do this for any of the four
+// without walking to that station — which is how three cars get set up on the
+// Thursday from one seat, and how a car whose laptop was swapped is put back
+// exactly as it was.
+
+let carFileVersion = '';
+window.pitwallApi?.getVersion?.().then(v => { carFileVersion = v?.version || ''; }).catch(() => {});
+
+async function saveCarFileFrom(id) {
+  const car = state?.cars?.[id];
+  const api = window.pitwallApi;
+  if (!car) return;
+  if (!api?.saveCarFile) return alert('This build cannot reach the file system.');
+  const res = await api.saveCarFile(carFileName(car), buildCarFile(car, { app: carFileVersion }));
+  if (res?.canceled) return;
+  if (!res?.ok) return alert('Could not save the car file: ' + (res?.error || 'unknown error'));
+  alert(`${car.name} saved to\n${res.path}`);
+}
+
+async function loadCarFileInto(id) {
+  const car = state?.cars?.[id];
+  const api = window.pitwallApi;
+  if (!car) return;
+  if (!api?.openCarFile) return alert('This build cannot reach the file system.');
+  const res = await api.openCarFile();
+  if (res?.canceled) return;
+  if (!res?.ok) return alert('Could not open the file: ' + (res?.error || 'unknown error'));
+  const read = readCarFile(res.text);
+  if (!read.ok) return alert(read.error);
+  const who = [read.file.car?.number ? '#' + read.file.car.number : '', read.file.car?.name || '']
+    .filter(Boolean).join(' ') || 'a car';
+  const ok = confirm(
+    `Load "${res.name}" (${who}) onto CAR ${id} — ${car.name}?\n\n` +
+    'It sets the car information, fuel and pace figures, wear limits, the driver table and ' +
+    'the tyre/brake racks on that car, everywhere at once.\n\n' +
+    'Laps, mileage, banked hours, seat time and every set that has already run are kept, and ' +
+    'the event settings are not touched.');
+  if (!ok) return;
+  net.send({ type: 'loadCarFile', carId: id, file: read.file });
+}
+
 $('btn-racesetup-save').addEventListener('click', () => {
   const name = $('racesetup-name').value.trim();
   if (!name) return alert('Give the race setup a name first.');
@@ -786,8 +903,18 @@ function renderSettings() {
   $('race-duration').title = followsDuration
     ? 'The timing feed publishes the session length — the duration follows the feed'
     : '';
-  $('race-start').disabled = locked;
-  $('btn-apply-start').disabled = locked;
+  // The lock only holds the start time while there is a feed to hold it to.
+  // With the link down the clock is the app's own again, and correcting it is
+  // exactly what the crew needs to do — leaving the field greyed out because
+  // a checkbox is still ticked would take the fallback away at the one moment
+  // it is wanted. The lock stays on, and resumes driving the clock when the
+  // feed comes back.
+  const clockFollows = locked && timing?.conn === 'connected';
+  $('race-start').disabled = clockFollows;
+  $('btn-apply-start').disabled = clockFollows;
+  $('race-start').title = clockFollows
+    ? 'The race clock is locked to the timing feed — untick to set the start time by hand'
+    : locked ? 'Feed down — the start time can be set by hand until it is back' : '';
   setInput($('backup-interval'), state.settings?.backupIntervalMin ?? 5);
   if (state.event) {
     for (const inp of overlay.querySelectorAll('input[data-ev]')) {
@@ -895,6 +1022,7 @@ function buildCards() {
           <span class="carname" data-f="name"></span>
           <span class="makemodel" data-f="makemodel"></span>
         </div>
+        <div class="pitorder" data-f="pitorder" style="display:none"></div>
         <div class="incar">
           <span class="lab">IN CAR</span>
           <b data-f="driver"></b>
@@ -907,9 +1035,9 @@ function buildCards() {
       </div>
       <div class="stationline" data-f="station" style="display:none"></div>
       <div class="grab" data-f="tiles"></div>
-      <div class="wapprove" data-f="approve" style="display:none"></div>
       <div class="extra" data-f="extra" style="display:none"></div>
       <div class="ltline" data-f="lt" style="display:none"></div>
+      <div class="wapprove" data-f="approve" style="display:none"></div>
       <div class="foot">
         <button class="inpit" data-f="inpit">${icon('parking')} CAR IN PIT LANE</button>
         <button class="done" data-f="done">${icon('check')} STOP DONE — CAR RELEASED</button>
@@ -960,8 +1088,6 @@ function driverCall(car, c, now) {
   return { change: !cur || cands[0].id !== cur.id, next: cands[0] };
 }
 
-const BRAKE_SHORT = { padsFront: 'PADS F', padsRear: 'PADS R', discsFront: 'DISCS F', discsRear: 'DISCS R' };
-
 // What the crew needs to know about the set they are about to grab: new, or
 // how much is already on it. Mileage is the honest measure across tracks.
 function setTag(set) {
@@ -977,6 +1103,9 @@ function setTag(set) {
 // learn what their column asks for. Cells that only repeat what the column
 // beside them says are dimmed and left unhighlighted, so the differences are
 // still the only thing that pulls the eye.
+// Colour is the instruction itself, never a health score: RED means this
+// part comes off the car, GREEN means it stays on, amber means the change is
+// asked for but there is nothing free in the rack to do it with.
 // Each column is headed by its own flag chip in its own colour, so which
 // situation a column answers for reads before the words do.
 // The engineer keeps a separate plan per situation, so under green the code 60
@@ -1003,22 +1132,29 @@ function renderGrab(card, car, c, plans, now) {
       ? (src.tyreSetId ? (car.tyreSets || []).find(t => t.id === src.tyreSetId) : stopTyreSet(car, { tyreSetId: null }))
       : null;
     const drv = car.drivers.find(d => d.id === src.driverChange);
-    // Brake work by part number — the crew grabs a numbered set off the rack,
-    // so "PADS F" alone is not an instruction.
-    const parts = BRAKE_COMPONENTS.filter(b => src[b.id]).map(b => {
-      const set = brakeSetsOf(car, b.id).find(t => t.id === src.brakeSetIds?.[b.id]) ||
-        stopBrakeSet(car, b.id, { brakeSetIds: {} });
-      return { lab: BRAKE_SHORT[b.id], set };
-    });
+    // Brake work by axle, under the name of the kit — and then the part
+    // numbers, because the crew grabs numbered parts off the rack and "FRONT
+    // KIT" alone is not an instruction.
+    const parts = BRAKE_AXLES.map(a => stopBrakeAxle(car, a.id, src))
+      .filter(x => x.work !== 'none');
     return [
-      { v: fuelTxt, n: src.fuelLiters > 0 ? `rig +${addL} L · ${Math.round(addL / (car.config.refuelLps || 2.5))} s` : '', act: src.fuelLiters > 0 },
+      { v: fuelTxt, n: src.fuelLiters > 0 ? `rig +${addL} L · ${Math.round(addL / (car.config.refuelLps || 2.5))} s` : '', chg: src.fuelLiters > 0 },
       { v: src.tyres ? (set ? `${esc(set.name)} · ${setTag(set)}` : 'NO SET FREE') : 'KEEP',
         n: src.tyres ? (set ? (set.used ? `${set.laps} laps on it` : 'unused') : 'every spare is used or scrapped') : '',
-        act: src.tyres, crit: src.tyres && !set },
-      { v: drv ? `→ ${esc(drv.name)}` : 'STAYS IN', n: '', act: !!drv },
-      { v: parts.length ? parts.map(p => `${p.lab} ${p.set ? esc(p.set.name) : '—'}`).join(' + ') : '—',
-        n: parts.some(p => !p.set) ? 'nothing free in the rack' : '',
-        act: parts.length > 0, crit: parts.length > 0 }
+        chg: src.tyres, blocked: src.tyres && !set },
+      // The tag, not the full name — a name like "Hoogenboom" wraps the
+      // column; the full name rides in the small print underneath.
+      { v: drv ? `→ ${esc(driverAbbrev(drv))}` : 'STAYS IN', n: drv ? esc(drv.name) : '', chg: !!drv },
+      { v: parts.length
+          ? parts.map(x => x.work === 'kit'
+            ? `${x.label} KIT ${x.name ? esc(x.name) : '—'}`
+            : `${x.label} PADS ${x.pad ? esc(x.pad.name) : '—'}`).join(' · ')
+          : '—',
+        n: parts.some(x => x.blocked) ? 'nothing free in the rack'
+          : parts.map(x => x.work === 'kit'
+            ? `${esc(x.disc.name)} + ${esc(x.pad.name)}${x.formed ? ' · new kit' : ''}`
+            : `${esc(x.pad.name)} onto ${esc(x.disc?.name || 'the discs on the car')}`).join(' · '),
+        chg: parts.length > 0, blocked: parts.some(x => x.blocked) }
     ];
   };
 
@@ -1081,7 +1217,7 @@ function renderGrab(card, car, c, plans, now) {
           // same — a column has to be readable on its own — but dimmed and
           // unhighlighted so colour stays reserved for the differences.
           const echo = ci > 0 && cell.v === cols[0].rows[i].v;
-          return `<td class="${echo ? 'echo' : cell.crit ? 'crit' : cell.act ? 'act' : 'ok'}">
+          return `<td class="${echo ? 'echo' : cell.blocked ? 'blocked' : cell.chg ? 'chg' : 'keep'}">
             <span class="v">${cell.v}</span>${!echo && cell.n ? `<span class="n">${cell.n}</span>` : ''}</td>`;
         }).join('')}
       </tr>`).join('')}
@@ -1158,6 +1294,10 @@ function render() {
   renderHealth();
   renderSettings();
 
+  // Every car's run to the pit, and who gets the box first.
+  const arrivals = pitArrivals(now);
+  const doubled = new Set(doubledCars());
+
   // Rebuild when cars appear/disappear or a number edit changes the order.
   const order = sortedCarIds();
   if (order.length !== wall.children.length ||
@@ -1204,7 +1344,23 @@ function render() {
     f('name').textContent = customName || makeModel || `Car #${car.number}`;
     f('makemodel').textContent = customName && makeModel ? makeModel : '';
     const drv = car.drivers.find(d => d.id === car.currentDriverId);
-    f('driver').textContent = parked ? '—' : drv ? drv.name : '—';
+    // The tag, not the full name — the head has no width for "Hoogenboom".
+    const drvEl = f('driver');
+    drvEl.textContent = parked ? '—' : drv ? driverAbbrev(drv) : '—';
+    drvEl.title = !parked && drv ? drv.name : '';
+
+    // Pit order, read straight off the arrival estimates: with more than one
+    // car on its way in, the crew's next question is which one they take
+    // first, and it is answered where the eye already is — beside the number.
+    const q = parked ? null : arrivals.rank.get(id);
+    const orderEl = f('pitorder');
+    orderEl.style.display = q ? '' : 'none';
+    if (q) {
+      orderEl.className = 'pitorder' + (q.pos === 1 ? ' first' : '') + (q.stale ? ' est' : '');
+      setLine(orderEl,
+        `${icon('boxin')}<span class="pos"><b>${q.stale ? '~' : ''}${ordinal(q.pos)}</b>` +
+        `<span class="of">${q.inPit ? 'IN THE LANE' : 'OF ' + q.of + ' TO BOX'}</span></span>`);
+    }
 
     const stationEl = f('station');
     if (noCar) {
@@ -1244,6 +1400,14 @@ function render() {
       stationEl.innerHTML = feedWaiting
         ? `${icon('timer')} waiting on live timing — no car #${esc(ltNr)} in the feed yet`
         : `${icon('warn')} NO CAR #${esc(ltNr)} IN LIVE TIMING — check the timing number`;
+    } else if (doubled.has(id)) {
+      // Both laptops look fine to the people sitting at them; only the wall
+      // can see there are two, and every LAP or APPLY STOP they press is
+      // counted twice on this car.
+      stationEl.style.display = '';
+      stationEl.className = 'stationline lost';
+      stationEl.innerHTML = `${icon('warn')} ${stations[id]} STATIONS ON THIS CAR — ` +
+        'every button press lands ' + stations[id] + ' times';
     } else if (online) {
       stationEl.style.display = 'none';
     } else {
@@ -1258,6 +1422,9 @@ function render() {
     // Verdict band: one answer per car. The stop status when one is live,
     // else the pit-window verdict (a flag flying turns the wall into an
     // answer sheet — per car: box or stay out), else the next-stop countdown.
+    // Same colour language as the grab list below it: RED says the car
+    // comes in, GREEN says it stays out. Amber is never an answer, only a
+    // warning attached to one (stop sent, fuel running low).
     let vCls = 'calm';
     let vHtml;
     if (inPit) {
@@ -1270,22 +1437,22 @@ function render() {
       vCls = 'sent';
       vHtml = `${icon('alert')} NEXT STOP — PREPARE`;
     } else if (fs && fs.noStopNeeded) {
-      vCls = 'good';
+      vCls = 'stay';
       vHtml = `${icon('check')} NO FUEL STOP NEEDED — reaches the flag`;
     } else if (fs && neutralised) {
       if (fs.netPitNowSec <= 0) {
         vCls = 'go';
         vHtml = `${icon('boxin')} BOX NOW — ${fs.netPitNowSec <= -1
           ? 'saves ' + Math.abs(fs.netPitNowSec).toFixed(0) + ' s'
-          : 'free stop'} · fill ${fs.fillTargetL} L`;
+          : 'free stop'}`;
       } else {
-        vCls = 'hold';
-        vHtml = `${icon('warn')} STAY OUT — box now +${fs.netPitNowSec.toFixed(0)} s` +
+        vCls = 'stay';
+        vHtml = `${icon('stop')} STAY OUT — box now +${fs.netPitNowSec.toFixed(0)} s` +
           (fs.windowOpen ? '' : ` <small>window in ${fs.lapsToWindow} laps</small>`);
       }
     } else if (fs && fs.windowOpen) {
-      vCls = 'good';
-      vHtml = `${icon('fuel')} FUEL WINDOW OPEN — box within ${fs.windowLapsLeft} laps · fill ${fs.fillTargetL} L`;
+      vCls = 'chg';
+      vHtml = `${icon('fuel')} FUEL WINDOW OPEN — box within ${fs.windowLapsLeft} laps`;
     } else if (clock.running) {
       vHtml = `NEXT STOP IN <b>~${fmtMinSec(c.limit.ms)}</b> <small>${c.limit.label} limited</small>`;
     } else if (clock.scheduled) {
@@ -1303,7 +1470,7 @@ function render() {
     // Sub-line: the pit-arrival estimate while it matters, else the fuel
     // window countdown — the band always says when something is next due.
     const sub = f('v-sub');
-    const etaLine = pitEtaLine(car, now);
+    const etaLine = pitEtaLine(car, arrivals.eta.get(id));
     if (etaLine) {
       sub.style.display = '';
       sub.className = 'vsub' + (etaLine.cls ? ' ' + etaLine.cls : '');
@@ -1323,18 +1490,17 @@ function render() {
     renderGrab(card, car, c, plans, now);
     renderApproval(card, car, plans);
 
-    // Under the tiles: stationary estimate + crew notes while a stop is live.
+    // Under the tiles: crew notes as soon as they're written, plus the
+    // stationary estimate once the stop is live.
     const extra = f('extra');
+    const bits = [];
     if (active) {
       const st = stopServiceTime(car, stop);
-      const bits = [];
       if (st.totalSec > 0) bits.push(`${icon('timer')} EST. STATIONARY ~${Math.round(st.totalSec)} s`);
-      if (stop.notes) bits.push(icon('note') + ' ' + esc(stop.notes));
-      extra.innerHTML = bits.join(' &nbsp;·&nbsp; ');
-      extra.style.display = bits.length ? '' : 'none';
-    } else {
-      extra.style.display = 'none';
     }
+    if (stop.notes) bits.push(icon('note') + ' ' + esc(stop.notes));
+    extra.innerHTML = bits.join(' &nbsp;·&nbsp; ');
+    extra.style.display = bits.length ? '' : 'none';
 
     f('inpit').style.display = active && !inPit ? '' : 'none';
     f('done').style.visibility = active ? 'visible' : 'hidden';

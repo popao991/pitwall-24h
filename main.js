@@ -1,11 +1,21 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import path from 'node:path';
+import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const appProtocol = require('./app-protocol.cjs');
+
+// A second copy of the app on the SAME PC (a station beside the pit wall —
+// demos, test days) must not share the first copy's Chromium profile
+// directory: two instances on one profile fight over the localStorage
+// database that holds the role, theme and connection target. Point the
+// extra copy at its own folder:  PITWALL_USER_DATA=<dir> npm start
+if (process.env.PITWALL_USER_DATA) {
+  app.setPath('userData', process.env.PITWALL_USER_DATA);
+}
 
 appProtocol.registerScheme();
 
@@ -87,10 +97,53 @@ app.whenReady().then(() => {
       serverInfo = startServer({
         dataFile: path.join(app.getPath('userData'), 'pitwall-state.json'),
         backupDir: path.join(app.getPath('userData'), 'backups'),
-        replayDir: path.join(app.getPath('userData'), 'replays')
+        replayDir: path.join(app.getPath('userData'), 'replays'),
+        // Headroom for a held port — a second copy of the app, or an orphaned
+        // test server: walk to the next free port rather than boot a wall
+        // whose own server never came up.
+        portTries: 10
       });
     }
-    return { port: serverInfo.port, ips: serverInfo.ips };
+    // The bind is asynchronous. Wait for it, so a failure reaches the wall as
+    // an error instead of a "listening" announcement over a dead socket — and
+    // so the port shown is the one actually bound, not the one asked for.
+    const port = await serverInfo.listening;
+    return { port, ips: serverInfo.ips };
+  });
+
+  // ---- car files ----
+  // A car file is prepared, carried and loaded as a file on disk, so the two
+  // dialogs live here rather than in the page: a renderer served over app://
+  // cannot write to the user's own folders, and a car file is something people
+  // e-mail each other in the week before the event.
+  ipcMain.handle('save-car-file', async (_e, { suggestedName, data } = {}) => {
+    const res = await dialog.showSaveDialog(win, {
+      title: 'Save car file',
+      defaultPath: path.join(app.getPath('documents'), String(suggestedName || 'car.pitcar.json')),
+      filters: [{ name: 'PitWall car file', extensions: ['json'] }, { name: 'All files', extensions: ['*'] }]
+    });
+    if (res.canceled || !res.filePath) return { ok: false, canceled: true };
+    try {
+      await fs.promises.writeFile(res.filePath, JSON.stringify(data, null, 2) + '\n', 'utf8');
+      return { ok: true, path: res.filePath };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('open-car-file', async () => {
+    const res = await dialog.showOpenDialog(win, {
+      title: 'Load car file',
+      properties: ['openFile'],
+      filters: [{ name: 'PitWall car file', extensions: ['json'] }, { name: 'All files', extensions: ['*'] }]
+    });
+    const file = res.filePaths?.[0];
+    if (res.canceled || !file) return { ok: false, canceled: true };
+    try {
+      return { ok: true, path: file, name: path.basename(file), text: await fs.promises.readFile(file, 'utf8') };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
   });
 
   ipcMain.handle('list-backups', () => (serverInfo ? serverInfo.listBackups() : []));

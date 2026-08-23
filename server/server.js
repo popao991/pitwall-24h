@@ -10,16 +10,19 @@ import {
   defaultState, defaultCar, defaultDriver, defaultTiming, defaultEvent, EVENT_FIELDS,
   timingNrOf, deepMerge, emptyStop, effectiveBurn, pushLapTime, raceCondition, paceLapSec,
   FCY_MODES, PORT, defaultTyreSets, reconcileTyreSets, stopTyreSet, stintStats,
+  reconcileTyreWarmers, loadTyreWarmer, TYRE_WARMER_MAX,
   learnLapSample, learnFuelReading, dirtyFuelRef, startFuelOf,
   currentTyreSet, tyreSetMileage, recommendedStops, resolveStop, stopPlanHash,
   PLAN_KEYS, activePlanKey,
-  pitVisitKind, stopServiceTime, BRAKE_COMPONENTS,
+  pitVisitKind, stopServiceTime, BRAKE_COMPONENTS, BRAKE_AXLES,
   defaultAllBrakeSets, reconcileBrakeSets, stopBrakeSet, brakeSetsOf, DEFAULT_BRAKE_SET_COUNT,
-  PACE_WINDOW_DEFAULT
+  reconcileBrakeKits, linkBrakeKit, syncBrakeKitToCar, brakeAxle, kitOfDiscSet,
+  stopBrakeKit, stopPadSet,
+  PACE_WINDOW_DEFAULT, applyCarFile, stintStartOf, raceClock
 } from '../shared/model.js';
 import { createTimingService } from './livetiming.js';
 
-export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickMs = 10000 } = {}) {
+export function startServer({ dataFile, backupDir, replayDir, port = PORT, portTries = 1, tickMs = 10000 } = {}) {
   let state = defaultState();
   if (dataFile && fs.existsSync(dataFile)) {
     try {
@@ -74,6 +77,20 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
       }
     }
     s.event = { ...defaultEvent(), ...s.event };
+    // Zolder's official figures replaced the round placeholders they had been
+    // guessed at. Only a value still sitting on the old placeholder moves —
+    // anything measured or typed at the track is left exactly as it is.
+    if (s.event.trackKm === 4.0) s.event.trackKm = 4.007;
+    if (s.event.pitLaneKm === 0.4) s.event.pitLaneKm = 0.411;
+    // Code 60 is 60 km/h by name; the old 80 was simply wrong, and it is the
+    // input the neutralisation maths is most sensitive to — at 80 the field
+    // covers the pit-parallel stretch far quicker, so every stop under yellow
+    // looked dearer than it is. Same rule: only the wrong default moves.
+    if (s.event.fcySpeedKmh === 80) s.event.fcySpeedKmh = 60;
+    if (!(s.event.s1EndKm > 0) && !(s.event.s2EndKm > 0)) {
+      s.event.s1EndKm = 1.3764;
+      s.event.s2EndKm = 2.8646;
+    }
     s.presets ??= {};
     s.raceSetups ??= {};
     s.timing = { ...defaultTiming(), ...(s.timing || {}) };
@@ -99,8 +116,20 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
       c.config.startFuelL ??= 0;
       c.config.refuelLps ??= 2.5;
       c.config.tyreChangeSec ??= 25;
-      c.config.trackKm ??= 4.0;
-      c.config.fcySpeedKmh ??= 80;
+      // Zolder's measured Code 60 rate is 0.639/h, but it is a property of the
+      // event and the crew's own read of it, so a car starts with no view and
+      // the neutralisation call is made on the plan ranking alone until it is set.
+      c.config.cautionsPerHour ??= 0.639;
+      c.config.tyreDegSecPerKm ??= 0.0087;
+      c.config.fuelWeightSecPerL ??= 0.0079;
+      // These three shipped as 0 for a few builds, which left the call inert
+      // and the card blank. 0 is a real answer for the rate ("no view") but
+      // never for the two coefficients, so a zero there is the old seed rather
+      // than a decision, and it takes the measured figure.
+      if (!(c.config.tyreDegSecPerKm > 0)) c.config.tyreDegSecPerKm = 0.0087;
+      if (!(c.config.fuelWeightSecPerL > 0)) c.config.fuelWeightSecPerL = 0.0079;
+      c.config.trackKm ??= 4.007;
+      c.config.fcySpeedKmh ??= 60;
       // The pit lane broken into legs, the rig dead time and any series minimum
       // stop. All default to 0, which reproduces exactly what the app assumed
       // before the lane had geometry: a stop is its stationary work and nothing
@@ -129,6 +158,13 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
       c.state.liveSeenMs ??= null;
       c.state.pendingSetDecision ??= null;
       c.state.lastPitVisit ??= null;
+      // Lap reconciliation across a feed outage. A state saved before it
+      // existed starts with no anchor, so the first connected tick takes its
+      // baseline and nothing is ever recovered retroactively.
+      c.state.feedLaps ??= null;
+      c.state.feedGap ??= false;
+      c.state.manualLaps ??= 0;
+      c.state.lapCatchUp ??= null;
       c.nextStop.tyreSetId ??= null;
       // The stop plan gained a situation, per-line pins and an approval.
       // `plan` is null by design — the card follows whatever is flying until
@@ -170,6 +206,10 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
         c.state.currentTyreSetId = c.tyreSets[used - 1].id;
       }
       reconcileTyreSets(c);
+      // Tyre warmers: a state saved before they existed simply has none, and
+      // the crew says how many the garage has from the card.
+      c.config.tyreWarmers ??= 0;
+      reconcileTyreWarmers(c);
       // Numbered brake sets: a state saved before they existed gets a rack
       // built from the default counts, with the hours already on the car
       // carried by the set that is fitted (state.brakeUsedH stays the live
@@ -194,15 +234,56 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
       if (!c.drivers.some(d => d.id === c.currentDriverId)) {
         c.currentDriverId = c.drivers[0].id;
       }
+      // A stint that starts before the race did is a leftover from a session
+      // this state file outlived; the race clock is the truth (see
+      // anchorRaceStart). Repaired at load so the saved figures heal too, not
+      // just what the screens draw.
+      if (s.race.startMs && c.state.stintStartMs && c.state.stintStartMs < s.race.startMs) {
+        c.state.stintStartMs = s.race.startMs;
+      }
     }
     syncEventConfig(s);
   }
 
   migrate(state); // also seeds fields on a fresh default state (timing etc.)
 
-  const wss = new WebSocketServer({ port });
-  console.log('[server] listening on port', port);
-  wss.on('error', e => console.error('[server] error:', e.message));
+  // Binding happens asynchronously, so a port already held — a second copy of
+  // the app, or a test run that has not let go of it yet — does not throw from
+  // here. Left as nothing but a log line it once produced the worst failure
+  // there is: a pit wall announcing it is listening while every station
+  // quietly fails to connect, with the reason buried in a console nobody has
+  // open. So the outcome is a promise, resolving to the port actually bound,
+  // and a caller waits for it and says what really happened. With `portTries`
+  // headroom a held port walks to the next free one instead of failing — the
+  // app boots on what it can get and the wall shows the real port. The tests
+  // keep the single try: there a held port means an orphaned run driving the
+  // same state, and must fail loudly, not quietly move aside.
+  let bound, failed;
+  const listening = new Promise((res, rej) => { bound = res; failed = rej; });
+  listening.catch(() => {}); // waiting on it is optional; an unread rejection must not kill the process
+  let wss;
+  function bindPort(p, triesLeft) {
+    wss = new WebSocketServer({ port: p });
+    wss.on('listening', () => {
+      console.log('[server] listening on port', p);
+      bound(p);
+    });
+    wss.on('error', e => {
+      if (e.code === 'EADDRINUSE' && triesLeft > 1) {
+        console.log(`[server] port ${p} is taken — trying ${p + 1}`);
+        wss.close(() => {}); // never bound; the callback swallows the not-running error
+        bindPort(p + 1, triesLeft - 1);
+        return;
+      }
+      console.error('[server] error:', e.message);
+      failed(e.code === 'EADDRINUSE'
+        ? new Error((p > port ? `ports ${port}–${p} are all in use` : `port ${p} is already in use`) +
+            ' — is another copy of the app running?')
+        : e);
+    });
+    wss.on('connection', onConnection);
+  }
+  bindPort(port, Math.max(1, portTries | 0));
 
   // One completed lap, from either a station's +LAP or the timing feed:
   // counters and tyre wear (fuel burns by time), the rolling reference lap,
@@ -234,6 +315,20 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
         Object.assign(car.state, pushLapTime(car.state.recentLapSec, car.state.lastLapSec));
       }
     }
+  }
+
+  // One lap taken back off the counters — UNDO LAP, and the downward half of a
+  // manual lap-count correction. The mirror image of recordLap, minus the
+  // learning: a sample that has already moved an average is not unlearnt by
+  // removing the lap it came from, only the raw stint list gives its lap back.
+  function unrecordLap(car) {
+    if (car.state.totalLaps <= 0) return false;
+    car.state.totalLaps--;
+    car.state.lapsThisStint = Math.max(0, car.state.lapsThisStint - 1);
+    car.state.tyreLapsOnSet = Math.max(0, car.state.tyreLapsOnSet - 1);
+    bankTyreKm(car, -1);
+    car.state.stintLapSec.pop();
+    return true;
   }
 
   // Mileage on the rubber that is on the car, banked lap by lap rather than at
@@ -327,6 +422,9 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
     }
     // Nothing came off if the tyres were never changed.
     if (!actual.tyres) s.pendingSetDecision = null;
+    // Whatever ended up on the car is out of its warmer, and whatever no
+    // longer is may go back in one.
+    reconcileTyreWarmers(car);
 
     // Driver — whoever actually got in; nobody means the one who was already
     // there. Seat time follows, since the running stint is credited at the
@@ -367,6 +465,9 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
       s.currentBrakeSetId[b.id] = on.id;
       s.brakeUsedH[b.id] = +((on.id === preId ? hoursAtStop : on.hours || 0) + sinceH).toFixed(4);
     }
+    // The correction can land a different pair on the car than the plan did,
+    // so the kits are re-tied to whatever really ran out of the box.
+    for (const a of BRAKE_AXLES) syncBrakeKitToCar(car, a.id);
 
     // The sheet records what happened, not what was planned.
     h.service = { ...applied, ...actual };
@@ -426,6 +527,10 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
         BRAKE_COMPONENTS.map(b => [b.id, c.brakeSets[b.id][0].id]));
       c.learn = { byDriver: {}, fuelRef: null };
       reconcileTyreSets(c);
+      // The boxes stay — they are the garage's, not the race's — but a reset
+      // empties them, since the rack they were holding is gone.
+      for (const w of c.tyreWarmers || []) w.setId = null;
+      reconcileTyreWarmers(c);
       reconcileBrakeSets(c);
     }
   }
@@ -560,6 +665,79 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
     replayDir
   });
 
+  // Is the feed counting THIS car's laps right now? Auto lap on, feed
+  // connected, and no unanswered session question holding it. Everything the
+  // crew does by hand — logging a lap, correcting the count, marking the car
+  // in the pit lane — reads this to know whether it is the only source or a
+  // second one.
+  function feedDrivesCar(car) {
+    if (state.timing.autoLap[car.id] === false) return false;
+    if (state.timing.sessionAlert) return false;
+    return timing.snapshot().conn === 'connected';
+  }
+
+  // ---- lap catch-up after a feed outage -------------------------------------
+  // Lap EVENTS are lost with the link: the feed emits one per changed lap time
+  // and a reconnect rebuilds the board silently (which is what stops a whole
+  // session replaying into the counters). The lap NUMBER survives, so it is
+  // the anchor. While the feed drives a car its count is tracked; when the
+  // link breaks the anchor is held; when it comes back, the difference — less
+  // whatever the crew logged by hand in the meantime — is the laps the app
+  // never saw, and they are put back on the counters and the tyre.
+  //
+  // Nothing is recovered retroactively for a car with no anchor (a feed
+  // connecting for the first time, or a state saved by an older build): the
+  // first sighting is a baseline, exactly as a first sighting is inside the
+  // timing engine itself.
+  const CATCHUP_MAX_LAPS = 300;
+
+  function syncLapsFromFeed(snap) {
+    const live = snap.conn === 'connected' && !state.timing.sessionAlert;
+    const running = state.race.startMs && Date.now() >= state.race.startMs;
+    let changed = false;
+    for (const car of Object.values(state.cars)) {
+      const s = car.state;
+      if (state.timing.autoLap[car.id] === false || !live) {
+        // The anchor is kept — it is the whole point — but the link is no
+        // longer continuous, so the next connected reading owes a catch-up.
+        if (s.feedLaps != null && !s.feedGap) { s.feedGap = true; changed = true; }
+        continue;
+      }
+      const nr = timingNrOf(state.timing, car);
+      const entry = snap.entries?.find(e => String(e.nr).trim() === nr);
+      const laps = entry?.laps;
+      if (!(laps > 0)) continue; // no count published yet — wait for a crossing
+
+      if (s.feedLaps == null) { // baseline: this reading counts for nothing
+        Object.assign(s, { feedLaps: laps, feedGap: false, manualLaps: 0 });
+        changed = true;
+        continue;
+      }
+      if (s.feedGap) {
+        const missed = laps - s.feedLaps - s.manualLaps;
+        if (missed > 0 && missed <= CATCHUP_MAX_LAPS && running) {
+          // No lap times: the feed only kept the count. Wear and the counters
+          // are what these laps carry, and pace is left to the laps that were
+          // actually timed.
+          for (let i = 0; i < missed; i++) recordLap(car, 0);
+          s.lapCatchUp = { laps: missed, atMs: Date.now() };
+          console.log(`[server] car ${car.id}: ${missed} lap(s) recovered after the feed outage`);
+        } else if (missed > CATCHUP_MAX_LAPS) {
+          // Too far apart to put in blind — a renumbered board, a session the
+          // guard did not catch. The crew is told the size of it and corrects
+          // the count itself.
+          s.lapCatchUp = { laps: 0, gap: missed, atMs: Date.now() };
+          console.log(`[server] car ${car.id}: feed is ${missed} laps ahead of the logged count — not applied`);
+        }
+        s.feedGap = false;
+        s.manualLaps = 0;
+        changed = true;
+      }
+      if (s.feedLaps !== laps) { s.feedLaps = laps; changed = true; }
+    }
+    return changed;
+  }
+
   // The configured race duration is only a pre-event guess. Once a connected
   // feed publishes the session length there is no reason to keep planning
   // against the settings value, so it is adopted whether or not the clock
@@ -586,6 +764,13 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
     for (const c of Object.values(state.cars)) {
       if (c.state.totalLaps === 0 && c.stintHistory.length === 0) {
         seedFirstStint(c, seedMs);
+      } else if (c.state.stintStartMs && c.state.stintStartMs < startMs) {
+        // A car with laps on the board keeps its stint — unless that stint
+        // began before the race did. That only happens when the clock has been
+        // anchored onto a session the stint knows nothing about (a state file
+        // carried over from a previous event), and left alone it reads as days
+        // of seat time and brake hours.
+        c.state.stintStartMs = startMs;
       }
     }
     return true;
@@ -707,6 +892,8 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
     }
     // A flag change from the feed neutralises (or releases) every car at once.
     if (syncConditionFromFeed()) dirty = true;
+    // Laps the link was down for, put back on the counters when it returns.
+    if (syncLapsFromFeed(timing.snapshot())) dirty = true;
     if (dirty) broadcast();
     broadcastTiming();
   }, 1000);
@@ -804,13 +991,19 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
     save();
   }
 
-  // Which cars have a station attached right now. Stations tag their socket
-  // via 'hello'; the wall uses this map (against each car's lasting
+  // How many stations are attached to each car right now. Stations tag their
+  // socket via 'hello'; the wall uses this map (against each car's lasting
   // liveSeenMs stamp) to tell "car entry never used" from "laptop dropped".
+  // Nothing stops two laptops picking the same car, and the pair then read as
+  // one healthy station while every LAP or APPLY STOP press lands twice — so
+  // the map counts sockets rather than just flagging them, and the wall says
+  // when a car has more than one. A car with none is left out of the map, so
+  // the count reads as false exactly where the flag used to.
   function stationsOnline() {
     const online = {};
     for (const client of wss.clients) {
-      if (client.readyState === 1 && client.stationCarId) online[client.stationCarId] = true;
+      if (client.readyState !== 1 || !client.stationCarId) continue;
+      online[client.stationCarId] = (online[client.stationCarId] || 0) + 1;
     }
     return online;
   }
@@ -852,7 +1045,8 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
     }
   }, HEARTBEAT_MS);
 
-  wss.on('connection', ws => {
+  // Attached inside bindPort, so a re-bind after a port walk keeps it.
+  function onConnection(ws) {
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
     ws.send(JSON.stringify({ type: 'state', state }));
@@ -875,7 +1069,7 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
       }
       broadcast();
     });
-  });
+  }
 
   function handle(m, ws) {
     const car = m.carId ? state.cars[m.carId] : null;
@@ -929,6 +1123,8 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
           // Keep the named set list and the legacy count coherent whichever
           // one the client edited.
           if (m.patch.config?.tyreSets != null || m.patch.tyreSets) reconcileTyreSets(car);
+          if (m.patch.config?.tyreWarmers != null || m.patch.tyreWarmers ||
+              m.patch.config?.tyreSets != null || m.patch.tyreSets) reconcileTyreWarmers(car);
           if (m.patch.config?.brakeSets || m.patch.brakeSets) reconcileBrakeSets(car);
           // Sending a stop to the crew (or calling the car in) commits it: the
           // app's live answers stop moving and become the work order. Only a
@@ -1027,6 +1223,41 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
         if (m.patch) deepMerge(state.settings, m.patch);
         break;
 
+      // A car file: one car's whole setup, read off disk by whichever screen
+      // sent it. The file is applied here rather than patched in field by
+      // field, so the pit wall and every station end up with exactly the same
+      // car — and the sender is told what landed, since a file is loaded once
+      // and nobody watches four tabs to check it worked.
+      case 'loadCarFile': {
+        if (!car) {
+          ws.send(JSON.stringify({ type: 'carFileResult', ok: false, carId: m.carId || null,
+            error: 'no such car on this pit wall' }));
+          break;
+        }
+        const res = applyCarFile(car, m.file);
+        if (res.ok) {
+          // Event settings are the pit wall's and are never in a car file;
+          // mirror them back in case an older or hand-edited file carried one.
+          syncEventConfig(state);
+          // Before the start the tank simply follows the setting the file
+          // brought, so the gauge agrees with the new setup straight away.
+          if (!state.race.startMs) {
+            car.state.fuelLiters = startFuelOf(car);
+            car.state.stintFuelStartL = car.state.fuelLiters;
+          }
+        }
+        ws.send(JSON.stringify({
+          type: 'carFileResult',
+          ok: res.ok,
+          carId: car.id,
+          name: car.name,
+          applied: res.applied,
+          warnings: res.warnings,
+          error: res.error || null
+        }));
+        break;
+      }
+
       // Setup presets live inside the shared state, so every station sees the
       // same list and they survive with the normal state file.
       case 'savePreset':
@@ -1117,21 +1348,122 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
         if (car) delete car.savedPlans[m.name];
         break;
 
+      // Reassign one planned stint to another driver. The plan is the running
+      // order the stop recommendation reads, and it stays the crew's to edit
+      // all race long — a driver who is tired, quick or out of seat time gets
+      // moved here rather than by regenerating and losing every other choice.
+      // Stints already driven are history and are left alone.
+      case 'planStint': {
+        const st = car?.plan?.stints?.[m.index];
+        if (st && car.drivers.some(d => d.id === m.driverId) && m.index >= car.stintHistory.length) {
+          st.driverId = m.driverId;
+          // Seat-time totals are shown straight off the plan, so they have to
+          // follow the edit or the table contradicts itself.
+          const totals = {};
+          for (const d of car.drivers) totals[d.id] = 0;
+          for (const s of car.plan.stints) totals[s.driverId] = (totals[s.driverId] || 0) + (s.toMs - s.fromMs);
+          car.plan.totals = totals;
+        }
+        break;
+      }
+
       // Laps drive tyre wear and counters only — fuel burns by time (see the
       // tick loop below), so a logged lap must not subtract fuel again.
       case 'lap':
-        if (car) recordLap(car, m.lapSec);
+        if (car) {
+          recordLap(car, m.lapSec);
+          // Logged while the feed is not counting this car: remember it, so
+          // the catch-up that runs when the link returns knows this lap is
+          // already on the sheet and does not add it a second time.
+          if (!feedDrivesCar(car)) car.state.manualLaps++;
+        }
         break;
 
       case 'undoLap':
-        if (car && car.state.totalLaps > 0) {
-          car.state.totalLaps--;
-          car.state.lapsThisStint = Math.max(0, car.state.lapsThisStint - 1);
-          car.state.tyreLapsOnSet = Math.max(0, car.state.tyreLapsOnSet - 1);
-          bankTyreKm(car, -1);
-          car.state.stintLapSec.pop();
+        if (car && unrecordLap(car) && !feedDrivesCar(car)) {
+          car.state.manualLaps = Math.max(0, car.state.manualLaps - 1);
         }
         break;
+
+      // The lap count, set to what it actually is. The last fallback under a
+      // dead feed — an outage nobody logged through, a catch-up too large to
+      // apply blind, a miscount at 3 a.m. — and it moves everything a lap
+      // moves: the stint, the tyre on the car and its mileage. Laps added
+      // this way count as logged by hand, so a feed coming back does not add
+      // them again.
+      case 'setLaps': {
+        if (!car) break;
+        const target = Math.round(Number(m.laps));
+        if (!Number.isFinite(target) || target < 0 || target > 9999) break;
+        let applied = 0;
+        while (car.state.totalLaps < target) { recordLap(car, 0); applied++; }
+        while (car.state.totalLaps > target && unrecordLap(car)) applied--;
+        if (applied && !feedDrivesCar(car)) {
+          car.state.manualLaps = Math.max(0, car.state.manualLaps + applied);
+        }
+        // The crew has answered whatever the last reconciliation asked.
+        car.state.lapCatchUp = null;
+        break;
+      }
+
+      // The tyre panel's own correction: laps on the set that is fitted right
+      // now — for rubber that arrived with history nobody typed in, or a count
+      // the feed got wrong. Unlike setLaps it touches nothing else: the total,
+      // the stint and fuel stay exactly where they are, and the set's banked
+      // mileage moves with its laps so the two can never disagree.
+      case 'setTyreLaps': {
+        if (!car) break;
+        const target = Math.round(Number(m.laps));
+        if (!Number.isFinite(target) || target < 0 || target > 999) break;
+        const set = currentTyreSet(car);
+        if (!set) break;
+        const delta = target - car.state.tyreLapsOnSet;
+        const km = +car.config.trackKm || 0;
+        car.state.tyreLapsOnSet = target;
+        // A correction is data entry, not driving: the added distance counts as
+        // green (kmFcy only ever comes from laps actually run under a caution).
+        set.km = Math.max(0, +((+set.km || 0) + delta * km).toFixed(2));
+        set.kmFcy = Math.min(set.km, +set.kmFcy || 0);
+        if (target > 0) set.used = true;
+        break;
+      }
+
+      // "Seen it" — the lap count jumped, the engineer has read why.
+      case 'clearLapNote':
+        if (car) car.state.lapCatchUp = null;
+        break;
+
+      // Who is really in the car, said straight out — the manual override for
+      // a seat the sheet has wrong: a swap done on track radio that never
+      // reached the stop planner, or a feed reading the wrong name. The whole
+      // running stint is credited to whoever is chosen (the same reading the
+      // starting-driver setting takes): the seat belongs to one driver at a
+      // time, and a split needs a logged stop.
+      case 'setDriver':
+        if (car && car.drivers.some(d => d.id === m.driverId) &&
+            m.driverId !== car.currentDriverId) {
+          car.currentDriverId = m.driverId;
+          // Mixed hands on the running consumption span — it no longer says
+          // anything clean about one driver's burn.
+          dirtyFuelRef(car);
+        }
+        break;
+
+      // The running stint's clock, set to what it actually is — for a stop the
+      // app missed, or a stint start the feed timed wrong. Everything read off
+      // the stint start moves with it: seat time, the drive-time regulations,
+      // and the brake hours folded in at the next stop. Never earlier than the
+      // race start (a stint cannot predate the flag) and refused outright when
+      // no stint is running.
+      case 'setStintTime': {
+        if (!car || !car.state.stintStartMs) break;
+        const elapsed = Number(m.elapsedMs);
+        if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed > 48 * 3600e3) break;
+        let ms = Date.now() - elapsed;
+        if (state.race.startMs) ms = Math.max(ms, state.race.startMs);
+        car.state.stintStartMs = ms;
+        break;
+      }
 
       // A set that came off is kept (back in the pool) or scrapped (out of the
       // pool for good, with the reason recorded). Answers the pending question
@@ -1148,8 +1480,29 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
         if (car.state.pendingSetDecision?.setId === set.id) car.state.pendingSetDecision = null;
         // Never leave a scrapped set as the plan's chosen rubber.
         if (set.scrapped && car.nextStop.tyreSetId === set.id) car.nextStop.tyreSetId = null;
+        // A binned set is out of its warmer too — nothing in the bin is hot.
+        reconcileTyreWarmers(car);
         break;
       }
+
+      // How many tyre warmers the garage has. Growing adds empty boxes;
+      // shrinking takes the empty ones first, so the count can be corrected
+      // without tipping hot rubber onto the floor.
+      case 'tyreWarmerCount': {
+        if (!car) break;
+        const count = Math.round(Number(m.count));
+        if (!Number.isFinite(count)) break;
+        car.config.tyreWarmers = Math.max(0, Math.min(TYRE_WARMER_MAX, count));
+        reconcileTyreWarmers(car);
+        break;
+      }
+
+      // What is in one of them: a set off the rack, or nothing. A set already
+      // in another box moves rather than being cloned — there is only one of
+      // it — and the set on the car or in the bin never goes in.
+      case 'tyreWarmerLoad':
+        if (car) loadTyreWarmer(car, m.warmerId, m.setId || null);
+        break;
 
       // Same control for a numbered brake set: out of the rack for good (with
       // the reason recorded) or back in it. A binned set can always be
@@ -1169,7 +1522,68 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
           for (const k of PLAN_KEYS) {
             if (car.nextStop.pins?.[k]?.brakeSets?.[m.comp] === set.id) delete car.nextStop.pins[k].brakeSets[m.comp];
           }
+          // A binned part is bedded onto nothing — the kit it was half of is
+          // dissolved so the rack never calls for a set that is in the bin.
+          reconcileBrakeKits(car);
         }
+        break;
+      }
+
+      // A measured figure beats the counter. The hours on a brake part are
+      // normally run time, but the crew that gauges a pad knows how much life
+      // is really gone — the station turns their percent into hours and sends
+      // it here. For a part in the rack the figure goes on the set; for the
+      // part on the car it re-seeds the live counter, less the stint already
+      // running, so the panel reads the typed figure now and counts on from it.
+      case 'brakeSetHours': {
+        if (!car || !BRAKE_COMPONENTS.some(b => b.id === m.comp)) break;
+        const set = brakeSetsOf(car, m.comp).find(t => t.id === m.setId);
+        if (!set) break;
+        const hours = Math.max(0, +m.hours || 0);
+        if (set.id === car.state.currentBrakeSetId?.[m.comp]) {
+          const now = Date.now();
+          const start = stintStartOf(car, state.race);
+          const stintH = raceClock(state.race, now).running && start
+            ? Math.max(0, now - start) / 3600e3 : 0;
+          car.state.brakeUsedH[m.comp] = +Math.max(0, hours - stintH).toFixed(4);
+          set.used = true;
+        } else {
+          set.hours = +hours.toFixed(4);
+          set.used = set.hours > 0;
+        }
+        break;
+      }
+
+      // Bed a pad set onto a disc set, or take it back off. This is the whole
+      // of what makes a kit: the two parts marry, the kit takes a name, and
+      // from then on they are called for together.
+      case 'brakeKitLink': {
+        const a = brakeAxle(m.axle);
+        if (!car || !a) break;
+        const disc = brakeSetsOf(car, a.discs).find(t => t.id === m.discSetId);
+        if (!disc) break;
+        if (m.padSetId) {
+          const pad = brakeSetsOf(car, a.pads).find(t => t.id === m.padSetId);
+          // Nothing out of the bin gets bedded onto anything.
+          if (!pad || pad.scrapped || disc.scrapped) break;
+          linkBrakeKit(car, a.id, disc.id, pad.id, m.name);
+        } else {
+          // The kit on the car cannot be taken apart on paper — those two
+          // parts are running together right now.
+          const cur = car.state.currentBrakeSetId || {};
+          if (cur[a.discs] === disc.id && cur[a.pads] === disc.padSetId) break;
+          linkBrakeKit(car, a.id, disc.id, null);
+        }
+        break;
+      }
+
+      case 'brakeKitRename': {
+        const a = brakeAxle(m.axle);
+        if (!car || !a) break;
+        const kit = kitOfDiscSet(car, a.id, m.discSetId);
+        if (!kit) break;
+        const name = String(m.name || '').trim().slice(0, 12);
+        if (name) kit.disc.kitName = name;
         break;
       }
 
@@ -1405,7 +1819,10 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
     const now = Date.now();
     const s = car.state;
     const stop = car.nextStop;
-    const stintMs = s.stintStartMs ? Math.max(0, now - s.stintStartMs) : 0;
+    // Clamped to the race start: a stint anchored in an earlier session must
+    // not fold six days of brake hours and seat time into this stop.
+    const stintStartMs = stintStartOf(car, state.race);
+    const stintMs = stintStartMs ? Math.max(0, now - stintStartMs) : 0;
 
     for (const k of Object.keys(s.brakeUsedH)) {
       s.brakeUsedH[k] = +(s.brakeUsedH[k] + stintMs / 3600e3).toFixed(4);
@@ -1417,7 +1834,7 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
     const stats = stintStats(s.stintLapSec);
     const fuelAtEntry = s.fuelLiters;
     car.stintHistory.push({
-      startMs: s.stintStartMs,
+      startMs: stintStartMs,
       endMs: now,
       driverId: car.currentDriverId,
       laps: s.lapsThisStint,
@@ -1471,6 +1888,8 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
         s.tyreLapsOnSet = 0;
       }
       s.tyreSetsUsed = sets.filter(t => t.used).length;
+      // The set that just went on is out of its warmer — it is on the car.
+      reconcileTyreWarmers(car);
     }
     if (stop.driverChange) car.currentDriverId = stop.driverChange;
     // Brakes, component group by component group: the part that comes off banks
@@ -1478,6 +1897,25 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
     // and a used set going back on starts pre-worn so the meter keeps reading
     // total hours on that part.
     reconcileBrakeSets(car);
+    // A stop that never went through the card — hand-patched, or applied
+    // before the plan was materialised — still gets its parts the way the
+    // crew works: discs never come off without the pads that are bedded to
+    // them, and the pair comes off ONE kit rather than being answered twice.
+    stop.brakeSetIds ??= {};
+    for (const a of BRAKE_AXLES) {
+      if (stop[a.discs]) {
+        stop[a.pads] = true;
+        if (!stop.brakeSetIds[a.discs] || !stop.brakeSetIds[a.pads]) {
+          const kit = stopBrakeKit(car, a.id, stop);
+          if (kit) {
+            stop.brakeSetIds[a.discs] = kit.disc.id;
+            stop.brakeSetIds[a.pads] = kit.pad.id;
+          }
+        }
+      } else if (stop[a.pads] && !stop.brakeSetIds[a.pads]) {
+        stop.brakeSetIds[a.pads] = stopPadSet(car, a.id, stop)?.id || null;
+      }
+    }
     for (const b of BRAKE_COMPONENTS) {
       if (!stop[b.id]) continue;
       const sets = brakeSetsOf(car, b.id);
@@ -1501,6 +1939,9 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
         s.brakeUsedH[b.id] = 0;
       }
     }
+    // What came out of the box is a kit whether it was planned as one or not:
+    // the pads now on the car have run on the discs now on the car.
+    for (const a of BRAKE_AXLES) syncBrakeKitToCar(car, a.id);
 
     s.lapsThisStint = 0;
     s.stintStartMs = now;
@@ -1628,5 +2069,5 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, tickM
     .filter(i => i && i.family === 'IPv4' && !i.internal)
     .map(i => i.address);
 
-  return { port, ips, listBackups, restoreBackup, writeBackup, timing };
+  return { port, ips, listening, listBackups, restoreBackup, writeBackup, timing };
 }

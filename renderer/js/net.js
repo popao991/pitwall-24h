@@ -13,6 +13,7 @@ const RETRY_MS = 1500;
 export function connect({ url, onState, onStatus, onTiming, onMessage }) {
   let ws = null;
   let alive = false;
+  let reported = null; // last on/off told to the caller — null = nothing yet
   let queue = [];
   let lastRxMs = 0;
   let retryTimer = null;
@@ -28,7 +29,11 @@ export function connect({ url, onState, onStatus, onTiming, onMessage }) {
       dead.onopen = dead.onclose = dead.onerror = dead.onmessage = null;
       try { dead.close(); } catch { /* already gone */ }
     }
-    if (alive) onStatus?.(false);
+    // Report the drop even when the link was never up: a station whose first
+    // connect fails would otherwise sit on the page's "connecting…" forever,
+    // with every settings control inert and nothing on screen saying why.
+    if (alive || reported !== false) onStatus?.(false);
+    reported = false;
     alive = false;
     if (!retryTimer) {
       retryTimer = setTimeout(() => { retryTimer = null; open(); }, RETRY_MS);
@@ -41,6 +46,7 @@ export function connect({ url, onState, onStatus, onTiming, onMessage }) {
     ws.onopen = () => {
       alive = true;
       lastRxMs = Date.now();
+      reported = true;
       onStatus?.(true);
       for (const m of queue) ws.send(m);
       queue = [];

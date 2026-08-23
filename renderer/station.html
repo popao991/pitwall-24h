@@ -41,9 +41,9 @@
         <span class="lab">Pos</span><b class="num" id="now-pos">—</b>
         <span class="sub num" id="now-gap"></span>
       </span>
-      <span class="itm"><span class="lab">Driver</span><b id="now-driver">—</b>
+      <span class="itm edit" id="now-driver-itm" title="Click to correct who is in the car"><span class="lab">Driver</span><b id="now-driver">—</b>
         <span class="sub drvfeed" id="now-driver-feed" hidden></span></span>
-      <span class="itm"><span class="lab">Stint</span><b class="num" id="stint-time">0:00</b>
+      <span class="itm edit" id="now-stint-itm" title="Click to correct the stint clock"><span class="lab">Stint</span><b class="num" id="stint-time">0:00</b>
         <span class="sub num">/ <span id="stint-max">—</span></span></span>
       <span class="itm"><span class="lab">Last</span><b class="num" id="last-lap">--:--.-</b></span>
       <span class="itm" title="Time until the tank hits the safety level"><span class="lab">Fuel</span><b class="num" id="now-fuel">—</b></span>
@@ -78,8 +78,10 @@
               <button id="btn-fuel-correct" style="padding:4px 8px">SET</button></span>
             </div>
           </div>
-          <div class="panel pace">
+          <div class="panel pace" id="card-pace" data-faces data-expand>
             <h3>Pace — <span id="pace-driver">no driver</span></h3>
+            <div class="face on" data-face="now" data-face-label="NOW"
+                 data-face-title="The rolling average this driver is running, and the laps behind it">
             <div class="kv">
               <span class="k">Average over
                 <input id="pace-laps" type="number" min="1" max="30" step="1" title="How many of this driver's last laps the average covers" />
@@ -92,15 +94,50 @@
             <div class="kv"><span class="k">Best · slowest in window</span><span class="v" id="pace-range">—</span></div>
             <div class="kv" title="Timed laps in the window, out of every timed lap this driver has done"><span class="k">Laps counted</span><span class="v" id="pace-count">0</span></div>
             <div class="kv" id="pace-clean-row" hidden title="The same window without the in/out and traffic laps marked above"><span class="k">Clean-lap average</span><span class="v" id="pace-clean">—</span></div>
+            </div>
+            <!-- Where the lap time actually goes. A lap time says the car is
+                 three tenths off; the sectors say whether that is one corner,
+                 a tyre going away at the end of the lap, or traffic. -->
+            <div class="face" data-face="sectors" data-face-label="SECTORS"
+                 data-face-title="Sector by sector against our own best and the best in class">
+              <div class="kv" title="Our best sectors added up — the lap this car has already shown it can do">
+                <span class="k">Theoretical best</span>
+                <span class="v big" id="sect-theo">--:--.-</span>
+              </div>
+              <div class="kv"><span class="k">Best lap · in hand</span><span class="v" id="sect-hand">—</span></div>
+              <table class="sect-table">
+                <thead><tr>
+                  <th></th><th class="num">LAST</th><th class="num">OUR BEST</th>
+                  <th class="num">Δ</th><th class="num">CLASS</th><th class="num">Δ</th>
+                </tr></thead>
+                <tbody id="sect-body"></tbody>
+              </table>
+              <p class="hint" id="sect-empty">Live timing is off — connect the feed on the pit wall.</p>
+            </div>
           </div>
-          <div class="panel">
-            <h3>Tyres &amp; brakes</h3>
+          <div class="panel tyrepanel">
+            <h3>Tyres &amp; brakes
+              <button id="btn-warmers" class="warmbtn" aria-expanded="false"
+                title="Tyre warmers — how many the garage has and what is in them">
+                <i data-icon="warmer"></i><b id="warmer-badge">—</b>
+              </button>
+            </h3>
+            <!-- What is hot right now: the boxes, and the rubber in them. Filled
+                 from the same stock the stop plan fits, so a set is only ever in
+                 one place. -->
+            <div class="warmerpop hidden" id="warmer-pop"></div>
             <div class="kv"><span class="k">Laps on set</span><span class="v big" id="tyre-laps">0</span></div>
+            <div class="kv">
+              <span class="k" title="Set the laps actually on this set — for rubber fitted with history nobody typed in, or a count the feed got wrong. The set's banked mileage moves with it; total laps, the stint and fuel stay where they are.">Correct laps on set</span>
+              <span><input id="tyre-laps-correct" type="number" step="1" min="0" style="width:70px" title="Laps actually on this set" />
+              <button id="btn-tyre-laps-correct" style="padding:4px 8px">SET</button></span>
+            </div>
             <div class="meter" id="tyre-meter"><i></i></div>
             <div class="kv"><span class="k">Set on car</span><span class="v" id="tyre-current">—</span></div>
             <div class="kv"><span class="k">Laps left in set</span><span class="v" id="tyre-left">0</span></div>
             <div class="kv" title="Mileage banked on this set — green kilometres and the part driven under a neutralisation"><span class="k">Mileage · green · yellow</span><span class="v" id="tyre-km">—</span></div>
             <div class="kv"><span class="k">Sets used · fresh</span><span class="v" id="tyre-sets">1</span></div>
+            <div class="kv" title="Fresh sets on the shelf against the fewest the remaining distance still needs (running every set to its full life). The margin is what opportunistic changes under a flag are spending — when it reaches one, the app stops proposing them so a puncture or a wet switch late on does not find the shelf empty."><span class="k">Stock to flag</span><span class="v" id="tyre-stock">—</span></div>
             <div class="subhead">Brakes</div>
             <div id="brakes"></div>
           </div>
@@ -142,6 +179,12 @@
               <div class="kv"><span class="k">Laps this stint</span><span class="v big" id="laps-stint">0</span></div>
               <div class="kv"><span class="k">Total laps</span><span class="v" id="laps-total">0</span></div>
             </div>
+            <p class="hint warn" id="lap-catchup" hidden></p>
+            <div class="kv">
+              <span class="k" title="Set the lap count to what the car has actually run — moves the stint, the tyre on the car and its mileage with it. The fallback when the feed was down and nobody logged through it.">Correct total laps</span>
+              <span><input id="lap-correct" type="number" step="1" min="0" style="width:70px" title="Total laps actually run" />
+              <button id="btn-lap-correct" style="padding:4px 8px">SET</button></span>
+            </div>
           </div>
           <div class="panel">
             <h3>Track condition</h3>
@@ -154,7 +197,54 @@
       <!-- RIGHT: the whole stop story + inputs -->
       <div class="col">
         <div class="panel planner">
-        <h3>Next pit stop</h3>
+        <h3>Next pit stop
+          <button id="btn-caution-cfg" class="cardcog"
+                  title="The figures behind the Code 60 / Safety Car call">
+            <i data-icon="gear"></i>
+          </button>
+        </h3>
+
+        <!-- The card flips to these. They are the inputs the neutralisation
+             call needs and nothing else has: how often cautions actually fall
+             here, and what fuel load and tyre wear are worth in lap time. -->
+        <div id="caution-cfg" hidden>
+          <p class="hint help">
+            What decides whether to take the Code 60 that is running or gamble on
+            the next one. Measured per car — the rate is the crew's own read of
+            the event.
+          </p>
+          <div class="cfg-grid">
+            <label title="Usable cautions per hour, from past runnings of this race. Zolder 2019–2025 measured 0.639/h counting Code 60 of 4 minutes or longer. 0 = no view, and the plans are ranked without the gamble.">
+              Cautions per hour
+              <input data-cpath="cautionsPerHour" type="number" step="0.01" min="0" max="10" />
+            </label>
+            <label title="What a kilometre on the tyres costs in lap time. This is what makes staying out on old rubber expensive — without it the call cannot see a reason to fit tyres.">
+              Tyre wear (s per km)
+              <input data-cpath="tyreDegSecPerKm" type="number" step="0.0001" min="0" />
+            </label>
+            <label title="What a litre of fuel on board costs in lap time. Smaller effect than tyre wear, but it is why running the tank down is quick.">
+              Fuel weight (s per litre)
+              <input data-cpath="fuelWeightSecPerL" type="number" step="0.0001" min="0" />
+            </label>
+            <label title="Green-flag lap. This is the pace everything is measured against: the discount a neutralisation hands back is the difference between it and the crawling lap below.">
+              Green lap (s)
+              <input data-cpath="avgLapSec.dry" type="number" step="0.1" min="0" />
+            </label>
+            <label title="A lap at Code 60. The regulated speed sets this, so it is mostly a cross-check — if the two disagree, one of them is measured wrong.">
+              Lap under Code 60 (s)
+              <input data-cpath="avgLapSec.fcy" type="number" step="0.1" min="0" />
+            </label>
+            <label title="A lap behind the Safety Car. Unlike Code 60 there is no regulated speed, so this figure IS the Safety Car discount — the single most important input to the SC answer.">
+              Lap behind Safety Car (s)
+              <input data-cpath="avgLapSec.sc" type="number" step="0.1" min="0" />
+            </label>
+          </div>
+          <div id="caution-out" class="cfg-out"></div>
+          <p class="hint help">
+            The break-even is the rate cautions would have to fall at before
+            waiting beats taking this one. Above your rate, take it.
+          </p>
+        </div>
 
         <!-- Three separate plans, one per situation — each with its own pinned
              lines and its own approval. The live one is marked and shown by
@@ -206,7 +296,10 @@
         <div class="stepper" id="stop-stepper">
           <span data-st="draft">PLANNED</span><span data-st="sent">SENT</span><span data-st="box">BOX</span><span data-st="inpit">IN PIT</span><span data-st="done">DONE</span>
         </div>
-        <div class="actions" id="stop-actions"></div>
+        <!-- Plain block: the JS injects its own .actions rows (and a .feedstate
+             line above them) — making this a flex row too would set the note and
+             the buttons side by side, stretched to one giant equal height. -->
+        <div id="stop-actions"></div>
         <div class="status-line" id="stop-status">— PLANNED —</div>
         </div>
 
@@ -241,7 +334,7 @@
   <div class="trkview hidden" id="trkview"></div>
 
   <div class="overlay hidden" id="settings-overlay">
-    <div class="modal">
+    <div class="modal tabbed">
       <div class="modal-head">
         <h2><i data-icon="gear"></i> CAR SETTINGS</h2>
         <button id="btn-settings-close"><i data-icon="x"></i> CLOSE</button>
@@ -251,11 +344,18 @@
         <button data-tab="fuel">FUEL</button>
         <button data-tab="wear">WEAR &amp; PIT</button>
         <button data-tab="drivers">DRIVERS</button>
-        <button data-tab="presets">PRESETS</button>
+        <button data-tab="setup">CAR FILE</button>
         <button data-tab="connection">CONNECTION</button>
         <button data-tab="display">DISPLAY</button>
       </div>
       <div class="modal-body">
+        <p class="hint warn setoffline" id="settings-offline">
+          <b>No pit wall — these pages are filling in a CAR FILE on this PC.</b>
+          Everything here (car, fuel, pace, wear, drivers, tyre and brake sets) is
+          saved on this machine only: nothing is sent to a car. Build the setup, save
+          it under CAR FILE, and load that file onto the car once the pit wall is up.
+          Connect a station (CONNECTION tab) and these pages switch to the real car.
+        </p>
         <section data-pane="car">
           <h3>Car information</h3>
           <div class="form-grid">
@@ -333,10 +433,10 @@
           <div class="form-grid">
             <label>Tyre life (km) <input data-path="config.tyreLifeKm" type="number" step="10" title="Distance a set is good for — laps follow from the track length" /></label>
             <label>Tyre sets available <input data-path="config.tyreSets" type="number" step="1" /></label>
-            <label>Pads front life (h) <input data-path="config.brakeLifeH.padsFront" type="number" step="any" /></label>
-            <label>Pads rear life (h) <input data-path="config.brakeLifeH.padsRear" type="number" step="any" /></label>
-            <label>Discs front life (h) <input data-path="config.brakeLifeH.discsFront" type="number" step="any" /></label>
-            <label>Discs rear life (h) <input data-path="config.brakeLifeH.discsRear" type="number" step="any" /></label>
+            <label>Front pads life (h) <input data-path="config.brakeLifeH.padsFront" type="number" step="any" /></label>
+            <label>Front discs life (h) <input data-path="config.brakeLifeH.discsFront" type="number" step="any" /></label>
+            <label>Rear pads life (h) <input data-path="config.brakeLifeH.padsRear" type="number" step="any" /></label>
+            <label>Rear discs life (h) <input data-path="config.brakeLifeH.discsRear" type="number" step="any" /></label>
           </div>
           <p class="hint help">
             Tyre life is a distance: <span id="tyrelife-laps">—</span>. Change the track length
@@ -346,33 +446,96 @@
         </section>
         <section data-pane="wear">
           <h3>Tyre sets</h3>
-          <div id="tyreset-list"></div>
+          <div id="tyreset-list"><p class="hint">The set list arrives with the pit wall link.</p></div>
           <div class="modal-actions">
-            <button class="primary" id="btn-tyreset-add"><i data-icon="plus"></i> ADD SET</button>
+            <button class="primary" id="btn-tyreset-add" disabled title="waiting for the pit wall"><i data-icon="plus"></i> ADD SET</button>
+            <button id="btn-tyreset-gen" disabled title="waiting for the pit wall"><i data-icon="tyre"></i> GENERATE SETS&hellip;</button>
+          </div>
+          <div class="setgen" id="tyreset-gen" hidden>
+            <div class="form-grid">
+              <label>How many sets <input id="gen-count" type="number" min="1" max="50" step="1" /></label>
+              <label>Starting number <input id="gen-start" type="number" min="0" step="1" /></label>
+              <label>Naming pattern <input id="gen-pattern" type="text" placeholder="S[#]_GVP" /></label>
+            </div>
+            <div class="modal-actions">
+              <button class="flag" id="btn-gen-replace" title="Sweep out the sets nobody has run yet — the set on the car, every used set and every scrapped one stay">REPLACE UNUSED</button>
+              <button class="primary" id="btn-gen-go"><i data-icon="check"></i> GENERATE</button>
+              <button id="btn-gen-cancel">CANCEL</button>
+            </div>
+            <div class="setgen-preview" id="gen-preview"></div>
+            <p class="hint" id="gen-note"></p>
           </div>
           <p class="hint help">
-            Every set the car has for the race, by name. The set on the car accrues the
+            Every set the car has for the race, by name. GENERATE SETS&hellip; writes the
+            whole allocation in one go: a naming pattern (<b>[#]</b> is where the number
+            goes, <b>[###]</b> pads it to 001), a starting number and a count &mdash; so
+            the list reads the way the stickers on the rubber do. REPLACE UNUSED swaps out
+            the sets nobody has run yet; the set on the car, every used set and every
+            scrapped one stay, mileage and all.
+            The set on the car accrues the
             laps counter above and banks its mileage lap by lap (track length per lap,
             with the part driven under a neutralisation counted separately). A stop with
             TYRES moves the wear into the outgoing set and fits the chosen one (FIT SET in
             the stop planner — default: the next new set); the set that comes off then asks
             to be kept or scrapped. Refitting a used set starts it pre-worn with its
-            recorded laps. SCRAP takes a set out of the pool for good — it disappears from
+            recorded laps. Rubber that arrives with mileage on it &mdash; a test day, a set
+            bought used &mdash; is typed straight into the laps and km boxes; km is what tyre
+            life is measured against, so a set with laps but no kilometres still reads as
+            good for a full life. Both back to zero and the set is new again.
+            SCRAP takes a set out of the pool for good — it disappears from
             FIT SET and the app will never choose it — until RESTORE brings it back.
             "Tyre sets available" above and this list stay in sync.
           </p>
         </section>
         <section data-pane="wear">
-          <h3>Brake sets</h3>
+          <h3>Brake rack</h3>
           <div class="form-grid">
-            <label>Pads front sets <input data-path="config.brakeSets.padsFront" type="number" min="1" step="1" /></label>
-            <label>Pads rear sets <input data-path="config.brakeSets.padsRear" type="number" min="1" step="1" /></label>
-            <label>Discs front sets <input data-path="config.brakeSets.discsFront" type="number" min="1" step="1" /></label>
-            <label>Discs rear sets <input data-path="config.brakeSets.discsRear" type="number" min="1" step="1" /></label>
+            <label>Front pad sets <input data-path="config.brakeSets.padsFront" type="number" min="1" step="1" /></label>
+            <label>Front disc sets <input data-path="config.brakeSets.discsFront" type="number" min="1" step="1" /></label>
+            <label>Rear pad sets <input data-path="config.brakeSets.padsRear" type="number" min="1" step="1" /></label>
+            <label>Rear disc sets <input data-path="config.brakeSets.discsRear" type="number" min="1" step="1" /></label>
           </div>
-          <div id="brakeset-list"></div>
           <p class="hint help">
-            The rack, by part number. Front discs are one numbered pair and rear discs
+            The rack reads like the car: front on the left, rear on the right, one box per kit.
+            Pads are bedded onto discs: a pad set bedded onto a disc set is a <b>kit</b>, and a kit
+            is what the car runs and what a stop calls for by name (F1, R2&hellip;). Bed a set on with
+            <b>BED PADS</b> on the head of a disc box, or open a free pad set and use <b>BED ONTO</b>.
+            Each line is a part &mdash; its number, its hours and the bar of life it has left;
+            <b>click a line</b> to change the number written on it, correct its wear &mdash; as hours
+            run or as the <b>percent left</b> a gauge reads, either box writes the other &mdash; scrap
+            it or take it off the rack. The part on the car takes a correction too: the live counter
+            picks up the typed figure and ticks on from it. What comes out of the box is always a kit &mdash; fit pads onto the
+            discs already on the car and the rack re-ties itself to match.
+          </p>
+          <div id="brakeset-list"><p class="hint">The rack arrives with the pit wall link.</p></div>
+          <div class="modal-actions">
+            <button id="btn-brakeset-gen" disabled title="waiting for the pit wall"><i data-icon="brake"></i> GENERATE SETS&hellip;</button>
+          </div>
+          <div class="setgen" id="brakeset-gen" hidden>
+            <div class="setgen-comps" id="bgen-comps"></div>
+            <div class="form-grid">
+              <label>How many sets <input id="bgen-count" type="number" min="1" max="50" step="1" /></label>
+              <label>Starting number <input id="bgen-start" type="number" min="0" step="1" /></label>
+              <label>Naming pattern <input id="bgen-pattern" type="text" placeholder="[P][#]" /></label>
+            </div>
+            <div class="modal-actions">
+              <button class="flag" id="btn-bgen-replace" title="Sweep out the sets nobody has run yet — the set on the car, every used set and every scrapped one stay">REPLACE UNUSED</button>
+              <button class="primary" id="btn-bgen-go"><i data-icon="check"></i> GENERATE</button>
+              <button id="btn-bgen-cancel">CANCEL</button>
+            </div>
+            <div id="bgen-preview"></div>
+            <p class="hint" id="bgen-note"></p>
+          </div>
+          <p class="hint help">
+            The rack, by part number. GENERATE SETS&hellip; writes whole pools at once:
+            tick the component groups, then give a naming pattern, a starting number
+            and a count &mdash; <b>[P]</b> is that group's own prefix (PF, PR, DF, DR),
+            <b>[#]</b> is the number and <b>[###]</b> pads it, so <b>[P][#]</b> makes
+            PF1&hellip; and DR1&hellip; in one pass. The starting number continues the
+            series already on the rack, and REPLACE UNUSED swaps out the sets nobody
+            has run &mdash; the set on the car, every used set and every scrapped one
+            stay, hours and all.
+            Front discs are one numbered pair and rear discs
             another, and so are the front and rear pads — each is one line here and one
             line on the stop card. Type the number that is written on the part; the
             hours counter above belongs to whichever set is on the car. A stop that
@@ -457,7 +620,29 @@
             only used when the FUEL tab's model is set to <b>per lap time</b>.
           </p>
         </section>
-        <section data-pane="presets">
+        <section data-pane="setup">
+          <h3>Car file</h3>
+          <p class="hint" id="carfile-status" hidden></p>
+          <div class="preset-save">
+            <button class="primary" id="btn-carfile-save"><i data-icon="save"></i> SAVE CAR FILE&hellip;</button>
+            <button id="btn-carfile-load"><i data-icon="folder"></i> LOAD CAR FILE&hellip;</button>
+            <button id="btn-carfile-reset" class="danger" hidden><i data-icon="refresh"></i> EMPTY THE DRAFT</button>
+          </div>
+          <div id="carfile-summary"></div>
+          <p class="hint help">
+            A car file is one JSON file holding everything that belongs to <b>this car</b>
+            — name, number, make and model, the fuel model and tank, burn rates and average
+            laps per condition, finish margin and safety fuel, tyre and brake life, tyre-change
+            time, the whole driver table (including the fuel-vs-lap-time curves) and the tyre
+            and brake racks by name. What it deliberately does <b>not</b> hold is the event:
+            track length, pit lane, refuelling rig and drive-time regulations are the same for
+            every car and are set once on the pit wall &mdash; that is the line the file draws
+            between the two kinds of setting.
+            Loading one never touches race data: laps, mileage, banked hours, seat time and
+            every set that has already run stay exactly as they are, so a file can be loaded
+            mid-race to correct a figure. Prepare the four files at home with no pit wall
+            running at all, keep them with the car, and each station is set up in one click.
+          </p>
           <h3>Setup presets</h3>
           <div class="preset-save">
             <input id="preset-name" type="text" placeholder="preset name, e.g. Spa dry" />
@@ -605,6 +790,44 @@
         </table>
       </div>
     </div>
+  </div>
+
+  <!-- The reading of who is in the car and how long they have been out there,
+       corrected by hand — for the swap done on track radio that never reached
+       the sheet, or a stop the app missed. Opened by clicking DRIVER or STINT
+       in the NOW strip. -->
+  <div class="overlay hidden" id="incar-overlay">
+    <div class="modal">
+      <div class="modal-head">
+        <h2><i data-icon="driver"></i> IN THE CAR — CORRECT BY HAND</h2>
+        <button id="btn-incar-close"><i data-icon="x"></i> CLOSE</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid">
+          <label>Driver <select id="incar-driver"></select></label>
+          <label>Stint time <input id="incar-stint" type="text" placeholder="h:mm:ss" style="width:110px" /></label>
+        </div>
+        <p class="hint" id="incar-feed-hint" hidden></p>
+        <p class="hint help">
+          These override the app's own reading — they change nothing until APPLY.
+          The driver correction credits the WHOLE running stint to whoever is
+          chosen; for a normal driver change at a stop use DRIVER in the stop
+          planner instead, so the stop is logged. The stint time moves the
+          running stint's start, and everything read off it follows: seat time,
+          the drive-time regulations, and the brake hours banked at the next stop.
+        </p>
+        <div class="modal-actions">
+          <button class="primary" id="btn-incar-apply"><i data-icon="check"></i> APPLY</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- One card, thrown up at a size that reads from across the garage. The
+       card itself is moved in here and keeps updating; a placeholder holds its
+       place in the column so the page does not re-fit behind the overlay. -->
+  <div class="overlay hidden" id="focus-overlay">
+    <div class="focusbox" id="focus-box"></div>
   </div>
 
   <script type="module" src="js/station.js"></script>

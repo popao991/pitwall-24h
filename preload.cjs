@@ -6,5 +6,7 @@ contextBridge.exposeInMainWorld('pitwallApi', {
   checkUpdates: () => ipcRenderer.invoke('check-updates'),
   listBackups: () => ipcRenderer.invoke('list-backups'),
   backupNow: () => ipcRenderer.invoke('backup-now'),
-  restoreBackup: name => ipcRenderer.invoke('restore-backup', name)
+  restoreBackup: name => ipcRenderer.invoke('restore-backup', name),
+  saveCarFile: (suggestedName, data) => ipcRenderer.invoke('save-car-file', { suggestedName, data }),
+  openCarFile: () => ipcRenderer.invoke('open-car-file')
 });

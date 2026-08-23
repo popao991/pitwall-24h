@@ -13,8 +13,10 @@
   --well: #0e1520;         /* meter tracks, timeline base */
   --night-row: #131b2e;    /* night stints in the plan table */
   --tl-future: #31405a;    /* projected future stints on the timeline */
+  --tl-night: #3b4d7a;     /* the 21:00–06:00 ribbon above the timeline bar */
   --fcy-bg: #2a2110;
   --flash-bg: #2a1414;
+  --go-bg: #12281a;        /* green "stays as is" tint: stay-out verdict, first in queue */
   --overlay: rgba(4, 8, 14, .78);
   /* race-condition top bar: base tint and the brighter pulse peak */
   --cond-yellow: #ffd23f;
@@ -29,6 +31,14 @@
   --cond-red-strip: #571313;
   --cond-finish-strip: #2e3750;
   --font-num: 'Consolas', 'Segoe UI', monospace;
+  /* A station scales its whole page with body zoom (station.js autofit), and
+     inside a zoomed body a vh or vw paints at zoom × the viewport — so the
+     things that have to match the real screen, the fixed overlays, measure
+     themselves with these instead. station.js keeps --uizoom in step; on the
+     pit wall, which zooms the board and not the body, it stays 1. */
+  --uizoom: 1;
+  --vw-fit: calc(100vw / var(--uizoom));
+  --vh-fit: calc(100vh / var(--uizoom));
   /* Scrollbars and number spinners are drawn by the browser, so the theme has
      to be declared or they come out white — which a station's columns, once
      they are allowed to scroll, would put a bright stripe of down the middle
@@ -54,8 +64,10 @@ body.light {
   --well: #d7dfe9;
   --night-row: #dde4f0;
   --tl-future: #b6c3d6;
+  --tl-night: #8fa3c8;
   --fcy-bg: #fdf1da;
   --flash-bg: #ffdada;
+  --go-bg: #d8f7e2;
   --overlay: rgba(23, 32, 45, .45);
   --cond-yellow: #8a6000;
   --cond-yellow-bg: #ffe9a8;
@@ -305,6 +317,64 @@ input[type="number"] { font-family: var(--font-num); text-align: right; }
   }
 }
 
+/* ---------- startup splash — the start-lights gantry ---------- */
+
+.startup {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 34px;
+  transition: opacity .6s ease;
+}
+.startup.out { opacity: 0; pointer-events: none; }
+.startup .gantry {
+  display: flex;
+  gap: 18px;
+  padding: 16px 22px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+.startup .slight {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: var(--well);
+  border: 1px solid var(--line);
+  transition: background .12s, box-shadow .12s;
+}
+.startup .slight.on {
+  background: var(--red);
+  border-color: var(--red);
+  box-shadow:
+    0 0 18px color-mix(in srgb, var(--red) 70%, transparent),
+    0 0 46px color-mix(in srgb, var(--red) 35%, transparent);
+}
+/* all five go dark together the instant the splash starts fading */
+.startup.out .slight {
+  background: var(--well);
+  border-color: var(--line);
+  box-shadow: none;
+}
+.startup .boot-brand {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  animation: picker-rise .5s ease backwards;
+}
+.startup .boot-brand span { color: var(--accent); }
+
+/* hold the launcher entrance until lights-out so it rises in as the splash
+   clears, not hidden behind it */
+html.booting .picker :is(h1, .sub, .chequer, .card, .verline) {
+  animation-play-state: paused;
+}
+
 /* ---------- common chrome ---------- */
 
 .topbar {
@@ -323,6 +393,7 @@ input[type="number"] { font-family: var(--font-num); text-align: right; }
 .conn { font-size: 13px; padding: 3px 10px; border-radius: 10px; border: 1px solid var(--line); color: var(--dim); }
 .conn.ok { color: var(--green); border-color: var(--green); }
 .conn.bad { color: var(--red); border-color: var(--red); }
+.conn.warn { color: var(--amber); border-color: var(--amber); }
 
 /* ---------- race condition: the top bar IS the indicator ----------
    Green is deliberately unstyled — it is the normal state and must not
@@ -548,6 +619,72 @@ input[type="number"] { font-family: var(--font-num); text-align: right; }
   text-transform: uppercase;
 }
 
+/* CARD FACES — one card, several readings, chosen per screen (faces.js).
+   The panel is a column so the showing face can flex into a pinned height and
+   scroll inside it: a face swap must never change the card's height, because
+   the station auto-fits the page to the sum of its panels and would re-zoom
+   the whole UI behind the tap. */
+.panel.faced { display: flex; flex-direction: column; }
+.panel.faced > h3 { display: flex; align-items: center; gap: 10px; flex: none; }
+.panel.faced > h3 > .cardtitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.panel.faced > h3 > .facetabs { margin-left: auto; flex: none; }
+.face { display: none; }
+.face.on { display: block; flex: 1; min-height: 0; overflow: auto; }
+
+.facetabs { display: flex; gap: 3px; }
+.facetabs button {
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: var(--well);
+  color: var(--dim);
+  font-size: 10px;
+  letter-spacing: 1px;
+}
+.facetabs button:hover { color: var(--fg); }
+.facetabs button.on { background: var(--accent); color: #04121c; }
+
+/* ⤢ — the same card, thrown up over the grid at a size that reads across the
+   garage. The panel is moved into the overlay, not copied, so it keeps
+   updating; a placeholder holds its height in the column behind. */
+.facezoom {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--dim);
+  font-size: 13px;
+  line-height: 1;
+  flex: none;
+}
+.panel.faced > h3 > .facetabs + .facezoom { margin-left: 6px; }
+.panel.faced > h3 > .facezoom:first-of-type { margin-left: auto; }
+.facezoom:hover { color: var(--accent); }
+.focus-ph { visibility: hidden; }
+/* Wide enough to read from a few metres, narrow enough that a label and its
+   value stay next to each other — a .kv row justifies to the full width, and
+   at 1200px "Theoretical best" and its number end up at opposite ends of the
+   screen. */
+.focusbox {
+  width: min(860px, calc(0.94 * var(--vw-fit)));
+  max-height: calc(0.92 * var(--vh-fit));
+  display: flex;
+}
+.panel.expanded {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px 24px;
+  font-size: 124%;
+}
+.panel.expanded > h3 { font-size: 16px; }
+
 .kv { display: flex; justify-content: space-between; align-items: baseline; padding: 3px 0; }
 /* display:flex would otherwise win over the browser's own [hidden] rule, so a
    row switched off in JS has to be switched off here too */
@@ -639,6 +776,9 @@ body.page-scroll .station .main > .col { overflow-y: auto; min-height: 0; }
 }
 .nowstrip b { font-size: 19px; font-weight: 700; }
 .nowstrip .sub { color: var(--dim); font-size: 13px; }
+/* the two readings the engineer can correct by hand (driver, stint clock) */
+.nowstrip .itm.edit { cursor: pointer; }
+.nowstrip .itm.edit:hover b { text-decoration: underline dotted; }
 .nowstrip .warn { color: var(--amber); }
 .nowstrip .crit { color: var(--red); }
 .alertchip {
@@ -668,6 +808,15 @@ body.page-scroll .station .main > .col { overflow-y: auto; min-height: 0; }
 .gaugerow .panel { min-width: 0; }
 .axlehead { color: var(--dim); font-size: 12px; letter-spacing: 1.5px; margin: 8px 0 2px; }
 .axlehead:first-child { margin-top: 0; }
+/* The kit on that axle, named. It is the headline the axle is read under —
+   the two part numbers below it are the detail. */
+.axlehead .kitname {
+  font-family: var(--font-num);
+  color: var(--accent);
+  letter-spacing: 1px;
+  margin-left: 6px;
+}
+.axlehead .kitname.none { color: var(--amber); }
 
 /* Second subject inside one card — tyres and brakes share the wear card, so
    the rubber and the discs stay one glance apart without becoming one list. */
@@ -731,6 +880,30 @@ body.page-scroll .station .main > .col { overflow-y: auto; min-height: 0; }
   background: color-mix(in srgb, var(--accent) 9%, transparent);
 }
 .around-table tr.inpit td { opacity: .62; }
+
+/* PACE · SECTORS — where the lap time is going. Six narrow columns in a third
+   of the left column, so everything is tabular and the header carries the
+   units; the ⤢ is there for when the deltas need reading from further away. */
+.sect-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
+.sect-table th {
+  font-size: 9px;
+  letter-spacing: 1px;
+  color: var(--dim);
+  font-weight: 600;
+  text-align: right;
+  padding: 0 4px 3px;
+}
+.sect-table td { padding: 3px 4px; white-space: nowrap; }
+.sect-table td.num, .sect-table th.num {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.sect-table td.lab { color: var(--dim); font-size: 11px; letter-spacing: 1px; }
+.sect-table tr + tr td { border-top: 1px solid var(--line); }
+.sect-table td.good { color: var(--green); }
+.sect-table td.warn { color: var(--amber); }
+.sect-table td.crit { color: var(--red); font-weight: 700; }
 
 /* NEXT STOP: the lifecycle stepper on top of the planner */
 .stepper { display: flex; gap: 4px; margin-bottom: 8px; }
@@ -969,6 +1142,97 @@ body.page-scroll .station .main > .col { overflow-y: auto; min-height: 0; }
 .pline .setpicker .srow .nm { font-weight: 700; }
 .pline .setpicker .srow .meta { margin-left: auto; font-family: var(--font-num); font-size: 11px; color: var(--dim); }
 
+/* Tyre warmers — the boxes that say what rubber is hot. The button sits in the
+   tyre card's heading; the list drops out of it over the card. */
+.tyrepanel { position: relative; }
+.tyrepanel h3 { display: flex; align-items: center; gap: 8px; }
+.warmbtn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--dim);
+  background: var(--well);
+  letter-spacing: 0;
+}
+.warmbtn .ico { width: 16px; height: 16px; }
+.warmbtn b { font-family: var(--font-num); font-size: 12px; }
+.warmbtn:hover { color: var(--text); }
+.warmbtn.on { color: var(--accent); border-color: var(--accent); }
+/* the set the next stop fits is in none of them */
+.warmbtn.cold { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 55%, transparent); }
+
+.warmerpop {
+  position: absolute;
+  top: 44px;
+  right: 10px;
+  left: 10px;
+  z-index: 40;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  box-shadow: 0 14px 34px var(--overlay);
+}
+.warmerpop.hidden { display: none; }
+.warmerpop .wtop { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.warmerpop .wlab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  letter-spacing: 2px;
+  font-weight: 700;
+  color: var(--dim);
+}
+.warmerpop .wcount { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
+.warmerpop .wcount button { padding: 2px 11px; font-size: 15px; line-height: 1.3; }
+.warmerpop .wcount b { font-family: var(--font-num); font-size: 15px; min-width: 16px; text-align: center; }
+.warmerpop .wrows { max-height: 232px; overflow-y: auto; }
+.warmerpop .wrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 2px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+.warmerpop .wrow:last-child { border-bottom: none; }
+.warmerpop .wrow .wnm {
+  flex: 0 0 34px;
+  font-family: var(--font-num);
+  font-weight: 700;
+  color: var(--dim);
+}
+.warmerpop .wrow.on .wnm { color: var(--text); }
+.warmerpop .wrow select { flex: 1 1 120px; min-width: 0; padding: 4px 6px; font-size: 13px; }
+.warmerpop .wrow .wmeta {
+  flex: 1 1 auto;
+  text-align: right;
+  font-family: var(--font-num);
+  font-size: 11px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.warmerpop .wrow .wpill {
+  flex: none;
+  font-size: 10px;
+  letter-spacing: 1px;
+  font-weight: 700;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.warmerpop .wrow button { flex: none; padding: 4px 8px; color: var(--dim); }
+.warmerpop .wrow button:disabled { opacity: .3; }
+.warmerpop .hint { margin-top: 8px; }
+
 /* The approval tick — the line between "the app suggests" and "we are doing
    this". Set here, read-only on the wall. */
 .approvebar {
@@ -1203,7 +1467,10 @@ body.page-scroll .station .main > .col { overflow-y: auto; min-height: 0; }
 .limitbanner.crit { border-color: var(--red); }
 .limitbanner.crit .val { color: var(--red); }
 
-.timeline-wrap { overflow: hidden; }
+/* flex-shrink 0: overflow:hidden zeroes the automatic minimum size, which
+   let a tight column squash this panel to its header — autofit then measured
+   the squashed height and never zoomed out, so the chart just vanished. */
+.timeline-wrap { overflow: hidden; flex-shrink: 0; }
 .timeline-wrap svg { width: 100%; height: 150px; display: block; }
 
 .drv-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
@@ -1253,6 +1520,9 @@ body.page-scroll .station .main > .col { overflow-y: auto; min-height: 0; }
 .planner textarea { width: 100%; height: 44px; resize: none; }
 .planner .actions { display: flex; gap: 8px; margin-top: 12px; }
 .planner .actions button { flex: 1; font-weight: 800; letter-spacing: 1px; }
+/* The planner column is narrow: at button.big's 22px a long label like
+   STOP DONE — CAR RELEASED wraps into a banner. 18px matches BOX BOX. */
+.planner .actions button.big { font-size: 18px; padding: 10px 12px; }
 .planner .send { border-color: var(--amber); color: var(--amber); }
 .planner .box { border-color: var(--red); color: var(--red); font-size: 18px; }
 .planner .inpit { border-color: var(--accent); color: var(--accent); }
@@ -1268,6 +1538,11 @@ body.page-scroll .station .main > .col { overflow-y: auto; min-height: 0; }
 .overlay {
   position: fixed;
   inset: 0;
+  /* Sized rather than stretched: a fixed box inset to 0 inside a zoomed body
+     covers zoom × the screen, which pushes the modal it centres off the
+     bottom-right corner of a scaled-up station. */
+  width: var(--vw-fit);
+  height: var(--vh-fit);
   background: var(--overlay);
   display: flex;
   align-items: center;
@@ -1280,13 +1555,26 @@ body.page-scroll .station .main > .col { overflow-y: auto; min-height: 0; }
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 12px;
-  width: min(900px, 94vw);
-  max-height: 90vh;
-  min-height: min(560px, 90vh); /* stable height while switching tabs */
+  width: min(1040px, calc(0.94 * var(--vw-fit)));
+  max-height: calc(0.92 * var(--vh-fit));
+  /* stable height while switching tabs */
+  min-height: min(560px, calc(0.92 * var(--vh-fit)));
   display: flex;
   flex-direction: column;
 }
-.modal.wide { width: min(1100px, 96vw); }
+.modal.wide { width: min(1240px, calc(0.96 * var(--vw-fit))); }
+
+/* A tabbed modal holds one height for every tab. Sized to its content it grew
+   and shrank as panes swapped and, being centred, took its own head and tabbar
+   with it — the box ducking out from under the pointer between two clicks. */
+.modal.tabbed { height: min(760px, calc(0.92 * var(--vh-fit))); }
+.modal.tabbed .modal-body {
+  flex: 1;
+  min-height: 0;
+  /* Room for the scrollbar whether or not this tab needs one, so a short pane
+     does not sit 15px wider than a long one. */
+  scrollbar-gutter: stable;
+}
 
 .tabbar {
   display: flex;
@@ -1357,6 +1645,14 @@ body.page-scroll .station .main > .col { overflow-y: auto; min-height: 0; }
 .modal-actions { display: flex; gap: 10px; margin-top: 12px; }
 .hint { color: var(--dim); font-size: 13px; margin-top: 10px; line-height: 1.5; }
 .hint.warn { color: var(--amber); }
+/* Shown until the first state arrives, then hidden for good: a settings
+   page with no car behind it can only mislead. */
+.setoffline {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, transparent);
+  border-radius: 6px;
+}
 
 /* Manual text (.hint.help) hides behind the HELP toggle in the modal head so
    the forms read clean; live status .hint lines are not .help and always show. */
@@ -1442,6 +1738,7 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
 
 .preset-save { display: flex; gap: 8px; margin-bottom: 12px; }
 .preset-save input { flex: 1; }
+.preset-save button[disabled] { opacity: .35; cursor: not-allowed; }
 .preset-row {
   display: flex;
   align-items: center;
@@ -1680,11 +1977,14 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
 .correctform select { max-width: 190px; }
 .correctform .fixbrakes { display: flex; gap: 8px; flex-wrap: wrap; }
 .correctform .fixbrakes .toggle { padding: 5px 9px; font-size: 11px; }
-/* Each brake group corrects as a pair: whether it was changed, and onto which
-   numbered set. The select is dim until the group is toggled on. */
+/* Each axle corrects as one call — nothing, pads, or the whole kit — and then
+   which numbered parts really went on. Only the parts the call touches are
+   asked for: a pads-only stop never had a disc set to choose. */
 .correctform .fixbrake { display: flex; align-items: center; gap: 3px; }
-.correctform .fixbrake select { max-width: 84px; padding: 4px 5px; font-size: 11px; opacity: .5; }
-.correctform .fixbrake:has(.toggle.on) select { opacity: 1; }
+.correctform .fixbrake b { font-size: 11px; letter-spacing: 1px; color: var(--dim); margin-right: 2px; }
+.correctform .fixbrake select { max-width: 84px; padding: 4px 5px; font-size: 11px; }
+.correctform .fixbrake[data-work="none"] select { display: none; }
+.correctform .fixbrake[data-work="pads"] select[data-fixbset^="discs"] { display: none; }
 
 /* Tyre set rows in settings: state pill, mileage, and a two-step scrap. */
 .preset-row .setpill {
@@ -1703,7 +2003,269 @@ button.flag.on { background: var(--green); color: #04180a; border-color: var(--g
 .preset-row.isscrapped input[data-set-name] { text-decoration: line-through; }
 .preset-row .km { font-family: var(--font-num); font-size: 12px; color: var(--dim); }
 .preset-row .km em { font-style: normal; color: var(--amber); }
-.preset-row.isscrapped input[data-bset-name] { text-decoration: line-through; }
+/* A set is called whatever is written on the rubber — "26 DRO S12" as often
+   as "S1" — so the name box takes the room the row has spare instead of
+   clipping every name at two characters. */
+.preset-row input[data-set-name] { flex: 1 1 150px; min-width: 110px; max-width: 280px; }
+
+/* Laps and kilometres are both typed in, so the pair of boxes keeps its width
+   on a narrow station instead of being squeezed out of the row. */
+.preset-row .meta.figs { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; }
+
+/* ---------- the brake rack, read as a board ----------
+   The same anatomy the consumables board uses: the two axles side by side —
+   front where the left corner would be, rear where the right one would — and
+   inside each, one bordered block per kit with the disc set and the pads
+   bedded onto it on consecutive lines. A line is a glance: a glyph saying
+   which part it is, the number written on it, its hours, a bar for the life
+   that is left and a pill for its state. The boxes that CHANGE a part live in
+   a strip that folds out under the line that was clicked, because a rack read
+   from across a pit box must not look like a form. */
+.brack { margin-top: 4px; }
+.brack-board { display: grid; grid-template-columns: 1fr 1px 1fr; }
+.brack-vline { background: var(--line); }
+.brack-axle { min-width: 0; padding: 0 14px; }
+.brack-axle:first-child { padding-left: 0; }
+.brack-axle:last-child { padding-right: 0; }
+
+.brack-tag {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--dim);
+  font-size: 12px;
+  letter-spacing: 1.5px;
+  margin: 0 0 8px;
+}
+.brack-tag .meta { letter-spacing: 0; font-size: 11px; opacity: .8; }
+.brack-tag.sub { margin-top: 14px; font-size: 11px; }
+
+/* A kit is one object, so it gets one box. Dashed means the pair is not made:
+   a disc set with nothing bedded onto it, or the pads still waiting. */
+.brack-kit {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--line) 10%, transparent);
+  padding: 6px 8px 7px;
+  margin-bottom: 8px;
+}
+.brack-kit.oncar {
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.brack-kit.unbedded, .brack-kit.loose { border-style: dashed; }
+.brack-kithead { display: flex; align-items: center; gap: 6px; padding: 1px 2px 5px; }
+.brack-kithead button { margin-left: auto; padding: 3px 9px; font-size: 11px; }
+.brack-kithead button[disabled] { opacity: .35; cursor: not-allowed; }
+
+.brack-row {
+  display: grid;
+  grid-template-columns: 14px minmax(54px, 1fr) auto minmax(72px, 1.1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  margin: 0 -4px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.brack-row:hover, .brack-row:focus-visible { background: var(--panel-2); outline: none; }
+.brack-row.open { background: var(--panel-2); }
+.brack-row.isscrapped { opacity: .55; }
+.brack-row.isscrapped .brack-name { text-decoration: line-through; }
+
+.brack-glyph { color: var(--dim); display: inline-flex; }
+.brack-row.oncar .brack-glyph { color: var(--accent); }
+.g-disc {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  position: relative;
+  display: inline-block;
+}
+.g-disc::after {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: .45;
+}
+.g-pad { width: 12px; height: 8px; border: 2px solid currentColor; border-radius: 2px; display: inline-block; }
+
+.brack-name {
+  font-family: var(--font-num);
+  font-size: 13px;
+  font-weight: 700;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.brack-name small {
+  font-family: inherit;
+  font-weight: 400;
+  font-size: 10px;
+  letter-spacing: 0;
+  color: var(--dim);
+  margin-left: 6px;
+}
+.brack-val {
+  font-family: var(--font-num);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+.brack-val.warn { color: var(--amber); }
+.brack-val.crit { color: var(--red); }
+.brack-val.scrapped { color: var(--dim); }
+
+.brack-barwrap { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.brack-bar {
+  height: 6px;
+  border-radius: 4px;
+  background: var(--well);
+  overflow: hidden;
+  flex: 1;
+  min-width: 26px;
+}
+.brack-bar i { display: block; height: 100%; border-radius: 4px; background: var(--green); }
+.brack-bar.warn i { background: var(--amber); }
+.brack-bar.crit i { background: var(--red); }
+.brack-bar.scrapped i { background: var(--dim); }
+.brack-left {
+  font-family: var(--font-num);
+  font-size: 11px;
+  color: var(--dim);
+  white-space: nowrap;
+  width: 30px;
+  text-align: right;
+}
+.brack-left.warn { color: var(--amber); }
+.brack-left.crit { color: var(--red); }
+
+.brack-pill {
+  font-family: var(--font-num);
+  font-size: 9.5px;
+  letter-spacing: 1px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.brack-pill.new { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
+.brack-pill.oncar { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.brack-pill.scrapped { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+
+.brack-nopad { color: var(--amber); font-size: 11px; padding: 3px 6px 1px 26px; }
+
+/* The editor and the two-step asks: same shape, folded out under the line they
+   belong to so it is never in doubt which part is being changed. */
+.brack-edit, .brack-ask {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 2px -4px 4px;
+  padding: 7px 8px;
+  border-radius: 6px;
+}
+.brack-edit { background: var(--field); border: 1px solid var(--line); }
+.brack-ask { background: var(--panel-2); border: 1px dashed var(--line); }
+.brack-edit label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--dim);
+}
+.brack-edit input[type="text"] { width: 96px; }
+.brack-edit input[type="number"] { width: 64px; font-family: var(--font-num); }
+.brack-ask .meta { color: var(--dim); font-size: 11px; }
+.brack-editacts, .brack-askacts {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.brack-edit button, .brack-ask button { padding: 4px 9px; font-size: 11px; }
+.brack-edit button[disabled] { opacity: .35; cursor: not-allowed; }
+
+/* The kit's name, on the head of the box it names. */
+.kitchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-num);
+  font-size: 10px;
+  letter-spacing: 1px;
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 4px;
+  color: var(--accent);
+}
+.kitchip.none { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
+.kitchip input {
+  width: 52px;
+  padding: 1px 4px;
+  font-family: var(--font-num);
+  font-size: 11px;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid transparent;
+  min-width: 0;
+}
+.kitchip input:hover, .kitchip input:focus { border-color: var(--line); }
+
+/* A station narrow enough that two columns would squeeze the bars out reads
+   the axles one under the other instead. */
+@media (max-width: 820px) {
+  .brack-board { grid-template-columns: 1fr; }
+  .brack-vline { display: none; }
+  .brack-axle { padding: 0; }
+  .brack-axle + .brack-axle { margin-top: 16px; }
+}
+
+/* Generating a batch of sets: the form sits under the list, and the preview is
+   the names it would write — a clashing name is flagged red before anything is
+   committed, since the whole point is to get the labels right in one pass. */
+.setgen {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--line) 12%, transparent);
+}
+.setgen .form-grid input[type="text"] { width: 150px; }
+.setgen-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+.setgen-preview .tag {
+  font-family: var(--font-num);
+  font-size: 11px;
+  letter-spacing: 1px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--dim);
+}
+.setgen-preview .tag.dup { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+.setgen button[disabled] { opacity: .35; cursor: not-allowed; }
+/* The rack generator writes several pools at once: which groups it covers
+   on top, then one preview line per group so each pool's names read on
+   their own. */
+.setgen-comps { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.setgen-row { display: flex; align-items: baseline; gap: 10px; }
+.setgen-row .axlehead { min-width: 62px; margin: 0; }
+.setgen-row .setgen-preview { margin-top: 8px; }
 
 /* The part number of the brake set on the car, next to its gauge label. */
 .setno {
@@ -1778,6 +2340,8 @@ body.board-tight .wallcard .foot .inpit { padding: 6px 4px; }
 body.board-min .grabtable td .n { display: none; }
 body.board-min .grabtable tfoot { display: none; }
 body.board-min .wallcard .carid .makemodel { display: none; }
+/* At the last size, the ordinal alone still says who goes first. */
+body.board-min .wallcard .pitorder .of { display: none; }
 
 .wallcard.sent { border-color: var(--amber); }
 .wallcard.box { border-color: var(--red); animation: boxflash 0.8s steps(2, start) infinite; }
@@ -1810,6 +2374,42 @@ body.board-min .wallcard .carid .makemodel { display: none; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Pit order — with more than one car on its way in, one crew cannot take them
+   all at once, so the card says where this car sits in the queue. Read off the
+   pit E.T.A.s, next to the number the crew already looks at. It is on screen
+   only while there IS an order, so its appearing is itself the news. */
+.wallcard .pitorder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--dim);
+  white-space: nowrap;
+}
+.wallcard .pitorder .ico { width: 19px; height: 19px; }
+.wallcard .pitorder .pos { display: flex; flex-direction: column; line-height: 1.05; }
+.wallcard .pitorder b {
+  font-family: var(--font-num);
+  font-size: 25px;
+  font-weight: 900;
+  color: var(--text);
+}
+.wallcard .pitorder .of { font-size: 11px; letter-spacing: 1.6px; }
+/* First in is the only car the crew can act on right now. */
+.wallcard .pitorder.first {
+  border-color: var(--green);
+  background: var(--go-bg);
+  color: var(--green);
+}
+.wallcard .pitorder.first b { color: var(--green); }
+/* Dead reckoned past a full lap without a crossing: the place is a guess, and
+   the ~ in front of it says so before anybody acts on it. */
+.wallcard .pitorder.est { opacity: 0.72; }
+
 .wallcard .incar { margin-left: auto; text-align: right; min-width: 0; }
 .wallcard .incar .lab { font-size: 12.5px; letter-spacing: 2px; color: var(--dim); }
 .wallcard .incar b {
@@ -1846,21 +2446,28 @@ body.board-min .wallcard .carid .makemodel { display: none; }
 .verdict .vmain small { font-weight: 600; font-size: 13px; letter-spacing: 0.5px; color: var(--dim); }
 .verdict.calm { color: var(--dim); }
 .verdict.calm .vmain b { color: var(--text); }
-.verdict.good { color: var(--green); }
+/* One rule for the whole card, band and grab list alike: RED is the car
+   changing — it comes in, that part comes off — and GREEN is it staying as
+   it is: stay out, keep what is on the car. Amber never answers the
+   question, it only warns about the answer (stop sent, fuel running low);
+   blue is the stop already happening. */
+.verdict.chg { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
 .verdict.go {
-  color: #04170a;
-  background: var(--green);
+  color: #210404;
+  background: var(--red);
   animation: fcypulse 1.6s ease-in-out infinite;
 }
 .verdict.go .vmain small { color: inherit; opacity: 0.75; }
-.verdict.hold { color: var(--amber); border-color: var(--amber); background: var(--fcy-bg); }
+.verdict.stay { color: var(--green); border-color: var(--green); background: var(--go-bg); }
 .verdict.sent { color: var(--amber); border-color: var(--amber); background: var(--fcy-bg); }
-.verdict.box { color: #fff; background: var(--red); }
+.verdict.box { color: #210404; background: var(--red); animation: fcypulse 1.2s ease-in-out infinite; }
 .verdict.inpit { color: #001322; background: var(--accent); }
+/* Low fuel is a hazard, not an instruction — it says nothing about whether
+   the car comes in, so it stays out of the green/red pair. */
 .verdict.warn { border-color: var(--amber); }
-.verdict.crit { border-color: var(--red); }
-.verdict .lowfuel { color: var(--red); }
-.verdict.go .lowfuel, .verdict.box .lowfuel { color: #7a0000; }
+.verdict.crit { border-color: var(--amber); animation: fcypulse 1.2s ease-in-out infinite; }
+.verdict .lowfuel { color: var(--amber); }
+.verdict.go .lowfuel, .verdict.box .lowfuel { color: #332000; }
 .verdict .vsub {
   text-align: center;
   line-height: 1.3;
@@ -1878,7 +2485,7 @@ body.board-min .wallcard .carid .makemodel { display: none; }
 .verdict.go .vsub, .verdict.box .vsub, .verdict.inpit .vsub { color: inherit; }
 .verdict.go .vsub small, .verdict.box .vsub small, .verdict.inpit .vsub small { color: inherit; opacity: 0.7; }
 @media (prefers-reduced-motion: reduce) {
-  .verdict.go { animation: none; }
+  .verdict.go, .verdict.box, .verdict.crit { animation: none; }
 }
 
 /* The words sit off their icons by more than the space between them. */
@@ -1901,9 +2508,6 @@ body.board-min .wallcard .carid .makemodel { display: none; }
 }
 .stationline.lost { color: var(--amber); border: 1px solid var(--amber); }
 
-/* answer tiles — one per crew station, fixed 2×2 grid. The verdict on each
-   tile is the action itself; amber = work at this stop, red = critical,
-   quiet = nothing to do. LIMIT marks the category forcing the next stop. */
 /* The crew's grab list: parts down the side, one column per situation. The
    yellow column is first because it is the one they can never prepare for
    once it happens. Every cell writes its instruction out in full — a column
@@ -1974,8 +2578,8 @@ body.board-min .wallcard .carid .makemodel { display: none; }
 .grabtable th.sc-sc .sit { background: color-mix(in srgb, var(--text) 10%, transparent); }
 .grabtable th.sc-green { color: var(--green); }
 .grabtable th.sc-green .sit { background: color-mix(in srgb, var(--green) 12%, transparent); }
-.grabtable th.sc-now { color: var(--red); }
-.grabtable th.sc-now .sit { background: var(--flash-bg); }
+.grabtable th.sc-now { color: var(--accent); }
+.grabtable th.sc-now .sit { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .grabtable td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 .grabtable tbody tr:last-child td { border-bottom: none; }
 .grabtable td.cat {
@@ -1998,14 +2602,21 @@ body.board-min .wallcard .carid .makemodel { display: none; }
   overflow-wrap: anywhere;
 }
 .grabtable td .n { display: block; font-family: var(--font-num); font-size: 13px; color: var(--dim); }
-.grabtable td.act { background: var(--fcy-bg); }
-.grabtable td.act .v { color: var(--amber); }
-.grabtable td.crit { background: var(--flash-bg); }
-.grabtable td.crit .v { color: var(--red); }
-.grabtable td.ok .v { color: var(--dim); font-weight: 700; font-size: 20px; }
+/* The colour is the instruction itself, never a health score: red comes
+   off the car, green stays on it. The red cells carry the tint as well, so
+   what the crew has to fetch is what pulls the eye from across the garage;
+   green is text alone — a car with nothing to change must not shout. Amber
+   is the third case: asked for, nothing free to do it with. */
+.grabtable td.chg { background: var(--flash-bg); }
+.grabtable td.chg .v { color: var(--red); }
+.grabtable td.keep .v { color: var(--green); font-weight: 700; font-size: 20px; }
+.grabtable td.blocked { background: var(--fcy-bg); }
+.grabtable td.blocked .v { color: var(--amber); }
 /* Same instruction as the column beside it: said in full, said quietly. */
 .grabtable td.echo .v { color: var(--dim); font-weight: 700; font-size: 20px; opacity: .75; }
-.grabtable tr.lim td.cat { color: var(--red); }
+/* The row that forces the next stop: a marker, not an instruction — amber,
+   so the pair of instruction colours keeps meaning only what it means. */
+.grabtable tr.lim td.cat { color: var(--amber); }
 .grabtable tfoot td {
   border-top: 1px solid var(--line);
   border-bottom: none;
@@ -2540,3 +3151,109 @@ body.light { --trk-s1: #c92730; --trk-s2: #7f8f0a; --trk-s3: #0e93a0; --trk-s4: 
 .rc-table tr.fcy td:last-child { color: var(--amber); }
 .rc-table tr.green td:last-child { color: var(--green); }
 .rc-table tr.pen td:last-child { color: var(--accent); }
+
+/* Reassigning a planned stint, inline in the plan table. Sized to sit inside
+   the row without changing its height, so an editable plan looks like the
+   plan rather than like a form. */
+select.plan-drv {
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 1px 2px;
+  max-width: 130px;
+  cursor: pointer;
+}
+select.plan-drv:hover,
+select.plan-drv:focus { border-color: var(--line); background: var(--panel); outline: none; }
+select.plan-drv option { background: var(--panel); color: var(--text); }
+
+/* The neutralisation-call inputs, reached from the cog on the NEXT PIT STOP
+   card. Opening them flips the card: everything except the heading and the
+   fields is hidden, so the card becomes its own settings pane rather than
+   growing a second panel somewhere else. */
+.planner h3 { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+button.cardcog {
+  background: transparent; border: 1px solid transparent; border-radius: 6px;
+  color: var(--muted, #8aa); padding: 2px 6px; cursor: pointer; line-height: 1;
+}
+button.cardcog:hover { border-color: var(--line); color: var(--text); }
+button.cardcog.on { background: var(--accent); color: #06121f; border-color: var(--accent); }
+.planner.cfg-open > *:not(h3):not(#caution-cfg) { display: none !important; }
+.cfg-grid { display: grid; gap: 10px; margin: 10px 0 4px; }
+.cfg-grid label { display: grid; gap: 4px; font-size: 12px; color: var(--muted, #8aa); }
+.cfg-grid input {
+  padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg, #0b1017); color: var(--text); font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.cfg-out { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+.cfg-out .row { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; font-size: 13px; }
+.cfg-out .row .v { font-variant-numeric: tabular-nums; font-weight: 600; }
+.cfg-out .verdict { font-weight: 700; letter-spacing: .02em; margin-bottom: 6px; }
+.cfg-out .verdict.take { color: var(--accent); }
+.cfg-out .verdict.hold { color: var(--amber, #e0a030); }
+
+/* ---------- motion ----------
+   Tabs, faces and modals come up with a short fade instead of a hard cut, so
+   a tap feels placed rather than switched. Everything here is opacity and
+   transform only — never a property that moves layout, because the station
+   auto-fits the page to the sum of its panel heights and a height that
+   changes mid-animation would re-zoom the whole UI behind the tap. Each
+   animation sits on the element's base rule: coming back from display:none
+   restarts it, which is exactly the moment a view or pane is switched to. */
+
+@keyframes m-rise { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+@keyframes m-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes m-pop  { from { opacity: 0; transform: scale(.975); } to { opacity: 1; transform: none; } }
+@keyframes m-out  { from { opacity: 1; } to { opacity: 0; } }
+
+/* the big view swaps: strategy / scoreboard / tracker, wall / tracker */
+.station, .sbview, .trkview, .wall { animation: m-rise .22s ease; }
+
+/* a card face coming to the front (fade only: faces scroll inside a pinned
+   height, and a transform would shear the scrollbox while it lands) */
+.face.on { animation: m-fade .18s ease; }
+
+/* settings panes behind the tabbar */
+.modal [data-pane] { animation: m-fade .18s ease; }
+
+/* modals and the focus overlay: the dimmer fades, the box lands */
+.overlay { animation: m-fade .18s ease; }
+.overlay .modal, .overlay .focusbox { animation: m-pop .2s ease; }
+/* the way back down — faces.js holds the overlay up while this plays */
+.overlay.closing { animation: m-out .15s ease forwards; }
+
+/* small popovers */
+.menupop, .healthpop, .warmerpop { animation: m-pop .16s ease; }
+
+/* tab buttons settle between states instead of snapping */
+.topbar .viewtabs button, .tabbar button, .facetabs button,
+.plantabs button, .facezoom, button.cardcog {
+  transition: background-color .18s ease, color .18s ease, border-color .18s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .station, .sbview, .trkview, .wall,
+  .face.on, .modal [data-pane],
+  .overlay, .overlay .modal, .overlay .focusbox, .overlay.closing,
+  .menupop, .healthpop, .warmerpop { animation: none; }
+  .topbar .viewtabs button, .tabbar button, .facetabs button,
+  .plantabs button, .facezoom, button.cardcog { transition: none; }
+}
+
+/* A call the maths cannot separate — neither the take-it accent nor the
+   hold amber, so it never reads as a decision it has not earned. */
+.cfg-out .verdict.even { color: var(--dim, #8aa); }
+
+/* Rationing: the stock will not cover the distance left. Amber because it is a
+   standing constraint on every stop from here, not an alarm about this one. */
+.cfg-out .row.tight .k, .cfg-out .row.tight .v { color: var(--amber, #e0a030); font-weight: 700; }
+
+/* Compound pill in the tyre rack — a button, because the crew sets it, unlike
+   the state pill beside it which the race sets. */
+button.setpill { cursor: pointer; border: 1px solid var(--line); background: transparent; font: inherit; }
+button.setpill.isslick { color: var(--text); }
+button.setpill.iswet { color: var(--accent); border-color: var(--accent); }
