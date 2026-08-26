@@ -11,7 +11,8 @@ import {
   burnAtLapTime, normalizeCurve, pushLapTime, burnDetail, LAP_AVG_WINDOW,
   driveTimeStats, pitCongestion, replanFromNow, planVsActual, stintStats, learnedOf, fmtGapUs,
   driverLapTimes, paceWindowStats, paceWindowLaps, PACE_WINDOW_DEFAULT, PACE_WINDOW_MAX,
-  carPickLabel, driverAbbrev, matchTimingDriver, createFeedSeen, wallShowsPlan,
+  carPickLabel, DEFAULT_CAR_NUMBERS, defaultCarNumber,
+  driverAbbrev, matchTimingDriver, createFeedSeen, wallShowsPlan,
   pitCostSec, pitSegments, pitLaneTimeSec, refuelTimeSec, fuelBreakEven, recommendedStop,
   greenSpeedKmh, neutralSpeedKmh, timingNrOf,
   tyreSetNames, generateTyreSets, TYRE_SET_GEN_MAX, tyreBudget, stopTyreSet, reconcileTyreSets,
@@ -28,7 +29,7 @@ import {
   expandSetNames, defaultTyreSets, newTyreSet, newBrakeSet,
   newTyreWarmer, setTyreSetNames, setBrakeSetNames, warmerOfSet,
   currentTyreSet, stintStartOf, plannedNextDriver, nextDriverCall,
-  probabilityOfCautionWithin, cautionCall
+  probabilityOfCautionWithin, cautionCall, cautionSweep, cautionBand, CAUTION_DECISIVE_SEC
 } from '../shared/model.js';
 import WebSocket from 'ws';
 import fs from 'node:fs';
@@ -402,10 +403,17 @@ check('pit lane transit time', Math.abs(pl.transitSec - 24) < 0.01);
 check('pit lane overhead vs configured loss', Math.abs(pl.overheadSec - 31) < 0.01);
 check('pit lane needs both figures', pitLaneCalc({ config: { pitLaneKm: 0.4, pitSpeedKmh: 0 } }) === null);
 
-// car picker labels: the slot keeps its "Car N" identity, name/number append
-check('car label default', carPickLabel('1', { number: '1', name: 'Car #1' }) === 'Car 1');
-check('car label named', carPickLabel('1', { number: '34', name: 'Red Racer' }) === 'Car 1 — Red Racer');
-check('car label number only', carPickLabel('2', { number: '107', name: 'Car #107' }) === 'Car 2 — #107');
+// car picker labels: the race number IS the identity, the team's name appends
+check('car label default', carPickLabel('1', { number: '15', name: 'Car #15' }) === '#15');
+check('car label named', carPickLabel('1', { number: '34', name: 'Red Racer' }) === '#34 — Red Racer');
+check('car label numberless falls back to the slot',
+  carPickLabel('2', { number: '', name: '' }) === 'Car 2');
+
+// the four slots are the team's own entries and start on their race numbers
+check('the slots start on the team race numbers',
+  DEFAULT_CAR_NUMBERS.join(',') === '15,27,40,92' &&
+  ['1', '2', '3', '4'].every((id, i) => defaultCarNumber(id) === DEFAULT_CAR_NUMBERS[i]) &&
+  defaultCarNumber('5') === '5');
 
 // ---- feed-seen tracking: "not in the feed yet" vs "vanished from the board" ----
 {
@@ -503,16 +511,21 @@ check('fcy: an open window needs no break-even', fstr.windowOpen && fstr.breakEv
 check('fcy: the break-even is worked out under green too',
   fuelStrategy(fsCar, fsRace(33), fsNow).breakEven.fcy !== null);
 
-// Low-fuel warning levels (laps counted above the safety reserve).
-fsCar.state.fuelLiters = 3 + 4 * 2.8; // exactly 4 laps of usable fuel
+// Low-fuel warning levels (liters counted above the safety reserve).
+fsCar.config.fuelWarnL = 15;
+fsCar.state.fuelLiters = 3 + 20; // 20 L above the reserve — still clear
 fstr = fuelStrategy(fsCar, fsRace(33), fsNow);
-check('low fuel warns at the threshold', fstr.warn.level === 'warn' && fstr.warn.lapsLeft === 4);
-fsCar.state.fuelLiters = 3 + 1.5 * 2.8;
+check('low fuel stays quiet above the threshold',
+  fstr.warn.level === 'ok' && Math.abs(fstr.warn.litersLeft - 20) < 1e-9);
+fsCar.state.fuelLiters = 3 + 12; // inside the 15 L warning band
 fstr = fuelStrategy(fsCar, fsRace(33), fsNow);
-check('low fuel goes critical at 2 laps', fstr.warn.level === 'crit');
-fsCar.config.fuelWarnLaps = 0;
+check('low fuel warns at the threshold', fstr.warn.level === 'warn' && fstr.warn.litersLeft === 12);
+fsCar.state.fuelLiters = 3 + 7; // under half the threshold
+fstr = fuelStrategy(fsCar, fsRace(33), fsNow);
+check('low fuel goes critical at half the threshold', fstr.warn.level === 'crit');
+fsCar.config.fuelWarnL = 0;
 check('low fuel warning can be disabled', fuelStrategy(fsCar, fsRace(33), fsNow).warn.level === 'ok');
-fsCar.config.fuelWarnLaps = 5;
+fsCar.config.fuelWarnL = 15;
 check('no window before the race runs', fuelStrategy(fsCar, { durationH: 2, startMs: null, fcy: {} }, fsNow) === null);
 
 // other cars untouched
@@ -929,6 +942,11 @@ delete brokenState.cars['3'].nextStop.pins;
 delete brokenState.cars['3'].nextStop.approvals;
 brokenState.cars['3'].nextStop.pinned = { tyres: 'keep' };
 brokenState.cars['3'].nextStop.approved = { by: 'old', atMs: 1, hash: 'x', stale: false };
+// saved before the slots carried the team's real race numbers: cars 1 and 2 are
+// still on the placeholder, car 4 has been numbered and named at the track.
+brokenState.cars['1'].number = '1'; brokenState.cars['1'].name = 'Car #1';
+brokenState.cars['2'].number = '2'; brokenState.cars['2'].name = 'Car #2';
+brokenState.cars['4'].number = '4'; brokenState.cars['4'].name = 'Night Runner';
 const tmpFile = path.join(os.tmpdir(), `pitwall-smoke-${process.pid}.json`);
 fs.writeFileSync(tmpFile, JSON.stringify(brokenState));
 
@@ -957,6 +975,11 @@ check('event adopted from first car on restore', state3.event.pitLossSec === 40)
     stop3.approvals.green === null && stop3.approvals.sc === null);
 }
 check('event mirrored to all cars on restore', state3.cars['2'].config.pitLossSec === 40);
+check('placeholder race numbers become the team race numbers on restore',
+  state3.cars['1'].number === '15' && state3.cars['1'].name === 'Car #15' &&
+  state3.cars['2'].number === '27' && state3.cars['2'].name === 'Car #27');
+check('a car numbered at the track is left alone on restore',
+  state3.cars['4'].number === '4' && state3.cars['4'].name === 'Night Runner');
 
 // stations add/remove drivers by patching the whole array (arrays replace, not merge)
 const plus = [...state3.cars['1'].drivers, { id: 'd5', name: 'Driver 5', totalMs: 0,
@@ -3460,12 +3483,12 @@ check('stintStats filters outliers', (() => {
   // named, which is the case the default name has to follow.
   send({ type: 'update', carId: '2', patch: { name: `Car #${state.cars['2'].number}` } });
   await until(() => state.cars['2'].name === `Car #${state.cars['2'].number}`);
-  send({ type: 'update', carId: '2', patch: { number: '27' } });
-  await until(() => state.cars['2'].number === '27');
-  check('the wall can set a car race number', state.cars['2'].number === '27');
-  check('a default name follows the number', state.cars['2'].name === 'Car #27');
+  send({ type: 'update', carId: '2', patch: { number: '61' } });
+  await until(() => state.cars['2'].number === '61');
+  check('the wall can set a car race number', state.cars['2'].number === '61');
+  check('a default name follows the number', state.cars['2'].name === 'Car #61');
   check('the renumbered car is matched on its new number',
-    timingNrOf({}, state.cars['2']) === '27');
+    timingNrOf({}, state.cars['2']) === '61');
 
   send({ type: 'update', carId: '3', patch: { name: 'Zolder Cup' } });
   await until(() => state.cars['3'].name === 'Zolder Cup');
@@ -4100,8 +4123,12 @@ check('stintStats filters outliers', (() => {
     stayGap(sc) < stayGap(fcy));
   // Far enough apart that the two flags can give opposite calls on the same
   // car in the same second — which is why the plans are kept separate.
-  const splitF = cautionCall(worn(70, 90, 0.639), cRace, cNow, 'fcy');
-  const splitS = cautionCall(worn(70, 90, 0.639), cRace, cNow, 'sc');
+  // Early in a stint on part-worn rubber: the code 60 discount already covers
+  // the box work, the shallower safety-car one does not yet. (The boundary sits
+  // here rather than deeper into the stint because the call prices how long the
+  // flag actually runs — see cautionMinutes.)
+  const splitF = cautionCall(worn(90, 60, 0.639), cRace, cNow, 'fcy');
+  const splitS = cautionCall(worn(90, 60, 0.639), cRace, cNow, 'sc');
   check('the same car can be told to box under a code 60 and stay out under a safety car',
     splitF.winner.key !== 'stay' && splitS.winner.key === 'stay' &&
     splitF.takeIt === true && splitS.takeIt === false);
@@ -4114,6 +4141,100 @@ check('stintStats filters outliers', (() => {
   check('a nonsense fuel safety level still answers finitely',
     !sillyCall || sillyCall.plans.every(pl => Number.isFinite(pl.gapSec)));
   check('a negative caution rate is read as no rate', !sillyCall || sillyCall.rate === -2);
+
+  // ---- how long the flag runs ---------------------------------------------
+  // The discount is earned while the field crawls, so a flag that is over
+  // before the car has finished paying for the stop pays for part of it and no
+  // more. This is the whole reason the length is a figure and not a constant.
+  const forLength = mins => {
+    const c = worn(45, 160, 0.639);
+    c.config.cautionMinutes = mins;
+    return cautionCall(c, cRace, cNow, 'fcy');
+  };
+  const gone = forLength(1.5);  // over before the car can even reach pit entry
+  const part = forLength(3);    // reaches the lane, goes green mid-stop
+  const median = forLength(7.1);
+  const long = forLength(20);
+  const stayOf = cc => cc.plans.find(p => p.key === 'stay').gapSec;
+  check('a flag over before the car reaches the lane pays nothing at all',
+    gone.winner.key === 'stay' && stayOf(gone) === 0,
+    `stayGap ${stayOf(gone).toFixed(1)}`);
+  check('a flag that ends mid-stop pays only for the part it was out for',
+    stayOf(part) > 0 && stayOf(part) < stayOf(median),
+    `3min ${stayOf(part).toFixed(1)} vs 7.1min ${stayOf(median).toFixed(1)}`);
+  check('once the flag outlasts the stop there is nothing more to win',
+    Math.abs(stayOf(long) - stayOf(median)) < stayOf(median) * 0.15,
+    `20min ${stayOf(long).toFixed(1)} vs 7.1min ${stayOf(median).toFixed(1)}`);
+  // Zero is not "no caution": it would say every flag is gone before the car
+  // gets there, which is not a figure anyone means to enter.
+  const zeroLen = forLength(0);
+  check('an unset caution length falls back rather than reading as instant green',
+    Math.abs(stayOf(zeroLen) - stayOf(median)) < 1e-9);
+
+  // Slack is the robustness knob - and it does NOT bias the answer towards
+  // staying out, which is worth pinning down because that is the opposite of
+  // what "make every stop dearer" sounds like it should do. Standing still in
+  // the lane is discounted like every other second of a stop, so a sloppier
+  // stop makes the flag worth MORE: every plan pays the slack on every stop it
+  // makes, and only the one taken under the flag gets it at a discount. What
+  // slack tests is whether the call survives a stop that goes wrong.
+  const slacked = worn(45, 160, 0.639);
+  slacked.config.pitSlackSec = 12;
+  const slackCall = cautionCall(slacked, cRace, cNow, 'fcy');
+  check('slack makes the flag worth more, because the flag discounts it too',
+    stayOf(slackCall) > stayOf(median),
+    `12s slack ${stayOf(slackCall).toFixed(1)} vs none ${stayOf(median).toFixed(1)}`);
+  check('slack never turns a stop that pays into one that does not',
+    slackCall.takeIt === median.takeIt);
+
+  // ---- the sweep -----------------------------------------------------------
+  const sweepCar = worn(45, 160, 0.639);
+  sweepCar.state.stintFuelStartL = 100;
+  sweepCar.state.stintStartMs = cNow - 25 * 60e3;
+  const sweep = cautionSweep(sweepCar, cRace, cNow, 'fcy');
+  check('the sweep walks the stint', !!sweep && sweep.points.length >= 8);
+  check('the sweep starts at minute zero and only goes forward',
+    sweep.points[0].min === 0 &&
+    sweep.points.every((p, i) => i === 0 || p.min > sweep.points[i - 1].min));
+  check('the sweep runs the tank down, never past the safety level',
+    sweep.points[sweep.points.length - 1].fuelL < sweep.points[0].fuelL &&
+    sweep.points.every(p => p.fuelL >= sweepCar.config.safetyFuelL - 1e-9));
+  check('the sweep wears the tyres as it goes',
+    sweep.points.every((p, i) => i === 0 || p.tyreKm > sweep.points[i - 1].tyreKm));
+  check('the sweep knows where the car is on it',
+    Math.abs(sweep.nowMin - 25) < 0.5, `nowMin ${sweep.nowMin.toFixed(1)}`);
+  check('every sample answers finitely',
+    sweep.points.every(p => [p.fuel, p.tyres, p.both].every(Number.isFinite)));
+  // A crossover has to be a minute the curve actually crosses at, not a
+  // rounding of the first sample above the bar.
+  for (const k of ['fuel', 'tyres', 'both']) {
+    const at = sweep.first[k];
+    if (at == null) continue;
+    const before = sweep.points.filter(p => p.min < at);
+    check(`the ${k} crossover is where the line clears the bar`,
+      before.every(p => p[k] <= CAUTION_DECISIVE_SEC), `min ${at.toFixed(1)}`);
+  }
+  check('green has no sweep', cautionSweep(sweepCar, cRace, cNow, 'green') === null);
+
+  // The bands are how decisive a call is, read in words.
+  check('the bands read from a tie up to a clear call',
+    cautionBand(0.5).key === 'even' && cautionBand(5).key === 'marginal' &&
+    cautionBand(15).key === 'worth' && cautionBand(40).key === 'clear');
+
+  // ---- and it reaches the proposed stop -----------------------------------
+  const neutralPlan = recommendedStop(sweepCar, cRace, cNow, { pace: 'fcy' });
+  check('the proposed neutralised stop carries the ranking',
+    !!neutralPlan.caution && neutralPlan.caution.plans.length === 4);
+  check('the head names the work, or says why not',
+    /^(BOX NOW · (FUEL ONLY|TYRES ONLY|FUEL \+ TYRES)|BOX NOW|STAY OUT|LINE BALL|BOX THIS LAP|NO STOP NEEDED)$/
+      .test(neutralPlan.head), neutralPlan.head);
+  check('the green plan has no neutralisation to rank',
+    recommendedStop(sweepCar, cRace, cNow, { pace: null }).caution === null);
+  // The ranking travels to every screen on every broadcast — keep it to the
+  // answer, not the ledger behind it.
+  check('the ranking that travels stays small',
+    JSON.stringify(neutralPlan.caution).length < 700,
+    `${JSON.stringify(neutralPlan.caution).length} bytes`);
 }
 
 // ---- port walk -------------------------------------------------------------

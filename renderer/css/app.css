@@ -3252,6 +3252,66 @@ button.cardcog.on { background: var(--accent); color: #06121f; border-color: var
    standing constraint on every stop from here, not an alarm about this one. */
 .cfg-out .row.tight .k, .cfg-out .row.tight .v { color: var(--amber, #e0a030); font-weight: 700; }
 
+/* ---- the calculation behind the call -------------------------------------
+   What each option is worth against staying out, swept across the stint. The
+   three series get their own steps rather than the UI accents: the card's
+   amber and green sit too close together to be told apart with a red-green
+   colour deficiency, which on a chart read at a glance is not a detail. These
+   are checked for lightness, chroma, colour-deficient separation and contrast
+   against the well they are drawn on, in both themes. */
+:root {
+  --cc-fuel: #3699d6;   /* fuel only */
+  --cc-tyres: #b3781f;  /* tyres only */
+  --cc-both: #cc5f92;   /* fuel + tyres */
+}
+body.light {
+  --cc-fuel: #0b7dc9;
+  --cc-tyres: #8a5a12;
+  --cc-both: #a83f70;
+}
+
+.ccgraph { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+.ccgraph h4 {
+  margin: 0 0 2px; font-size: 12px; font-weight: 700; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--dim);
+}
+.ccgraph .cchint { margin: 0 0 8px; font-size: 11px; line-height: 1.45; color: var(--dim); }
+.ccgraph svg { display: block; width: 100%; height: auto; overflow: visible; touch-action: none; }
+/* Axes and grid stay recessive — they are scaffolding, not data. */
+.ccgraph .ccgrid { stroke: var(--line); stroke-width: 1; }
+.ccgraph .cczero { stroke: var(--dim); stroke-width: 1.5; stroke-dasharray: 4 3; }
+/* The band inside which the arithmetic has not earned a decision. */
+.ccgraph .ccband { fill: var(--dim); opacity: .12; }
+.ccgraph .ccline { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.ccgraph .ccnow { stroke: var(--text); stroke-width: 1.5; opacity: .55; }
+.ccgraph .ccdot { stroke: var(--well); stroke-width: 2; }
+.ccgraph .cctick { font-size: 10px; fill: var(--dim); font-family: var(--font-num); }
+/* Labels wear ink, never the series colour — the swatch beside them carries
+   identity, so the text stays readable at any contrast. */
+.ccgraph .cclab { font-size: 10px; fill: var(--text); font-weight: 600; }
+.ccgraph .ccaxis { font-size: 10px; fill: var(--dim); }
+.ccgraph .cckey { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 8px; font-size: 11px; }
+.ccgraph .cckey span { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); }
+.ccgraph .cckey i { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+.ccgraph .cckey b { color: var(--text); font-variant-numeric: tabular-nums; }
+.ccgraph .cchit { fill: transparent; cursor: crosshair; }
+.ccgraph .cctip { pointer-events: none; }
+.ccgraph .cctip rect { fill: var(--panel-2); stroke: var(--line); rx: 4; }
+.ccgraph .cctip text { font-size: 10px; font-family: var(--font-num); fill: var(--text); }
+.ccgraph .cctip .ccdim { fill: var(--dim); }
+.ccgraph table.cctable { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 11px; }
+.ccgraph table.cctable th, .ccgraph table.cctable td {
+  text-align: right; padding: 2px 4px; font-variant-numeric: tabular-nums;
+  border-bottom: 1px solid var(--line);
+}
+.ccgraph table.cctable th:first-child, .ccgraph table.cctable td:first-child { text-align: left; }
+.ccgraph table.cctable th { color: var(--dim); font-weight: 600; }
+.ccgraph .ccmore {
+  margin-top: 6px; font-size: 11px; color: var(--dim); background: none; border: 0;
+  padding: 0; cursor: pointer; text-decoration: underline;
+}
+.ccgraph .ccmore:hover { color: var(--text); }
+
 /* Compound pill in the tyre rack — a button, because the crew sets it, unlike
    the state pill beside it which the race sets. */
 button.setpill { cursor: pointer; border: 1px solid var(--line); background: transparent; font: inherit; }

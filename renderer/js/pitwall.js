@@ -8,7 +8,7 @@ import {
   fmtClock, fmtMinSec,
   stopTyreSet, tyreSetMileage, isNightAt, BRAKE_AXLES, stopBrakeAxle,
   recommendedStops, resolveStop, PIT_SERVICE_MARGIN_SEC, PLAN_LABEL, activePlanKey, wallShowsPlan,
-  TIMING_FLAGS, fmtLapUs, fmtGapUs, timingNrOf, createFeedSeen, carPickLabel,
+  TIMING_FLAGS, fmtLapUs, fmtGapUs, timingNrOf, createFeedSeen,
   driverAbbrev, matchTimingDriver, pitSegments, pitLaneTimeSec, refuelTimeSec,
   fuelBreakEven, buildCarFile, readCarFile, carFileName
 } from '../../shared/model.js';
@@ -735,18 +735,6 @@ function renderCarNames() {
   }
 }
 
-// The start screen's car picker has no server connection — remember the last
-// labels seen here so index.html can show real names instead of "Car 1..4".
-let carLabelsCached = '';
-function cacheCarLabels() {
-  const labels = {};
-  for (const id of sortedCarIds()) labels[id] = carPickLabel(id, state.cars[id]);
-  const json = JSON.stringify(labels);
-  if (json === carLabelsCached) return;
-  carLabelsCached = json;
-  try { localStorage.setItem('carLabels', json); } catch { /* full/blocked: cosmetic only */ }
-}
-
 // Event settings: one value for all cars, editable only on the pit wall.
 for (const inp of overlay.querySelectorAll('input[data-ev]')) {
   inp.addEventListener('change', () => {
@@ -990,7 +978,6 @@ function renderSettings() {
     renderLtLinks();
   }
   renderCarNames();
-  cacheCarLabels();
   renderRaceSetups();
 }
 
@@ -1461,7 +1448,7 @@ function render() {
       vHtml = '— RACE NOT STARTED —';
     }
     if (fs && fs.warn.level !== 'ok' && !fs.noStopNeeded && !inPit) {
-      vHtml = `<b class="lowfuel">LOW FUEL — ${fs.warn.lapsLeft} LAPS</b> · ` + vHtml;
+      vHtml = `<b class="lowfuel">LOW FUEL — ${Math.floor(fs.warn.litersLeft)} L</b> · ` + vHtml;
       vCls += ' ' + fs.warn.level;
     }
     f('verdict').className = 'verdict ' + vCls;

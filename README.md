@@ -142,11 +142,64 @@ in an e-mail, and can be written the week before with nothing running at all.
   be worth, and what would tyres cost on top of it. It states the pit window
   with it, because that is what decides whether the discount is profit or is
   paying off an extra stop.
+- **Take this one, or wait for the next?** (automatic, the cog on NEXT PIT
+  STOP): the litre threshold above answers the fuel-only half of the question
+  off track geometry alone. It cannot answer the other half — if we let this
+  flag go, how likely is another before the tank forces us in at full green
+  cost? That depends on how often cautions actually fall here, which is a
+  measured number and the one input none of the maths above has. So the card
+  ranks **four plans** — stay out, fuel only, tyres only, fuel and tyres — by
+  rolling each of them forward over many stint cycles and comparing **time to
+  complete the same lap count**, averaged over exactly one fuel cycle so the
+  answer is not just measuring who happens to have refuelled most recently.
+  Later stops are priced as an expected value: a caution may well be running by
+  the time they come due, and how likely that is is the thing being tested.
+  - The answer is a **break-even rate** — how frequent cautions would have to
+    be before waiting beats taking the one that is out — compared against the
+    crew's own figure. Zolder 2019–2025 measured **0.639 usable Code 60 per
+    hour**, counting flags of four minutes or longer, and that is the default.
+  - A winner that beats the runner-up by **less than 2 s** is a tie the
+    arithmetic happened to break, not a decision. The card says **LINE BALL**
+    and leaves it to the crew, rather than reading as a call it has not earned.
+  - **How long the flag runs decides most of it.** The discount is earned
+    second by second while the field is crawling, so a caution that goes green
+    with the hose still connected pays for part of the stop and no more — and
+    the car has to reach pit entry first, which eats into it before a drop of
+    fuel goes in. On the Zolder record about a quarter of flags are short
+    enough that a fuel stop **never** pays, at any point in a stint. *Caution
+    length (min)* is therefore a figure in its own right: 7.1 min, the median
+    usable Code 60, is the default.
+  - Two more figures live behind the same cog. *Stop slack (s)* adds time to
+    every stop the call prices — an overshot box, a sticky coupling, traffic in
+    the lane — so wind it up and see whether the call still stands when the
+    stop goes wrong. Note which way it moves the answer, because it is the
+    reverse of what it sounds like: standing still in the lane is discounted
+    like every other second of a stop, so every plan pays the slack at every
+    stop it makes and only the one taken under the flag gets it cheap. A
+    sloppier stop makes the flag worth **more**, not less. It moves this call
+    only, never the measured pit-lane and E.T.A. figures. *Pit lane fuel (L)* is what the car burns
+    driving the lane, derived from the neutralised burn across the lane's share
+    of a lap when left at 0.
+  - **WHEN IT STARTS TO PAY** (the graph, same cog): the same comparison swept
+    across the whole stint — seconds gained against staying out at every minute
+    of it, one line per option, with the car's own position marked. Above the
+    dashed line the stop is ahead; inside the shaded band it is ahead by less
+    than 2 s. It answers the question the verdict alone cannot: when the call
+    is *stay out*, how long the crew is waiting for that to change. Each flag
+    is drawn on its own, and the numbers are one tap away for anyone who would
+    rather read them than look at them.
+  - The proposed **CODE 60** and **SAFETY CAR** stops carry the result: the
+    head names the work the flag is actually worth doing — *BOX NOW · FUEL +
+    TYRES*, *BOX NOW · FUEL ONLY* — and a stop that does not pay yet says which
+    minute of the stint it starts to.
 - **Low fuel warning**: once the tank is down to the warning threshold
-  (SETTINGS → FUEL → *Low-fuel warning (laps)*, default 5, 0 = off) a banner
-  appears with the laps and time left above the safety level — amber first,
-  red and flashing from 2 laps. It is muted while the car is already in the
-  pit lane and when the maths says the fuel reaches the flag anyway.
+  (SETTINGS → FUEL → *Low-fuel warning (L)*, default 15 L, 0 = off) a banner
+  appears with the liters, laps and time left above the safety level — amber
+  at the threshold, red and flashing at half of it. The threshold is set in
+  liters because that is what the crew reads off the rig and types into
+  CORRECT FUEL READING; a lap figure would quietly move every time the burn
+  rate did. It is muted while the car is already in the pit lane and when the
+  maths says the fuel reaches the flag anyway.
 - **🅿 CAR IN PIT LANE** (station or wall card): mark the car when it enters
   the pit lane — fuel burn pauses while it is in there. A completed stop
   (STOP DONE on the wall) releases it automatically; press the button again

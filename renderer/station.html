@@ -218,6 +218,10 @@
               Cautions per hour
               <input data-cpath="cautionsPerHour" type="number" step="0.01" min="0" max="10" />
             </label>
+            <label title="How long a usable neutralisation actually runs here. This is what decides how much of the discount a stop collects: the credit only accrues while the field is still crawling, so a flag that goes green with the hose still in pays for part of the stop and no more. Zolder 2019–2025: 7.1 min is the median Code 60 of 4 minutes or longer.">
+              Caution length (min)
+              <input data-cpath="cautionMinutes" type="number" step="0.1" min="0" max="60" />
+            </label>
             <label title="What a kilometre on the tyres costs in lap time. This is what makes staying out on old rubber expensive — without it the call cannot see a reason to fit tyres.">
               Tyre wear (s per km)
               <input data-cpath="tyreDegSecPerKm" type="number" step="0.0001" min="0" />
@@ -238,12 +242,25 @@
               Lap behind Safety Car (s)
               <input data-cpath="avgLapSec.sc" type="number" step="0.1" min="0" />
             </label>
+            <label title="Slack added to every stop the call prices, on top of the measured lane and service times. Real stops are rarely textbook: an overshot box, a sticky coupling, traffic in the lane. Wind it up to see whether the call still stands when the stop goes wrong. It makes the flag worth MORE, not less — standing still in the lane is discounted like every other second of a stop, so every plan pays the slack at every stop and only the one taken under the flag gets it cheap. It moves this call only; the pit-lane and E.T.A. figures stay measured.">
+              Stop slack (s)
+              <input data-cpath="pitSlackSec" type="number" step="0.5" min="0" max="60" />
+            </label>
+            <label title="Fuel burnt driving the pit lane itself. Leave it at 0 to derive it from the neutralised burn across the lane's share of a lap, which is right unless the lane is unusually long or short for the circuit.">
+              Pit lane fuel (L)
+              <input data-cpath="pitLaneFuelL" type="number" step="0.01" min="0" max="10" />
+            </label>
           </div>
           <div id="caution-out" class="cfg-out"></div>
           <p class="hint help">
             The break-even is the rate cautions would have to fall at before
             waiting beats taking this one. Above your rate, take it.
           </p>
+
+          <!-- The same comparison as the verdict above, swept across the whole
+               stint: what each option is worth against staying out at every
+               minute of it, and where the car sits on that curve right now. -->
+          <div class="ccgraph" id="caution-graph"></div>
         </div>
 
         <!-- Three separate plans, one per situation — each with its own pinned
@@ -412,7 +429,7 @@
             <label title="This car's average speed under green — the yardstick every pit-stop comparison is measured against. 0 = work it out from the average lap above.">Avg green speed (km/h, 0 = derive) <input data-path="config.greenSpeedKmh" type="number" step="any" min="0" /></label>
             <label>Finish margin (L) <input data-path="config.finishFuelL" type="number" step="any" /></label>
             <label>Fuel safety level (L) <input data-path="config.safetyFuelL" type="number" step="any" /></label>
-            <label>Low-fuel warning (laps) <input data-path="config.fuelWarnLaps" type="number" step="1" min="0" title="Show the LOW FUEL banner once this few laps remain above the safety level (0 = off)" /></label>
+            <label>Low-fuel warning (L) <input data-path="config.fuelWarnL" type="number" step="any" min="0" title="Show the LOW FUEL banner once this few liters remain above the safety level — amber at this level, red and flashing at half of it (0 = off)" /></label>
           </div>
           <p class="hint help">
             Safety Car and FCY / Code 60 have separate rates: behind the Safety Car the field
@@ -663,10 +680,10 @@
             <label>Port <input id="conn-port" type="number" style="width:90px" /></label>
             <label>Car
               <select id="conn-car" style="width:110px">
-                <option value="1">Car 1</option>
-                <option value="2">Car 2</option>
-                <option value="3">Car 3</option>
-                <option value="4">Car 4</option>
+                <option value="1">#15</option>
+                <option value="2">#27</option>
+                <option value="3">#40</option>
+                <option value="4">#92</option>
               </select>
             </label>
           </div>

@@ -16,10 +16,11 @@ import {
   brakeAxle, brakeKitsOf, kitOfDiscSet, freePadSets, currentBrakeSet,
   stopBrakeAxle, brakeAxleWork, brakeWorkComps,
   recommendedStops, resolveStop, PLAN_KEYS, PLAN_LABEL, activePlanKey, stopPins, wallShowsPlan, cautionCall, tyreBudget,
+  cautionSweep, CAUTION_DECISIVE_SEC,
   fmtClock, fmtMinSec, fmtLap, fmtH,
   TIMING_FLAGS, fmtLapUs, fmtGapUs, timingNrOf, ourTimingNrs, createFeedSeen, carPickLabel,
   driverAbbrev, matchTimingDriver, fuelBreakEven, pitCostSec, refuelTimeSec, isNightAt,
-  defaultCar, deepMerge, reconcileTyreSets, reconcileBrakeSets,
+  defaultCar, defaultCarNumber, deepMerge, reconcileTyreSets, reconcileBrakeSets,
   buildCarFile, readCarFile, applyCarFile, carFileName
 } from '../../shared/model.js';
 import { connect } from './net.js';
@@ -122,22 +123,15 @@ $('btn-conn-apply').addEventListener('click', () => {
   location.reload();
 });
 
-// Car names in the picker follow the shared state (they can be renamed on the
-// pit wall or any station mid-race), and the last labels seen are cached for
-// the start screen's picker, which has no server connection of its own.
-let carLabelsCached = '';
+// Car names in the picker follow the shared state — they can be renamed on the
+// pit wall or any station mid-race. The start screen does not share this: it
+// has no state to follow, so it names the four entries outright.
 function renderCarPicker() {
-  const labels = {};
   for (const opt of $('conn-car').options) {
     const c = state.cars[opt.value];
     if (!c) continue;
-    labels[opt.value] = carPickLabel(opt.value, c);
-    if (opt.textContent !== labels[opt.value]) opt.textContent = labels[opt.value];
-  }
-  const json = JSON.stringify(labels);
-  if (json !== carLabelsCached) {
-    carLabelsCached = json;
-    try { localStorage.setItem('carLabels', json); } catch { /* cosmetic only */ }
+    const label = carPickLabel(opt.value, c);
+    if (opt.textContent !== label) opt.textContent = label;
   }
 }
 
@@ -160,7 +154,7 @@ const patchStop = patch => patchCar({ nextStop: patch });
 const DRAFT_KEY = 'carDraft:' + carId;
 
 function loadDraft() {
-  const base = defaultCar(carId, carId);
+  const base = defaultCar(carId, defaultCarNumber(carId));
   try {
     const raw = localStorage.getItem(DRAFT_KEY);
     if (raw) {
@@ -1022,7 +1016,7 @@ cautionCog.addEventListener('click', () => {
     // Answer straight away rather than waiting for the next state push — the
     // panel is opened to read it, and a blank card looks broken.
     const car = state?.cars[carId];
-    if (car) renderCautionOut(car);
+    if (car) { renderCautionOut(car); renderCautionGraph(car); }
   }
 });
 
@@ -1074,14 +1068,228 @@ function renderCautionOut(car) {
     const head = lineBall
       ? `${label} — LINE BALL${take ? ` · ${esc(r.winner.label.toLowerCase())} if you box` : ''}`
       : `${label} — ${take ? `TAKE IT · ${esc(r.winner.label.toLowerCase())}` : 'STAY OUT'}`;
+    // When each kind of stop starts to pay, measured on the stint clock the
+    // crew is already reading. A call that says stay out is only half an
+    // answer without it — the other half is how long they are waiting.
+    let sw = null;
+    try { sw = cautionSweep(car, state.race, Date.now(), pace); } catch { sw = null; }
+    const whenRow = (key, label) => {
+      const at = sw?.first?.[key];
+      const txt = at == null ? 'not this stint'
+        : at <= sw.nowMin ? `paying now (from min ${Math.round(at)})`
+        : `from min ${Math.round(at)}`;
+      return `<div class="row"><span class="k">${label}</span><span class="v">${txt}</span></div>`;
+    };
     return `<div class="verdict ${lineBall ? 'even' : take ? 'take' : 'hold'}">${head}</div>
       <div class="row"><span class="k">break-even rate</span><span class="v">${be} /h</span></div>
       <div class="row"><span class="k">beats next best by</span><span class="v">${
-        lineBall ? 'under 2 s — too close to call' : r.marginSec.toFixed(1) + ' s'}</span></div>`;
+        lineBall ? 'under 2 s — too close to call' : r.marginSec.toFixed(1) + ' s'}</span></div>` +
+      (sw ? whenRow('fuel', 'fuel only pays') + whenRow('both', 'fuel + tyres pays') +
+        `<div class="row"><span class="k">stint clock</span><span class="v">min ${Math.round(sw.nowMin)}</span></div>` : '');
   }).join('<div style="height:8px"></div>') +
     `<div class="row"><span class="k">your rate</span><span class="v">${
       rate > 0 ? rate.toFixed(2) + ' /h' : 'not set'}</span></div>` +
     tyreBudgetRow(car);
+}
+
+// ---- the calculation, drawn ------------------------------------------------
+// The verdict above is one point on a curve. This is the whole curve: what
+// each option is worth against staying out at every minute of the stint, so
+// the crew can see WHY the answer is what it is — and, when it says stay out,
+// how long they are waiting for that to change.
+
+// Which flag the graph is drawn for. Follows the live one until the engineer
+// picks, then stays where it was put.
+let cautionGraphPace = null;
+let cautionGraphTable = false;
+
+const CC_SERIES = [
+  { key: 'fuel', label: 'Fuel only', css: '--cc-fuel' },
+  { key: 'tyres', label: 'Tyres only', css: '--cc-tyres' },
+  { key: 'both', label: 'Fuel + tyres', css: '--cc-both' }
+];
+
+function renderCautionGraph(car) {
+  const box = $('caution-graph');
+  if (!box || cautionPanel.hasAttribute('hidden')) return;
+  // Follows the situation the card is already on, until the engineer picks.
+  const pace = cautionGraphPace || (planTab === 'sc' ? 'sc' : 'fcy');
+
+  let sw = null;
+  try { sw = cautionSweep(car, state.race, Date.now(), pace); } catch { sw = null; }
+
+  const tabs = `<div class="plantabs ccpace">${['fcy', 'sc'].map(p =>
+    `<button data-ccpace="${p}"${p === pace ? ' class="on"' : ''}><b>${
+      p === 'fcy' ? 'CODE 60' : 'SAFETY CAR'}</b></button>`).join('')}</div>`;
+
+  if (!sw || sw.points.length < 2) {
+    box.innerHTML = `<h4>When it starts to pay</h4>${tabs}` +
+      '<p class="cchint">Not enough of the car is set up to draw it — the tank, ' +
+      'the lap and the burn all have to be known before the stint can be rolled forward.</p>';
+    wireCautionGraph(car);
+    return;
+  }
+
+  // ---- scales
+  const W = 340, H = 178;
+  // Bottom margin holds two rows: the minute ticks, then the axis title under
+  // them. One row and they sit on top of each other at the left-hand end.
+  const L = 34, R = 66, T = 12, B = 32;
+  const xs = sw.points.map(p => p.min);
+  const ys = sw.points.flatMap(p => [p.fuel, p.tyres, p.both]);
+  const xMin = 0, xMax = Math.max(1, Math.max(...xs));
+  // Zero is always on the chart: it is the line the whole reading turns on.
+  const yLo = Math.min(0, ...ys), yHi = Math.max(CAUTION_DECISIVE_SEC, ...ys);
+  const pad = Math.max(4, (yHi - yLo) * 0.08);
+  const y0 = yLo - pad, y1 = yHi + pad;
+  const X = v => L + ((v - xMin) / (xMax - xMin)) * (W - L - R);
+  const Y = v => T + (1 - (v - y0) / (y1 - y0)) * (H - T - B);
+
+  const path = key => sw.points
+    .map((p, i) => `${i ? 'L' : 'M'}${X(p.min).toFixed(1)} ${Y(p[key]).toFixed(1)}`).join(' ');
+
+  // ---- ticks: a handful, on round numbers, never a label on every point
+  const yStep = niceStep((y1 - y0) / 4);
+  const yTicks = [];
+  for (let v = Math.ceil(y0 / yStep) * yStep; v <= y1; v += yStep) yTicks.push(v);
+  const xStep = niceStep(xMax / 4);
+  const xTicks = [];
+  for (let v = 0; v <= xMax + 1e-9; v += xStep) xTicks.push(v);
+
+  const last = sw.points[sw.points.length - 1];
+  // Direct labels, nudged apart so two lines finishing together stay legible.
+  const ends = CC_SERIES
+    .map(s => ({ ...s, v: last[s.key], y: Y(last[s.key]) }))
+    .sort((a, b) => a.y - b.y);
+  for (let i = 1; i < ends.length; i++) {
+    if (ends[i].y - ends[i - 1].y < 11) ends[i].y = ends[i - 1].y + 11;
+  }
+
+  const nowX = sw.nowMin > 0 && sw.nowMin <= xMax ? X(sw.nowMin) : null;
+  const atNow = valuesAt(sw, sw.nowMin);
+
+  const svg = `<svg viewBox="0 0 ${W} ${H}" role="img"
+      aria-label="Seconds gained over staying out, by minute of the stint, for each option.">
+    <rect class="ccband" x="${L}" y="${Y(CAUTION_DECISIVE_SEC).toFixed(1)}"
+          width="${W - L - R}" height="${(Y(0) - Y(CAUTION_DECISIVE_SEC)).toFixed(1)}"></rect>
+    ${yTicks.map(v => `<line class="ccgrid" x1="${L}" x2="${W - R}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}"></line>
+      <text class="cctick" x="${L - 5}" y="${(Y(v) + 3).toFixed(1)}" text-anchor="end">${v > 0 ? '+' : ''}${Math.round(v)}</text>`).join('')}
+    ${xTicks.map(v => `<text class="cctick" x="${X(v).toFixed(1)}" y="${H - B + 12}" text-anchor="middle">${Math.round(v)}</text>`).join('')}
+    <line class="cczero" x1="${L}" x2="${W - R}" y1="${Y(0).toFixed(1)}" y2="${Y(0).toFixed(1)}"></line>
+    ${nowX != null ? `<line class="ccnow" x1="${nowX.toFixed(1)}" x2="${nowX.toFixed(1)}" y1="${T}" y2="${H - B}"></line>
+      <text class="ccaxis" x="${nowX.toFixed(1)}" y="${T - 2}" text-anchor="middle">now</text>` : ''}
+    ${CC_SERIES.map(s => `<path class="ccline" d="${path(s.key)}" stroke="var(${s.css})"></path>`).join('')}
+    ${nowX != null ? CC_SERIES.map(s => `<circle class="ccdot" cx="${nowX.toFixed(1)}" cy="${Y(atNow[s.key]).toFixed(1)}" r="4" fill="var(${s.css})"></circle>`).join('') : ''}
+    ${ends.map(s => `<text class="cclab" x="${W - R + 6}" y="${(s.y + 3).toFixed(1)}">${esc(s.label)}</text>`).join('')}
+    <text class="ccaxis" x="${((L + W - R) / 2).toFixed(1)}" y="${H - 3}" text-anchor="middle">minute of the stint</text>
+    <rect class="cchit" x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}"></rect>
+    <g class="cctip" hidden></g>
+  </svg>`;
+
+  const key = `<div class="cckey">${CC_SERIES.map(s => {
+    const at = sw.first[s.key];
+    const when = at == null ? 'never this stint'
+      : at <= sw.nowMin ? 'paying now'
+      : `from min ${Math.round(at)}`;
+    return `<span><i style="background:var(${s.css})"></i>${esc(s.label)} — <b>${when}</b></span>`;
+  }).join('')}</div>`;
+
+  const table = cautionGraphTable ? `<table class="cctable">
+    <thead><tr><th>min</th><th>tank</th><th>fuel</th><th>tyres</th><th>both</th></tr></thead>
+    <tbody>${sw.points.filter((_, i) => i % Math.ceil(sw.points.length / 12) === 0).map(p =>
+      `<tr><td>${Math.round(p.min)}</td><td>${p.fuelL.toFixed(0)} L</td><td>${fmtGain(p.fuel)}</td><td>${fmtGain(p.tyres)}</td><td>${fmtGain(p.both)}</td></tr>`).join('')}
+    </tbody></table>` : '';
+
+  box.innerHTML = `<h4>When it starts to pay</h4>${tabs}
+    <p class="cchint">Seconds gained against staying out, at every minute of this
+      stint. Above the dashed line the stop is ahead; inside the shaded band it is
+      ahead by less than ${CAUTION_DECISIVE_SEC} s, which is too close to call.</p>
+    ${svg}${key}
+    <button class="ccmore" data-cctable>${cautionGraphTable ? 'hide the numbers' : 'show the numbers'}</button>
+    ${table}`;
+  wireCautionGraph(car, sw, { X, Y, L, R, T, H, B, W, xMin, xMax });
+}
+
+function fmtGain(v) {
+  return `${v >= 0 ? '+' : ''}${v.toFixed(1)}`;
+}
+
+// A tick step that lands on 1, 2, 5 × a power of ten, so the axis reads in
+// round numbers whatever the range turns out to be.
+function niceStep(raw) {
+  if (!(raw > 0)) return 1;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / mag;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * mag;
+}
+
+// The three values at a given minute, interpolated between samples.
+function valuesAt(sw, min) {
+  const pts = sw.points;
+  if (min <= pts[0].min) return pts[0];
+  const lastPt = pts[pts.length - 1];
+  if (min >= lastPt.min) return lastPt;
+  for (let i = 1; i < pts.length; i++) {
+    if (pts[i].min >= min) {
+      const a = pts[i - 1], b = pts[i];
+      const f = (min - a.min) / (b.min - a.min);
+      const mix = k => a[k] + f * (b[k] - a[k]);
+      return { min, fuelL: mix('fuelL'), tyreKm: mix('tyreKm'), fuel: mix('fuel'), tyres: mix('tyres'), both: mix('both') };
+    }
+  }
+  return lastPt;
+}
+
+function wireCautionGraph(car, sw, geo) {
+  const box = $('caution-graph');
+  if (!box) return;
+  for (const b of box.querySelectorAll('button[data-ccpace]')) {
+    b.addEventListener('click', () => {
+      cautionGraphPace = b.dataset.ccpace;
+      renderCautionGraph(car);
+    });
+  }
+  const more = box.querySelector('button[data-cctable]');
+  if (more) {
+    more.addEventListener('click', () => {
+      cautionGraphTable = !cautionGraphTable;
+      renderCautionGraph(car);
+    });
+  }
+  if (!sw || !geo) return;
+
+  // Crosshair and read-out. A chart drawn in the browser is interactive by
+  // default: the crew should be able to ask it about any minute, not only the
+  // one the car happens to be on.
+  const svg = box.querySelector('svg');
+  const hit = box.querySelector('.cchit');
+  const tip = box.querySelector('.cctip');
+  if (!svg || !hit || !tip) return;
+  const { X, Y, L, R, T, H, B, W, xMax } = geo;
+
+  const hide = () => tip.setAttribute('hidden', '');
+  const show = ev => {
+    const r = svg.getBoundingClientRect();
+    if (!r.width) return;
+    const px = ((ev.clientX - r.left) / r.width) * W;
+    const min = Math.max(0, Math.min(xMax, ((px - L) / (W - L - R)) * xMax));
+    const v = valuesAt(sw, min);
+    const x = X(min);
+    const rows = CC_SERIES.map(s => ({ ...s, v: v[s.key] }));
+    const bw = 92, bh = 14 + rows.length * 12;
+    // Flip the box to the other side of the crosshair near the right edge.
+    const bx = x + bw + 8 > W - R ? x - bw - 8 : x + 8;
+    const by = Math.max(T, Math.min(H - B - bh, Y(rows[0].v) - bh / 2));
+    tip.innerHTML = `<line class="ccnow" x1="${x.toFixed(1)}" x2="${x.toFixed(1)}" y1="${T}" y2="${H - B}"></line>
+      ${rows.map(s => `<circle class="ccdot" cx="${x.toFixed(1)}" cy="${Y(s.v).toFixed(1)}" r="3.5" fill="var(${s.css})"></circle>`).join('')}
+      <rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${bw}" height="${bh}"></rect>
+      <text x="${(bx + 6).toFixed(1)}" y="${(by + 11).toFixed(1)}" class="ccdim">min ${Math.round(min)} · ${v.fuelL.toFixed(0)} L</text>
+      ${rows.map((s, i) => `<text x="${(bx + 6).toFixed(1)}" y="${(by + 23 + i * 12).toFixed(1)}">${esc(s.label)} ${fmtGain(s.v)}s</text>`).join('')}`;
+    tip.removeAttribute('hidden');
+  };
+  hit.addEventListener('pointermove', show);
+  hit.addEventListener('pointerdown', show);
+  hit.addEventListener('pointerleave', hide);
 }
 
 // The stock, not the set on the car: on a fixed allocation a set binned early
@@ -1643,7 +1851,7 @@ $('btn-carfile-load').addEventListener('click', async () => {
 
 $('btn-carfile-reset').addEventListener('click', () => {
   if (!confirm('Empty the draft and start from the app defaults? The car files already saved to disk are not touched.')) return;
-  draft = defaultCar(carId, carId);
+  draft = defaultCar(carId, defaultCarNumber(carId));
   saveDraft();
   renderDraftSettings();
   carFileStatus('Draft emptied — every setting is back to the app default.');
@@ -3153,6 +3361,7 @@ function render() {
   if (!cautionPanel.hasAttribute('hidden')) {
     fillCautionInputs();
     renderCautionOut(car);
+    renderCautionGraph(car);
   }
 
   document.title = `PitWall 24H — ${car.name}`;
@@ -3357,15 +3566,18 @@ function render() {
     (needL != null ? ` <small>need ${needL.toFixed(0)} L</small>` : '');
   beEl.className = 'v bethresh' + (windowOpen ? ' good' : '');
 
-  // Low-fuel banner: flashes once the tank is down to the warning laps. Muted
-  // while the car is already in the pit lane (the stop is happening) and when
-  // the maths says the fuel reaches the flag anyway (end of race).
+  // Low-fuel banner: flashes once the tank is down to the warning liters.
+  // Muted while the car is already in the pit lane (the stop is happening) and
+  // when the maths says the fuel reaches the flag anyway (end of race).
+  // Liters lead, because that is the unit the threshold is set in and the one
+  // the crew reads off the rig; the laps and the clock follow.
   const fwEl = $('fuel-warn');
   const fw = fs?.warn;
   if (fw && fw.level !== 'ok' && !fs.noStopNeeded && !car.state.inPit) {
     fwEl.classList.remove('hidden');
     fwEl.classList.toggle('crit', fw.level === 'crit');
-    fwEl.innerHTML = `${icon('fuel')} LOW FUEL — ${fw.lapsLeft} LAP${fw.lapsLeft === 1 ? '' : 'S'} ` +
+    fwEl.innerHTML = `${icon('fuel')} LOW FUEL — ${Math.floor(fw.litersLeft)} L ` +
+      `(${fw.lapsLeft} LAP${fw.lapsLeft === 1 ? '' : 'S'}) ` +
       `TO SAFETY LEVEL — BOX IN ${fmtMinSec(fuelTick(fw.msLeft))}` +
       (fs.windowOpen ? ` · FILL TO ${fs.fillTargetL} L` : '');
   } else {

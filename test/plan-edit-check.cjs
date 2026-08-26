@@ -191,7 +191,10 @@ app.whenReady().then(async () => {
     return !p.hasAttribute('hidden') &&
       document.querySelectorAll('#caution-cfg input[data-cpath]').length;
   })()`);
-  check('the cog flips the card to the caution inputs', cfgOpen === 6);
+  // Six figures the call reads, plus the three the simulation needs and had
+  // nowhere else to live: how long a caution runs, the slack on a stop, and
+  // the fuel burnt in the lane.
+  check('the cog flips the card to the caution inputs', cfgOpen === 9, `${cfgOpen} inputs`);
 
   // The card must arrive with the measured figures already in it, not zeros —
   // a blank card reads as broken and there is nothing to seed them from at the

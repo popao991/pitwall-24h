@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  defaultState, defaultCar, defaultDriver, defaultTiming, defaultEvent, EVENT_FIELDS,
+  defaultState, defaultCar, defaultCarNumber, defaultDriver, defaultTiming, defaultEvent, EVENT_FIELDS,
   timingNrOf, deepMerge, emptyStop, effectiveBurn, pushLapTime, raceCondition, paceLapSec,
   FCY_MODES, PORT, defaultTyreSets, reconcileTyreSets, stopTyreSet, stintStats,
   reconcileTyreWarmers, loadTyreWarmer, TYRE_WARMER_MAX,
@@ -101,6 +101,14 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
     for (const c of Object.values(s.cars)) {
       c.make ??= '';
       c.model ??= '';
+      // The four entries carry their real race numbers now. Same rule as the
+      // track figures above: only a car still sitting on the old placeholder
+      // — slot number, default name — moves, so a car the crew has already
+      // numbered or named at the track is left exactly as it is.
+      if (String(c.number) === String(c.id) && c.name === `Car #${c.id}`) {
+        c.number = defaultCarNumber(c.id);
+        c.name = `Car #${c.number}`;
+      }
       // The track condition is DRY/WET only — neutralisations are race-wide
       // now. A car left on the old car-level 'sc' comes back on dry rather
       // than sitting on a condition no button can clear.
@@ -148,6 +156,17 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
       c.config.avgLapSec.fcy ??= c.config.avgLapSec.sc;
       c.config.finishFuelL ??= 5;
       c.config.safetyFuelL ??= 3;
+      // The low-fuel warning is set in liters now, not laps: liters is the
+      // number the crew reads off the rig, and a lap threshold silently moves
+      // whenever the burn rate does. A car tuned in laps keeps the same
+      // warning point — its laps priced at the car's dry burn.
+      if (c.config.fuelWarnL == null) {
+        const oldLaps = c.config.fuelWarnLaps;
+        c.config.fuelWarnL = oldLaps != null
+          ? Math.round(oldLaps * (c.config.burnPerLap?.dry || 2.8))
+          : 15;
+      }
+      delete c.config.fuelWarnLaps;
       c.config.paceAvgLaps ??= PACE_WINDOW_DEFAULT;
       c.state.inPit ??= false;
       c.state.pitEnterMs ??= null;

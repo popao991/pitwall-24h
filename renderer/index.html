@@ -56,10 +56,10 @@
         <p>Run this on each of the 4 strategy PCs. Pick your car and enter the pit wall PC's IP address (shown on the pit wall screen).</p>
         <label>Car
           <select id="car-select">
-            <option value="1">Car 1</option>
-            <option value="2">Car 2</option>
-            <option value="3">Car 3</option>
-            <option value="4">Car 4</option>
+            <option value="1">#15</option>
+            <option value="2">#27</option>
+            <option value="3">#40</option>
+            <option value="4">#92</option>
           </select>
         </label>
         <label>Pit wall IP
@@ -82,15 +82,13 @@
 
     const carSel = document.getElementById('car-select');
     const ipInput = document.getElementById('server-ip');
-    // Car names are set in the pit wall settings (or on each station); this
-    // screen has no server connection, so it shows the labels the pit wall or
-    // station last cached on this PC.
-    try {
-      const labels = JSON.parse(localStorage.getItem('carLabels') || '{}');
-      for (const opt of carSel.options) {
-        if (labels[opt.value]) opt.textContent = labels[opt.value];
-      }
-    } catch { /* stale cache: keep the default labels */ }
+    // The four entries are the team's own — #15, #27, #40, #92 — and the picker
+    // says so straight off the markup. This screen has no server connection, so
+    // anything richer would have to come from a cache of what some earlier run
+    // happened to see, which is how it used to work and how it came to offer a
+    // car nobody recognised. A car renamed at the track shows that name on the
+    // pit wall and in the station's CONNECTION tab, which read the live state.
+    try { localStorage.removeItem('carLabels'); } catch { /* nothing to clear */ }
     carSel.value = localStorage.getItem('carId') || '1';
     ipInput.value = localStorage.getItem('serverIp') || '';
     carSel.addEventListener('change', () => localStorage.setItem('carId', carSel.value));

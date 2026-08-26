@@ -1376,6 +1376,18 @@ export function burnAtLapTime(points, lapSec) {
   return last.fuelL;
 }
 
+// The team's four entries. The cars are known long before the app is opened,
+// so the slots carry their real race numbers from the first boot: slot 1 is
+// #15, slot 2 #27, and so on. Numbers stay editable on the pit wall for the
+// event where an entry is renumbered.
+export const DEFAULT_CAR_NUMBERS = ['15', '27', '40', '92'];
+
+// The number a slot starts life with. Falls back to the slot's own id so a
+// fifth car, if one is ever added, still gets a number of its own.
+export function defaultCarNumber(id) {
+  return DEFAULT_CAR_NUMBERS[Number(id) - 1] ?? String(id);
+}
+
 export function defaultCar(id, number) {
   return {
     id,
@@ -1417,6 +1429,30 @@ export function defaultCar(id, number) {
       cautionsPerHour: 0.639,
       tyreDegSecPerKm: 0.0087,
       fuelWeightSecPerL: 0.0079,
+      // How long a usable neutralisation actually runs here. This is what
+      // decides how much of the discount a stop collects: the credit accrues
+      // only while the field is still crawling, so a caution that goes green
+      // with the hose still in pays for part of the stop and no more. Zolder
+      // 2019-2025: 7.1 min is the median Code 60 of 4 minutes or longer, and
+      // roughly a quarter of them are short enough that a stop never pays.
+      cautionMinutes: 7.1,
+      // Slack added to every stop the call prices, on top of the measured lane
+      // and service times. Real stops are rarely textbook: an overshot box, a
+      // sticky coupling, traffic in the lane. It is a robustness knob — wind it
+      // up and see whether the call still stands when the stop goes wrong.
+      //
+      // Note which way it actually moves the answer, because it is the reverse
+      // of what "make every stop dearer" sounds like: standing still in the
+      // lane is discounted like every other second of a stop, so every plan
+      // pays the slack at every stop it makes and only the one taken under the
+      // flag gets it cheap. A sloppier stop therefore makes the flag worth
+      // MORE, not less. It moves the CALL only; the pit-lane and ETA figures
+      // elsewhere stay measured.
+      pitSlackSec: 0,
+      // Fuel burnt driving the pit lane itself, in litres. 0 derives it from
+      // the neutralised burn across the lane's share of the lap, which is
+      // right unless the lane is unusually long or short for the circuit.
+      pitLaneFuelL: 0,
       tyreLifeLaps: 90,
       tyreSets: 12,
       // How many tyre warmers are in the garage (0 = the team runs without).
@@ -1450,7 +1486,7 @@ export function defaultCar(id, number) {
       pitInKm: 0,
       finishFuelL: 5,
       safetyFuelL: 3,
-      fuelWarnLaps: 5, // low-fuel warning once this few laps remain (0 = off)
+      fuelWarnL: 15, // low-fuel warning once this few liters remain above safety (0 = off)
       paceAvgLaps: PACE_WINDOW_DEFAULT // laps behind the pace card's rolling average
     },
     state: {
@@ -1508,16 +1544,17 @@ export function defaultCar(id, number) {
   };
 }
 
-// Label for the car pickers (start screen, station CONNECTION tab). The slot
-// keeps its "Car N" identity — that is what a station connects as — with the
-// team's own name (or the race number, when it differs) appended so the
-// pickers read like the pit wall, not like an anonymous 1–4 list.
+// Label for the car pickers (start screen, station CONNECTION tab). The four
+// entries are known by their race numbers — #15, #27, #40, #92 — so that is
+// what the pickers say: the same identity the timing board and the pit wall
+// cards use, with the team's own name appended once a car has been given one.
+// A car whose number has been cleared falls back to the slot it connects as.
 export function carPickLabel(id, car) {
-  const def = `Car #${car.number}`;
-  const name = String(car.name || '').trim();
-  if (name && name !== def) return `Car ${id} — ${name}`;
-  if (String(car.number) !== String(id)) return `Car ${id} — #${car.number}`;
-  return `Car ${id}`;
+  const nr = String(car?.number ?? '').trim();
+  const head = nr ? `#${nr}` : `Car ${id}`;
+  const name = String(car?.name || '').trim();
+  if (name && name !== `Car #${nr}`) return `${head} — ${name}`;
+  return head;
 }
 
 // Fuel the car should be sitting on when the race starts. A start figure of 0
@@ -1573,7 +1610,7 @@ export const CAR_FILE_GROUPS = [
     key: 'fuel',
     label: 'Fuel',
     fields: ['fuelModel', 'tankLiters', 'startFuelL', 'burnPerLap',
-      'finishFuelL', 'safetyFuelL', 'fuelWarnLaps']
+      'finishFuelL', 'safetyFuelL', 'fuelWarnL']
   },
   {
     key: 'pace',
@@ -1592,7 +1629,8 @@ export const CAR_FILE_GROUPS = [
     // one. They travel with the car: the two coefficients are the car's own
     // sensitivity to fuel and rubber, and the rate is how the crew reads the
     // event they are running.
-    fields: ['cautionsPerHour', 'tyreDegSecPerKm', 'fuelWeightSecPerL']
+    fields: ['cautionsPerHour', 'cautionMinutes', 'tyreDegSecPerKm', 'fuelWeightSecPerL',
+      'pitSlackSec', 'pitLaneFuelL']
   }
 ];
 
@@ -1769,6 +1807,15 @@ export function applyCarFile(car, input, { identity = true } = {}) {
     }
     if (hits) applied.push(g.label.toLowerCase());
   }
+  // Files written while the low-fuel warning was set in laps: keep the same
+  // warning point by pricing those laps at the car's dry burn. Same rule as
+  // the state migration on the wall.
+  if (file.fuel && typeof file.fuel === 'object' &&
+      file.fuel.fuelWarnL === undefined && Number.isFinite(Number(file.fuel.fuelWarnLaps))) {
+    car.config.fuelWarnL = Math.round(
+      Number(file.fuel.fuelWarnLaps) * (car.config.burnPerLap?.dry || 2.8));
+  }
+
   // The three a wrong file could make nonsense of.
   if (!FUEL_MODELS.includes(car.config.fuelModel)) car.config.fuelModel = 'driver-avg';
   if (!(car.config.tankLiters > 0)) car.config.tankLiters = defCfg.tankLiters;
@@ -1882,7 +1929,7 @@ export function applyCarFile(car, input, { identity = true } = {}) {
 
 export function defaultState() {
   const cars = {};
-  for (let i = 1; i <= 4; i++) cars[String(i)] = defaultCar(String(i), String(i));
+  for (let i = 1; i <= 4; i++) cars[String(i)] = defaultCar(String(i), defaultCarNumber(String(i)));
   return {
     race: {
       name: '24H Race',
@@ -2930,16 +2977,21 @@ export function fuelStrategy(car, race, now, calcs = carCalcs(car, race, now)) {
   // the crew in advance whether the next Code 60 is theirs to take.
   const breakEven = { fcy: fuelBreakEven(car, 'fcy'), sc: fuelBreakEven(car, 'sc') };
 
-  // Low-fuel warning thresholds. lapsToEmpty counts laps above the SAFETY
-  // level, so "0 laps" still leaves the reserve. fuelWarnLaps = 0 disables.
-  const warnLaps = cfg.fuelWarnLaps ?? 5;
+  // Low-fuel warning thresholds. The threshold is liters, because liters is
+  // what the crew reads off the rig and types into CORRECT FUEL READING — a
+  // lap figure moves under the car whenever the burn rate does. litersLeft
+  // counts fuel above the SAFETY level, so "0 L" still leaves the reserve.
+  // Amber at the configured level, red at half of it. fuelWarnL = 0 disables.
+  const warnL = cfg.fuelWarnL ?? 15;
+  const litersLeft = calcs.usableFuel;
   const lapsLeft = calcs.lapsToEmpty;
   const warn = {
+    litersLeft,
     lapsLeft,
     msLeft: calcs.msToSafety,
-    warnLaps,
-    level: warnLaps > 0 && lapsLeft <= 2 ? 'crit'
-      : warnLaps > 0 && lapsLeft <= warnLaps ? 'warn' : 'ok'
+    warnL,
+    level: warnL > 0 && litersLeft <= warnL / 2 ? 'crit'
+      : warnL > 0 && litersLeft <= warnL ? 'warn' : 'ok'
   };
 
   if (addNeededL <= EPS) {
@@ -3152,20 +3204,96 @@ const CAUTION_PLANS = [
   { key: 'both', fuel: true, tyres: true, label: 'Fuel + tyres' }
 ];
 
+// Where the car is on the lap when the flag drops, as the share of a lap it
+// still has to run before it reaches pit entry. A caution can fall anywhere,
+// so with no position to go on the expectation is half a lap — and that half
+// lap is what eats into the credit, because the discount only accrues while
+// the field is still crawling when the car finally gets there.
+const ENTRY_LAP_SHARE = 0.5;
+
+// Everything the four simulations share: the car's own state and pace, and the
+// shape of the neutralisation they are all being asked about. Built once so a
+// sweep across a whole stint can vary fuel and rubber without rebuilding the
+// figures that do not move.
+function cautionAnchor(car, race, now, pace, calcs, base) {
+  const cfg = car.config;
+  const trackKm = base.trackKm;
+  const laneKm = Math.max(0, Math.min(cfg.pitLaneKm || 0, trackKm));
+  // A caution the crew has not measured still has to be something: fall back
+  // to the Zolder median rather than to zero, which would say every flag is
+  // over before the car reaches the lane.
+  const cautionMin = cfg.cautionMinutes > 0 ? cfg.cautionMinutes : 7.1;
+  const cautionBurn = (cfg.burnPerLap && cfg.burnPerLap[pace]) || base.burnPerLap;
+  return {
+    ...base,
+    safety: cfg.safetyFuelL || 0,
+    tyreLifeKm: cfg.tyreLifeKm || 0,
+    cautionBurn,
+    cautionEndSec: cautionMin * 60,
+    vNeutralKmS: (neutralSpeedKmh(car, pace) || 0) / 3600,
+    laneKm,
+    slackSec: Math.max(0, cfg.pitSlackSec || 0),
+    // Fuel burnt driving the lane itself. Derived from the neutralised burn
+    // across the lane's share of a lap unless the crew has measured it, which
+    // is right unless the lane is unusually long or short for the circuit.
+    laneFuelL: cfg.pitLaneFuelL > 0
+      ? cfg.pitLaneFuelL
+      : (trackKm > 0 ? cautionBurn * (laneKm / trackKm) : 0)
+  };
+}
+
 // One plan rolled forward far enough to cover many stint cycles. Returns the
 // elapsed time at the end of each lap, plus which laps carried a stop.
 function simulateCautionPlan(car, pace, plan, ratePerHour, anchor) {
   const cfg = car.config;
-  const { refLapSec, fuel0, tyreKm0, trackKm, tank, safety, tyreLifeKm, burnPerLap } = anchor;
+  const { refLapSec, fuel0, tyreKm0, trackKm, tank, safety, tyreLifeKm, burnPerLap,
+    cautionEndSec, vNeutralKmS, laneKm, slackSec, laneFuelL, cautionBurn } = anchor;
   // Lap time relative to the car's own reference lap, so this can never drift
   // from the pace the car is actually running.
   const lapSec = (fuelL, tyreKm) => refLapSec
     + (cfg.fuelWeightSecPerL || 0) * (fuelL - fuel0)
     + (cfg.tyreDegSecPerKm || 0) * (tyreKm - tyreKm0);
 
+  // Time to cover a distance starting at t0, with the neutralisation ending
+  // part-way through it. This is what makes the caution a PERIOD rather than a
+  // single slow lap: a long one keeps the whole field crawling for several
+  // laps, a short one is over before the car has finished the one it is on.
+  const coverSec = (distKm, t0, fuelL, tyreKm) => {
+    const vGreen = trackKm / lapSec(fuelL, tyreKm); // km per second
+    if (!(cautionEndSec > t0) || !(vNeutralKmS > 0)) return distKm / vGreen;
+    const under = vNeutralKmS * (cautionEndSec - t0);
+    if (under >= distKm) return distKm / vNeutralKmS;
+    return (cautionEndSec - t0) + (distKm - under) / vGreen;
+  };
+
+  // Share of a lap starting at t0 that is run neutralised. Fuel blends on it:
+  // a crawling car burns far less than a racing one, so billing a neutralised
+  // lap at the green rate would have it drink more, not less.
+  const shareOfLap = t0 => {
+    if (!(cautionEndSec > t0) || !(vNeutralKmS > 0)) return 0;
+    return Math.min(1, vNeutralKmS * (cautionEndSec - t0) / trackKm);
+  };
+
+  // What a stop costs when the neutralisation still has `leftSec` to run. The
+  // credit is earned second by second while the field crawls, so a flag that
+  // goes green with the hose still connected pays for part of the stop and no
+  // more — and one that has already gone green pays for none of it.
+  const stopLossSec = (refuelSec, boxWorkSec, leftSec) => {
+    const c = pitCostSec(car, pace, { refuelSec, boxWorkSec: boxWorkSec + slackSec });
+    if (!(c.T > 0) || !(leftSec > 0)) return c.lossGreen;
+    const perSec = c.vG > 0 && c.vN > 0 ? 1 - c.vN / c.vG : 0;
+    // Braking off the racing line is discounted in full or not at all: it is
+    // paid once, at pit entry, and the flag is either out then or it is not.
+    const gain = perSec * Math.min(c.T, leftSec) + (c.deltaGreen - c.deltaNeutral);
+    return c.lossGreen - Math.max(0, gain);
+  };
+
   const expectedStopSec = (windowSec, refuelSec, boxWorkSec) => {
-    const green = pitCostSec(car, null, { refuelSec, boxWorkSec }).lossGreen;
-    const neutral = pitCostSec(car, pace, { refuelSec, boxWorkSec }).lossNeutral;
+    // A stop taken at a caution that falls later is timed to the flag, so the
+    // whole neutralisation is there to be used — unlike this one, which has
+    // already been running for as long as it took to reach pit entry.
+    const neutral = stopLossSec(refuelSec, boxWorkSec, cautionEndSec);
+    const green = stopLossSec(refuelSec, boxWorkSec, 0);
     const p = probabilityOfCautionWithin(ratePerHour, windowSec);
     return p * neutral + (1 - p) * green;
   };
@@ -3175,17 +3303,21 @@ function simulateCautionPlan(car, pace, plan, ratePerHour, anchor) {
   let t = 0;
   const laps = [];
 
-  // Lap 0 — the hypothetical "a caution is running right now" lap.
-  const cautionLapSec = (cfg.avgLapSec && cfg.avgLapSec[pace]) || refLapSec;
-  const cautionBurn = (cfg.burnPerLap && cfg.burnPerLap[pace]) || burnPerLap;
+  // Lap 0 — the decision lap: the flag is out and this plan says what to do
+  // about it. Every plan drives the same lap; the ones that stop pay the loss
+  // on top of it, discounted by whatever is left of the caution when the car
+  // reaches pit entry.
+  const onTrackShare = trackKm > 0 ? Math.max(0, 1 - laneKm / trackKm) : 1;
+  const lapFuel0 = shareOfLap(0) * cautionBurn + (1 - shareOfLap(0)) * burnPerLap;
+  const drive0 = coverSec(trackKm, 0, fuel, tyreKm);
   if (plan.fuel || plan.tyres) {
     const addL = plan.fuel ? Math.max(0, tank - fuel) : 0;
-    // The stop is taken UNDER the caution, which is the whole point of it.
-    t += cautionLapSec + pitCostSec(car, pace, {
-      refuelSec: plan.fuel ? refuelTimeSec(cfg, addL) : 0,
-      boxWorkSec: plan.tyres ? (cfg.tyreChangeSec || 0) : 0
-    }).lossNeutral;
-    if (plan.fuel) fuel = tank; else fuel -= cautionBurn;
+    const toEntrySec = coverSec(ENTRY_LAP_SHARE * trackKm, 0, fuel, tyreKm);
+    t += drive0 + stopLossSec(
+      plan.fuel ? refuelTimeSec(cfg, addL) : 0,
+      plan.tyres ? (cfg.tyreChangeSec || 0) : 0,
+      Math.max(0, cautionEndSec - toEntrySec));
+    if (plan.fuel) fuel = tank; else fuel -= onTrackShare * lapFuel0 + laneFuelL;
     // Binning a set with life still in it is free while there is spare rubber
     // in the garage, and expensive once there is not: on a fixed allocation the
     // discarded kilometres come straight off the distance the car can still
@@ -3200,21 +3332,23 @@ function simulateCautionPlan(car, pace, plan, ratePerHour, anchor) {
       tyreKm = 0;
     }
   } else {
-    t += cautionLapSec;
-    fuel -= cautionBurn;
+    t += drive0;
+    fuel -= lapFuel0;
   }
   tyreKm += trackKm;
   laps.push({ t, stop: plan.fuel || plan.tyres });
 
-  // Everything after runs green, stopping whenever fuel or rubber runs out.
-  // Those stops are priced as an EXPECTED value: a caution may well be running
-  // by the time they come due, and how likely that is is the thing being tested.
+  // Everything after runs on until fuel or rubber runs out — under whatever is
+  // left of the neutralisation first, then green. Those later stops are priced
+  // as an EXPECTED value: a caution may well be running by the time they come
+  // due, and how likely that is is the thing being tested.
   let lastStopT = laps[0].stop ? t : 0;
   const horizon = CAUTION_SIM_HOURS * 3600;
   let guard = 0;
   while (t < horizon && guard++ < 2000) {
     const forced = fuel < safety || (tyreLifeKm > 0 && tyreKm >= tyreLifeKm);
-    let d = lapSec(fuel, tyreKm);
+    let d = coverSec(trackKm, t, fuel, tyreKm);
+    const lapFuel = shareOfLap(t) * cautionBurn + (1 - shareOfLap(t)) * burnPerLap;
     let stopped = false;
     if (forced) {
       const addL = Math.max(0, tank - fuel);
@@ -3224,7 +3358,7 @@ function simulateCautionPlan(car, pace, plan, ratePerHour, anchor) {
       lastStopT = t;
       stopped = true;
     } else {
-      fuel -= burnPerLap;
+      fuel -= lapFuel;
     }
     tyreKm += trackKm;
     t += d;
@@ -3290,18 +3424,12 @@ export function cautionCall(car, race, now, pace, calcs = carCalcs(car, race, no
       }).lossGreen
     : 0;
 
-  const anchor = {
-    refLapSec,
-    scarcity,
+  const anchor = cautionAnchor(car, race, now, pace, calcs, {
+    refLapSec, burnPerLap, trackKm, tank, scarcity,
     fuel0: car.state.fuelLiters,
     // tyreSetMileage returns {km, kmFcy, kmGreen} — the total is what wears.
-    tyreKm0: tyreSetMileage(currentTyreSet(car)).km || 0,
-    trackKm,
-    tank,
-    safety: cfg.safetyFuelL || 0,
-    tyreLifeKm: cfg.tyreLifeKm || 0,
-    burnPerLap
-  };
+    tyreKm0: tyreSetMileage(currentTyreSet(car)).km || 0
+  });
 
   // Staying out is behind while this is positive; it crosses zero at the rate
   // where waiting starts to pay.
@@ -3340,8 +3468,185 @@ export function cautionCall(car, race, now, pace, calcs = carCalcs(car, race, no
     takeIt: winner.key !== 'stay',
     winner,
     plans: gaps,
-    marginSec: runnerUp
+    marginSec: runnerUp,
+    // How decisive the call is, in the bands the study reads it in.
+    band: cautionBand(runnerUp),
+    // Where the car is in its stint, which is what the crossover below is
+    // measured against.
+    stintMin: stintMinutes(car, race, now)
   };
+}
+
+// ---------------------------------------------------------------------------
+// When it starts to pay: the crossover, swept across the stint
+// ---------------------------------------------------------------------------
+// The call above answers "right now". The crew also needs the shape of it —
+// a stop that is nominally ahead by half a second is a tie the arithmetic
+// happened to break, and the useful question is which minute of a stint the
+// advantage becomes real. Sweeping the stint answers both at once, and it is
+// the same comparison at every point, so the graph and the verdict can never
+// tell different stories.
+
+// A winner has to beat the runner-up by more than this before it is a call
+// rather than a coin flip. Everything under it reads as LINE BALL.
+export const CAUTION_DECISIVE_SEC = 2;
+
+// How decisive an advantage is, in plain words.
+export const CAUTION_BANDS = [
+  { at: 25, key: 'clear', label: 'clear' },
+  { at: 10, key: 'worth', label: 'worth taking' },
+  { at: CAUTION_DECISIVE_SEC, key: 'marginal', label: 'marginal' },
+  { at: -Infinity, key: 'even', label: 'too close to call' }
+];
+
+export function cautionBand(sec) {
+  return CAUTION_BANDS.find(b => sec >= b.at) || CAUTION_BANDS[CAUTION_BANDS.length - 1];
+}
+
+/** Minutes the current stint has been running, or 0 before it starts. */
+export function stintMinutes(car, race, now) {
+  const startMs = stintStartOf(car, race);
+  return startMs > 0 && now > startMs ? (now - startMs) / 60e3 : 0;
+}
+
+/**
+ * The same call swept across a whole stint: at each minute, what each plan is
+ * worth against staying out. Returns the series the graph draws, the minute
+ * each plan starts to pay, and where the car sits on it right now.
+ *
+ * The sweep runs from the state the stint STARTED in — full tank or whatever
+ * it left the lane with, and the rubber it went out on — so the minutes on the
+ * axis are the ones on the stint clock in front of the crew.
+ *
+ * `stepMin` trades resolution for work: the default walks the stint in two
+ * minute steps, which is four simulations a point.
+ */
+// The sweep is anchored on the state the STINT started in, so within a stint
+// its answer does not move — only where the car sits on it does. That makes it
+// worth keeping: a few dozen simulations would otherwise be rerun every second
+// for every car, on both flags, to redraw the same curve.
+const sweepCache = new Map();
+const SWEEP_CACHE_MAX = 12;
+
+function sweepCached(key, build) {
+  if (sweepCache.has(key)) {
+    const hit = sweepCache.get(key);
+    // Re-insert so the least recently used entry is the one that falls off.
+    sweepCache.delete(key);
+    sweepCache.set(key, hit);
+    return hit;
+  }
+  const built = build();
+  sweepCache.set(key, built);
+  if (sweepCache.size > SWEEP_CACHE_MAX) sweepCache.delete(sweepCache.keys().next().value);
+  return built;
+}
+
+export function cautionSweep(car, race, now, pace, opts = {}) {
+  const cfg = car.config;
+  if (pace !== 'fcy' && pace !== 'sc') return null;
+  const calcs = opts.calcs || carCalcs(car, race, now);
+  const trackKm = cfg.trackKm || 0;
+  const tank = cfg.tankLiters || 0;
+  const refLapSec = (calcs.lapMs || 0) / 1000 || (cfg.avgLapSec && cfg.avgLapSec.dry) || 0;
+  const burnPerLap = effectiveBurn(car, 'dry') || (cfg.burnPerLap && cfg.burnPerLap.dry) || 0;
+  if (!(trackKm > 0) || !(tank > 0) || !(refLapSec > 0) || !(burnPerLap > 0)) return null;
+
+  const stepMin = opts.stepMin > 0 ? opts.stepMin : 2;
+  const rate = cfg.cautionsPerHour || 0;
+  const safety = cfg.safetyFuelL || 0;
+  const burnPerMin = burnPerLap * (60 / refLapSec);
+  const kmPerMin = trackKm * (60 / refLapSec);
+
+  // Where the stint began. The fuel it left the lane with when that is known,
+  // a full tank when it is not; the rubber wound back by the distance run
+  // since. Both are what the sweep's minute zero means.
+  const fuelStart = car.state.stintFuelStartL > 0 ? car.state.stintFuelStartL : tank;
+  const tyreKmNow = tyreSetMileage(currentTyreSet(car)).km || 0;
+  const nowMin = stintMinutes(car, race, now);
+  const tyreKmStart = Math.max(0, tyreKmNow - nowMin * kmPerMin);
+
+  // The sweep runs to where fuel would force the car in anyway — past that
+  // there is no decision left to make — capped by the stint the crew allows.
+  const fuelEndMin = burnPerMin > 0 ? Math.max(0, (fuelStart - safety) / burnPerMin) : 0;
+  const endMin = Math.max(stepMin, Math.min(fuelEndMin, (cfg.maxStintMin || 65) + 10));
+
+  const budget = tyreBudget(car, race, now, calcs);
+  const scarcity = budget && budget.changeForcesShort
+    ? pitCostSec(car, null, {
+      refuelSec: refuelTimeSec(cfg, tank),
+      boxWorkSec: cfg.tyreChangeSec || 0
+    }).lossGreen
+    : 0;
+
+  // Everything the curve's shape depends on, rounded so live pace wobble does
+  // not invalidate it every tick. The car's position on the curve is not in
+  // here — that is read fresh below.
+  const key = [
+    car.id, pace, rate, cfg.cautionMinutes, cfg.pitSlackSec, cfg.pitLaneFuelL,
+    trackKm, tank, safety, cfg.tyreLifeKm, cfg.tyreChangeSec, cfg.refuelLps, cfg.refuelDeadSec,
+    cfg.pitLossSec, cfg.minStopSec, cfg.driveThroughSec, cfg.pitLaneKm, cfg.pitSpeedKmh,
+    cfg.pitEntryToPumpSec, cfg.pumpToExitSec, cfg.pumpToBoxSec, cfg.boxToExitSec, cfg.pitEntryToBoxSec,
+    cfg.fcySpeedKmh, cfg.scSpeedKmh, cfg.greenSpeedKmh,
+    cfg.tyreDegSecPerKm, cfg.fuelWeightSecPerL, stepMin, scarcity > 0 ? 1 : 0,
+    refLapSec.toFixed(1), burnPerLap.toFixed(2), fuelStart.toFixed(0), tyreKmStart.toFixed(0)
+  ].join('|');
+
+  const built = sweepCached(key, () => buildSweepPoints());
+  return {
+    ...built,
+    pace, rate, stepMin, endMin,
+    // Where the car is on the curve right now — the one part that moves.
+    nowMin,
+    decisiveSec: CAUTION_DECISIVE_SEC
+  };
+
+  function buildSweepPoints() {
+  const points = [];
+  for (let min = 0; min <= endMin + 1e-9; min += stepMin) {
+    const fuel = Math.max(safety, fuelStart - min * burnPerMin);
+    const tyreKm = tyreKmStart + min * kmPerMin;
+    const anchor = cautionAnchor(car, race, now, pace, calcs, {
+      refLapSec, burnPerLap, trackKm, tank, scarcity, fuel0: fuel, tyreKm0: tyreKm
+    });
+    const gaps = cautionGaps(car, pace, rate, anchor);
+    const stay = gaps.find(g => g.key === 'stay').gapSec;
+    // Gain over staying out: positive means the stop is ahead. The gaps are
+    // measured down from the best plan, so staying out's own gap IS the gain
+    // of whichever plan is being read against it.
+    const gainOf = key => stay - gaps.find(g => g.key === key).gapSec;
+    points.push({
+      min,
+      fuelL: fuel,
+      tyreKm,
+      fuel: gainOf('fuel'),
+      tyres: gainOf('tyres'),
+      both: gainOf('both')
+    });
+  }
+
+  // The first minute each plan's advantage becomes a decision rather than a
+  // tie, interpolated between samples so a two-minute step does not round the
+  // answer into the next one.
+  const firstAbove = key => {
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1][key];
+      const b = points[i][key];
+      if (b > CAUTION_DECISIVE_SEC && a <= CAUTION_DECISIVE_SEC) {
+        const f = (CAUTION_DECISIVE_SEC - a) / (b - a);
+        return points[i - 1].min + f * (points[i].min - points[i - 1].min);
+      }
+      if (i === 1 && a > CAUTION_DECISIVE_SEC) return points[0].min;
+    }
+    return null;
+  };
+
+  return {
+    points,
+    // Minute of the stint each plan starts to be worth taking, null if never.
+    first: { fuel: firstAbove('fuel'), tyres: firstAbove('tyres'), both: firstAbove('both') }
+  };
+  }
 }
 
 // Who sits in the car after a stop taken now: a double-stint driver stays for
@@ -3579,6 +3884,43 @@ export function recommendedStop(car, race, now, opts = {}) {
     nowSec: costFull.lossNeutral - costFuel.lossNeutral
   };
 
+  // ---- is this flag worth taking at all, and for what work
+  // The litre threshold below (netSec) answers the fuel-only half of it off
+  // track geometry alone. This answers the whole of it: four plans rolled
+  // forward over many stint cycles, priced for how long the flag actually
+  // runs, what the box work earns on top of the fuel, and the gamble that
+  // another caution falls before the tank forces the car in anyway.
+  const cc = neutral && running ? cautionCall(car, race, now, pace, calcs) : null;
+  const sweep = cc ? cautionSweep(car, race, now, pace, { calcs }) : null;
+  // Deliberately not the whole call: this rides on every state broadcast, for
+  // every car, on both flags. The tyre ledger behind it is already on the car
+  // and the screens work it out for themselves, so only the answer travels.
+  const caution = cc
+    ? {
+      pace: cc.pace,
+      rate: cc.rate,
+      breakEven: cc.breakEven,
+      takeIt: cc.takeIt,
+      winner: { key: cc.winner.key, label: cc.winner.label },
+      plans: cc.plans.map(p => ({ key: p.key, label: p.label, gapSec: p.gapSec })),
+      marginSec: cc.marginSec,
+      band: cc.band.key,
+      // The minute of the stint each option starts to be worth taking, and
+      // whether the car has reached it yet. This is the answer the crew reads
+      // off the card while the flag is out: not just "is it worth it now" but
+      // "and if not now, when".
+      first: sweep ? sweep.first : null,
+      stintMin: sweep ? sweep.nowMin : cc.stintMin
+    }
+    : null;
+
+  // What to say about an option that does not pay yet: when it starts to.
+  const fromMin = key => {
+    const at = caution?.first?.[key];
+    if (at == null) return null;
+    return at <= (caution.stintMin || 0) ? 'now' : `minute ${Math.round(at)}`;
+  };
+
   // ---- when, and the call itself
   const warnCrit = fs?.warn?.level === 'crit' && !fs.noStopNeeded;
   const netSec = fs && !fs.noStopNeeded ? (fs.windowOpen ? 0 : pitLoss) - gainSec : 0;
@@ -3606,7 +3948,62 @@ export function recommendedStop(car, race, now, opts = {}) {
     dueMs = calcs.msToEmpty;
     dueNote = 'low fuel';
   } else if (neutral && fs && !fs.noStopNeeded) {
-    if (netSec <= 0) {
+    // How far the winning plan is ahead of simply staying out — the number the
+    // call turns on. The ranking's gaps are measured down from the best plan,
+    // so staying out's own gap IS that advantage.
+    const stayGap = caution ? caution.plans.find(p => p.key === 'stay').gapSec : 0;
+    const lineBall = caution ? caution.marginSec < CAUTION_DECISIVE_SEC : false;
+    const work = caution ? caution.winner.label.toUpperCase() : '';
+    if (fs.windowOpen) {
+      // The stop is due whatever happens, so the only question left is what to
+      // do while the car is in there — and under a flag the answer is
+      // everything, because the box work is discounted with the fuel.
+      verdict = 'boxNow';
+      head = caution && caution.takeIt ? `BOX NOW · ${work}` : 'BOX NOW';
+      sub = `The window is open, so the pit-lane loss is spent either way — and the flag takes ${gainSec.toFixed(0)} s off it.`;
+      dueKey = 'PIT ENTRY';
+      dueMs = null;
+      dueNote = 'window open';
+    } else if (caution && caution.takeIt && !lineBall) {
+      verdict = 'boxNow';
+      head = `BOX NOW · ${work}`;
+      sub = `${caution.winner.label} is ${stayGap.toFixed(0)} s up on staying out and `
+        + `${caution.marginSec.toFixed(0)} s clear of the next plan — ${cc.band.label}. `
+        + 'It adds a stop later and is still ahead.';
+      dueKey = 'PIT ENTRY';
+      dueMs = null;
+      dueNote = 'adds one stop, still ahead';
+    } else if (caution && caution.takeIt && lineBall) {
+      // Nominally ahead, but by less than the inputs are worth. Calling it
+      // either way would read as a decision the maths has not earned.
+      verdict = 'stay';
+      head = 'LINE BALL';
+      sub = `${caution.winner.label} is ahead by ${stayGap.toFixed(0)} s but only `
+        + `${caution.marginSec.toFixed(1)} s clear of the next plan — too close to call. `
+        + 'Decide it on traffic, the driver and the crew.';
+      dueKey = 'WINDOW IN';
+      dueMs = fs.msToWindow;
+      dueNote = `${fs.lapsToWindow} laps`;
+    } else if (caution) {
+      verdict = 'stay';
+      head = 'STAY OUT';
+      const fuelAt = fromMin('fuel');
+      const bothAt = fromMin('both');
+      const when = bothAt && bothAt !== 'now' ? `Fuel and tyres starts paying at ${bothAt}`
+        : fuelAt && fuelAt !== 'now' ? `Fuel starts paying at ${fuelAt}`
+        : null;
+      sub = `Staying out is ${Math.abs(stayGap).toFixed(0)} s up on the best stop`
+        + (caution.rate > 0 && caution.breakEven != null
+          ? ` — cautions would have to fall at ${caution.breakEven.toFixed(2)}/h before that flips`
+          : '')
+        + '. ' + (when ? `${when} of the stint; the window opens in ${fs.lapsToWindow} laps.`
+          : `The window opens in ${fs.lapsToWindow} laps.`);
+      dueKey = 'WINDOW IN';
+      dueMs = fs.msToWindow;
+      dueNote = `${fs.lapsToWindow} laps`;
+    } else if (netSec <= 0) {
+      // No simulation available (the car is not configured for one) — fall
+      // back to the litre threshold, which needs nothing but track geometry.
       verdict = 'boxNow';
       head = 'BOX NOW';
       sub = netSec <= -1
@@ -3660,6 +4057,9 @@ export function recommendedStop(car, race, now, opts = {}) {
     dueKey, dueMs, dueNote,
     fuel, tyres, driver, brakes,
     stintMs,
+    // The four-plan ranking behind the call, with the minute of the stint each
+    // option starts to pay. null under green, which discounts nothing.
+    caution,
     gainSec, netSec, work,
     stopSec: costFull.T, lossGreenSec: costFull.lossGreen, lossNowSec: costFull.lossNeutral,
     est: { stationarySec: svc.totalSec, totalSec: svc.totalSec + pitLoss, addLiters: svc.addLiters },

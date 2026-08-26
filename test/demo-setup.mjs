@@ -168,7 +168,7 @@ for (const [id, c] of Object.entries(CARS)) {
         avgLapSec: { dry: c.lap, wet: c.lap + 13, sc: 150, fcy: 240 },
         tyreLifeKm: 300,
         tyreChangeSec: 25,
-        fuelWarnLaps: 5,
+        fuelWarnL: 15,
         finishFuelL: 5,
         safetyFuelL: 3
       }
