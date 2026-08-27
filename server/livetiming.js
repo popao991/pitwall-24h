@@ -754,12 +754,7 @@ export class GrrRelay {
     // clean bootstrap — the service's retry path does all of that.
     if (handle === '$_Reload') {
       this.h.onLog?.('feed requested a reload (session change) — reconnecting');
-      this.initialDataReceived = false;
-      this.messageId = null;
-      this.groupsToken = null;
-      try {
-        this.ws?.close();
-      } catch {}
+      this.reload();
       return;
     }
 
@@ -781,6 +776,19 @@ export class GrrRelay {
       return;
     }
     this.h.onFrame?.({ handle, payload, ts: Date.now() });
+  }
+
+  // Drop the resume tokens and close: the service's retry re-negotiates and
+  // the server replays the whole board from scratch, headers included. This is
+  // the same path the server's own $_Reload takes, and the only way back to a
+  // known column layout when a screen changed without one.
+  reload() {
+    this.initialDataReceived = false;
+    this.messageId = null;
+    this.groupsToken = null;
+    try {
+      this.ws?.close();
+    } catch {}
   }
 
   stop() {
@@ -1354,6 +1362,12 @@ function fmtTsUs(us) {
 // a few hundred; the cap only guards against a pathological feed.
 const RC_LOG_MAX = 200;
 
+// How long to let a board publish cells under an unverified column layout
+// before asking for a fresh bootstrap again. Long enough that a reconnect gets
+// to finish (negotiate + bootstrap is a couple of seconds) and short enough
+// that a screen change never costs a whole session of standings.
+const COL_REFRESH_MS = 20e3;
+
 export class TimingEngine {
   constructor({ onEvent, onLog } = {}) {
     this.onEvent = onEvent || (() => {});
@@ -1366,6 +1380,12 @@ export class TimingEngine {
     this.grid = {}; // row → {col → value}
     this.colMap = { ...GRR_COL_DEFAULT };
     this.colMapped = null; // Set of keys actually detected (null = defaults)
+    // A detected layout belongs to ONE board. When the timekeeper switches
+    // screens (a session change), it describes a board we are no longer
+    // looking at and nothing may be read through it until a header frame
+    // re-describes the new one — see _ci.
+    this.colStale = false;
+    this.colStaleAskedMs = 0;
     this.heat = {}; // n, f (flag enum), lt/r/h clock fields, _sampleMs
     this.serverTimeUs = null;
     this.serverTimeSampleMs = 0;
@@ -1427,7 +1447,14 @@ export class TimingEngine {
   // happens to sit there. A board without a class-position column would show
   // column 9's unset-best sentinel (9223372036854775807) under PIC, its LAPS
   // column under TEAM, and its section marker under INT.
+  //
+  // A layout that outlived its board is worse than no layout at all: the new
+  // screen's cells get read through the old screen's column numbers, and every
+  // value lands one field over — the state token under TEAM, the best time
+  // under S1, class position under LAPS. Blank beats wrong on a pit wall, so
+  // nothing resolves until a header frame describes the board we are on.
   _ci(key) {
+    if (this.colStale) return undefined;
     if (this.colMapped) return this.colMapped.has(key) ? this.colMap[key] : undefined;
     return this.colMap[key] ?? GRR_COL_DEFAULT[key];
   }
@@ -1520,6 +1547,9 @@ export class TimingEngine {
     this.grid = {};
     this.rowByNr = new Map();
     if (data.l?.h) this._buildColMap(data.l.h);
+    else if (this.colStale) {
+      this.onLog('board snapshot carried no column headers — standings stay held until the layout is known');
+    }
 
     for (const d of [data.l?.d, data.d, data.l?.r, data.r]) {
       if (d && this._parseInitData(d)) break;
@@ -1613,6 +1643,8 @@ export class TimingEngine {
       claim(keyFromName(h.c || h.caption || h.label || h.title || h.name || ''), i);
     }
 
+    // Whatever comes out of this pass describes the board in front of us now.
+    this.colStale = false;
     if (Object.keys(newMap).length >= 3) {
       this.colMap = { ...GRR_COL_DEFAULT, ...newMap };
       this.colMapped = new Set(Object.keys(newMap));
@@ -1628,8 +1660,25 @@ export class TimingEngine {
 
   _grrCells(payload) {
     if (!Array.isArray(payload)) return;
+    // Cells keep landing in the grid by raw column number while the layout is
+    // unverified — they cost nothing and the next init reloads the board
+    // anyway — but a board that is demonstrably live under a layout we cannot
+    // read needs a fresh bootstrap, not a wait. Ask for one; the reconnect
+    // re-negotiates and replays the whole board with its headers.
+    if (this.colStale && Date.now() - this.colStaleAskedMs > COL_REFRESH_MS) {
+      this.colStaleAskedMs = Date.now();
+      this.onLog('board is publishing cells but its column layout is unverified — asking for a fresh bootstrap');
+      this.onEvent({ type: 'refresh', reason: 'column layout unverified' });
+    }
+    // Only columns the board actually described get a key. A default index for
+    // a column this board does not publish points at an unrelated field, and
+    // attributing its changes would fire laps and pit stops that never
+    // happened.
     const colToKey = {};
-    for (const [key, col] of Object.entries(this.colMap)) colToKey[col] = key;
+    for (const key of Object.keys(this.colMap)) {
+      const col = this._ci(key);
+      if (col !== undefined) colToKey[col] = key;
+    }
     const changes = [];
     for (const cell of payload) {
       if (!Array.isArray(cell) || cell.length < 3) continue;
@@ -1665,6 +1714,13 @@ export class TimingEngine {
       // standings underneath the incoming one. The next init/deltas repopulate.
       this.grid = {};
       this.rowByNr = new Map();
+      // …and never leave its COLUMNS underneath either. A timekeeper who
+      // changes screens between sessions (a qualifying board, a screen check)
+      // publishes a different set of columns in a different order, and the
+      // deltas that follow carry no headers. Reading them through the old
+      // screen's map is how the scoreboard ends up with the E.T.A. token in
+      // the team column. Hold everything until a header frame arrives.
+      this.colStale = true;
       this.onEvent({ type: 'session', name: data.n, prevName });
     }
   }
@@ -1713,6 +1769,9 @@ export class TimingEngine {
       this.colMap = AK_COLMAP;
       this.colMapped = new Set(Object.keys(AK_COLMAP));
     }
+    // A fixed synthetic layout is never stale: it describes the writer,
+    // not a board that can change shape underneath us.
+    this.colStale = false;
     if (ts) {
       this.serverTimeUs = ts * 1000;
       this.serverTimeSampleMs = Date.now();
@@ -1879,6 +1938,9 @@ export class TimingEngine {
       this.colMap = TS_COLMAP;
       this.colMapped = new Set(Object.keys(TS_COLMAP));
     }
+    // A fixed synthetic layout is never stale: it describes the writer,
+    // not a board that can change shape underneath us.
+    this.colStale = false;
 
     if (handle === 'ts_session') return this._tsSession(payload);
     if (handle === 'ts_pass' || handle === 'ts_mpass') return this._tsPasses(handle === 'ts_mpass', payload);
@@ -3003,6 +3065,15 @@ export function createTimingService({ onEvent, onLog, replayDir = null } = {}) {
       // Replays are simulations: they must never write laps/pits into the
       // live race state.
       if (replay) return;
+      // The engine cannot read the board it is being sent and wants it
+      // re-described from the top. Not a race event — it never leaves here.
+      if (ev.type === 'refresh') {
+        if (relay?.reload) {
+          log(`reconnecting the feed: ${ev.reason}`);
+          relay.reload();
+        }
+        return;
+      }
       // One session = one replay file. The engine detects the change (web
       // heat rename or a new TeamStream session message) before any frame of
       // the new session has produced standings — rotating here means the new

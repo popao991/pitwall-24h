@@ -1165,6 +1165,46 @@ snap = eng.snapshot();
 check('session change clears the board', snap.entries.length === 0);
 check('session change event fired', events.some(e => e.type === 'session' && e.name === 'YTCC - Race 1'));
 
+// A timekeeper who switches screens between sessions publishes a different set
+// of columns in a different order, and the deltas that follow carry no headers
+// of their own. Read through the previous screen's map every value lands a
+// field over — the E.T.A. token under TEAM, the best time under S1, class
+// position under LAPS — which is what a stale layout did to a live pit wall.
+const colEvents = [];
+const engCol = new TimingEngine({ onEvent: e => colEvents.push(e), onLog: () => {} });
+engCol.applyFrame({ handle: 'h_i', payload: { n: 'System test - screen check' }, ts: Date.now() });
+engCol.applyFrame({ handle: 'r_i', payload: { l: {
+  h: [
+    { n: 'Position', c: 'POS' }, { n: 'StartNumber', c: 'NR' }, { n: 'State', c: 'E.T.A.' },
+    { n: 'Name', c: 'TEAM' }, { n: 'CurrentDriver', c: 'DRIVER' }, { n: 'Car', c: 'CAR' }
+  ],
+  d: [['1', '40', 'E1730000000000000', 'VR Racing by NGT', 'Dirk Van Rompuy', 'Porsche Cayman GT4 RS']]
+} }, ts: Date.now() });
+check('screen check board decoded', engCol.snapshot().entries[0].team === 'VR Racing by NGT');
+
+engCol.applyFrame({ handle: 'h_h', payload: { n: 'Belcar - Pre-qualifying practice 1' }, ts: Date.now() });
+engCol.applyFrame({ handle: 'r_c', payload: [
+  [0, 0, '1'], [0, 2, '40'], [0, 3, 'I'], [0, 4, 'E1730000900000000'],
+  [0, 5, 'VR Racing by NGT'], [0, 7, 'Dirk Van Rompuy'], [0, 8, 'Porsche Cayman GT4 RS']
+], ts: Date.now() });
+check('stale layout publishes nothing', engCol.snapshot().entries.length === 0);
+check('stale layout asks for a fresh bootstrap', colEvents.some(e => e.type === 'refresh'));
+
+// the reconnect replays the new board, headers and all
+engCol.applyFrame({ handle: 'r_i', payload: { l: {
+  h: [
+    { n: 'Position', c: 'POS' }, { n: 'Marker', c: '' }, { n: 'StartNumber', c: 'NR' },
+    { n: 'SectionMarker', c: 'S' }, { n: 'State', c: 'E.T.A.' }, { n: 'Name', c: 'TEAM' },
+    { n: 'CurrentDriverID', c: 'ID' }, { n: 'CurrentDriver', c: 'DRIVER' }, { n: 'Car', c: 'CAR' }
+  ],
+  d: [['1', '', '40', 'I', 'E1730000900000000', 'VR Racing by NGT', '1', 'Dirk Van Rompuy',
+       'Porsche Cayman GT4 RS']]
+} }, ts: Date.now() });
+const colRow = engCol.snapshot().entries[0];
+check('new screen read on its own columns', colRow.nr === '40' && colRow.team === 'VR Racing by NGT' &&
+  colRow.driver === 'Dirk Van Rompuy' && colRow.car === 'Porsche Cayman GT4 RS' &&
+  colRow.state === 'E1730000900000000' && colRow.smarker === 'I');
+
 // TeamStream frames through the same engine: <all/> history is silent, live passes fire
 const tsEvents = [];
 const eng2 = new TimingEngine({ onEvent: e => tsEvents.push(e), onLog: () => {} });
