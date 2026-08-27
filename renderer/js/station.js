@@ -3685,6 +3685,9 @@ function plannedBrakes(car) {
 let planLinesKey = '';
 let planHoldKey = '';
 let planWallKey = '';
+// Estimated seconds in the pit lane for the stop the card is planning — set
+// by renderPlanner, read by the timeline so both price the stop the same way.
+let nextStopLaneSec = null;
 
 function renderPlanner(car, c, now) {
   const stop = car.nextStop;
@@ -3823,6 +3826,10 @@ function renderPlanner(car, c, now) {
   // ---- what it costs
   const svc = stopServiceTime(car, { fuelLiters: r.fuelLiters, tyres: r.tyres });
   const anyService = svc.addLiters > 0 || r.tyres;
+  // The timeline prices its next-stop marker with the same figure this card
+  // quotes, rather than working the plan out a second time. renderPlanner runs
+  // before renderTimeline in render(), so the marker is never a tick stale.
+  nextStopLaneSec = anyService ? svc.totalSec : null;
   $('stop-est').textContent = anyService
     ? `${svc.addLiters > 0 ? '+' + svc.addLiters.toFixed(0) + ' L · ' : ''}${Math.round(svc.totalSec)} s · ` +
       `${Math.round(svc.totalSec + (car.config.pitLossSec || 0))} s`
@@ -4399,6 +4406,86 @@ function renderDrivers(car, c) {
   });
 }
 
+// A pit time the way the crew quotes it: seconds up to two minutes, m:ss
+// beyond — past that the car is being repaired, and minutes read faster.
+function fmtPitSec(sec) {
+  return sec < 120 ? `${Math.round(sec)}s` : fmtMinSec(sec * 1000);
+}
+
+// Pit stops on the timeline: a marker on the bar at every stop, and above it
+// what the visit costs in the pit lane — the point of the panel that the bare
+// stint blocks could not say, since two stints simply abut where a stop was.
+//
+// Which stops carry a figure is a question of what is actually known:
+//   done   — what the feed timed in the lane, or the planned figure when the
+//            stop was applied by hand and nobody timed it
+//   next   — the estimate the plan card quotes for the stop being planned
+//   later  — nothing. No service is planned against them yet, so any number
+//            would be invented; they stay markers.
+function drawStops(parts, car, race, clock, blocks, x, geo) {
+  const { W, barY, barH, stopY, stopH } = geo;
+  const stops = [];
+
+  car.stintHistory.forEach((h, i) => {
+    const at = h.endMs - race.startMs;
+    if (!(at > 0) || at >= clock.totalMs) return;
+    const sec = h.pitSec != null ? h.pitSec : h.estStationarySec;
+    stops.push({
+      at, done: true, sec: sec > 0 ? sec : null,
+      note: `Stop ${i + 1} · ${new Date(h.endMs).toLocaleTimeString()} · ` +
+        (h.pitSec != null
+          ? `${h.pitSec} s in the lane, ${h.stationarySec} s stationary`
+          : sec > 0
+            ? `${Math.round(sec)} s planned — the feed did not time this stop`
+            : 'not timed')
+    });
+  });
+
+  blocks.forEach((b, bi) => {
+    // A block handing over to the next one is a stop. The current→projected
+    // pair is the NOW line cutting ONE stint in two, not a visit to the lane,
+    // and the last block ends on the flag with nothing after it.
+    if ((b.kind !== 'projected' && b.kind !== 'future') || !blocks[bi + 1]) return;
+    const sec = b.kind === 'projected' && nextStopLaneSec > 0 ? nextStopLaneSec : null;
+    stops.push({
+      at: b.to, done: false, sec,
+      note: sec
+        ? `Next stop — about ${Math.round(sec)} s in the lane on this plan`
+        : 'Projected stop — nothing planned against it yet'
+    });
+  });
+  stops.sort((a, b) => a.at - b.at);
+
+  // Every marker first, then the chips: a chip must never be cut by the line
+  // of the stop after it.
+  for (const s of stops) {
+    const px = x(s.at);
+    parts.push(`<line x1="${px}" y1="${barY - 3}" x2="${px}" y2="${barY + barH + 3}" ` +
+      `style="stroke:var(--red)" stroke-width="2" stroke-linecap="round"${s.done ? '' : ' opacity=".7"'}/>`);
+  }
+
+  let lastRight = -Infinity;
+  for (const s of stops) {
+    if (!(s.sec > 0)) continue;
+    const px = x(s.at);
+    const txt = (s.done ? '' : '~') + fmtPitSec(s.sec);
+    const cw = txt.length * 7 + 12;
+    const cx = Math.min(Math.max(px - cw / 2, 1), W - cw - 1);
+    // On a crowded bar the chips are dropped, not shuffled: the marker still
+    // says where the stop is, and a row of overlapping times says nothing.
+    if (cx < lastRight + 4) continue;
+    lastRight = cx + cw;
+    const box = s.done
+      ? 'style="fill:var(--red)"'
+      : 'style="fill:var(--panel);stroke:var(--red)" stroke-width="1.5" stroke-dasharray="3 2"';
+    parts.push(`<g><title>${esc(s.note)}</title>` +
+      `<path d="M ${cx + cw / 2} ${stopY + stopH} L ${px} ${barY}" fill="none" style="stroke:var(--red)" stroke-width="1" opacity=".5"/>` +
+      `<rect x="${cx}" y="${stopY}" width="${cw}" height="${stopH}" rx="4" ${box}/>` +
+      `<text x="${cx + cw / 2}" y="${stopY + stopH - 5}" text-anchor="middle" font-size="11" font-weight="700" ` +
+      `style="fill:${s.done ? 'var(--bg)' : 'var(--red)'}">${txt}</text></g>`);
+  }
+}
+
 function renderTimeline(car, now) {
   const svg = $('timeline');
   const race = state.race;
@@ -4406,8 +4493,13 @@ function renderTimeline(car, now) {
   // Draw in real pixels (viewBox = client size): a fixed 1000-unit canvas
   // stretched to the panel width distorts everything, most visibly the text.
   // Fallback size covers the svg being display:none while another tab is up.
-  const W = svg.clientWidth || 1000, H = svg.clientHeight || 150;
-  const barY = 36, barH = H - 82; // 82 = tick labels above + NOW/legend below
+  const W = svg.clientWidth || 1000, H = svg.clientHeight || 172;
+  // Vertical budget above the bar: the axis labels along the top, then the
+  // pit-stop lane — a stop is the one event on this bar that has to be read
+  // off it without counting blocks, so it gets a row of its own. Below the
+  // bar: the NOW pill and the glyph legend. 104 = both ends together.
+  const tickY = 13, stopY = 24, stopH = 18;
+  const barY = 58, barH = H - 104;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   const x = ms => (ms / clock.totalMs) * W;
   let parts = [];
@@ -4429,8 +4521,8 @@ function renderTimeline(car, now) {
     const h = i * stepH;
     const px = x(h * 3600e3);
     const label = stepH >= 1 ? `${h}h` : `${Math.round(h * 60)}m`;
-    parts.push(`<line x1="${px}" y1="${barY - 8}" x2="${px}" y2="${barY + barH + 6}" style="stroke:var(--line)" stroke-width="1"/>`);
-    parts.push(`<text x="${px + 3}" y="${barY - 12}" style="fill:var(--dim)" font-size="13">${label}</text>`);
+    parts.push(`<line x1="${px}" y1="${tickY + 4}" x2="${px}" y2="${barY + barH + 6}" style="stroke:var(--line)" stroke-width="1"/>`);
+    parts.push(`<text x="${px + 3}" y="${tickY}" style="fill:var(--dim)" font-size="13">${label}</text>`);
   }
 
   // Night ribbon — the 21:00–06:00 window the plan generator schedules around,
@@ -4506,10 +4598,10 @@ function renderTimeline(car, now) {
         parts.push(`<rect x="${bx}" y="${barY + 2}" width="${bw}" height="${barH - 4}" style="fill:${fill}" opacity="${b.kind === 'projected' ? 0.4 : 0.7}" rx="2"/>`);
         parts.push(`<rect x="${bx}" y="${barY + 2}" width="${bw}" height="${barH - 4}" fill="url(#tl-hatch)" rx="2"/>`);
         label('style="fill:var(--text)"', '.7', '.6');
-        parts.push(`<line x1="${x(b.to)}" y1="${barY - 3}" x2="${x(b.to)}" y2="${barY + barH + 3}" style="stroke:var(--red)" stroke-width="2" stroke-linecap="round"/>`);
       }
     });
     parts.push(...labels);
+    drawStops(parts, car, race, clock, blocks, x, { W, barY, barH, stopY, stopH });
     // Plan overlay: amber markers where the shared stint plan expects each
     // stop, so plan-vs-projection divergence is visible at a glance.
     if (car.plan?.stints?.length) {
@@ -4537,7 +4629,8 @@ function renderTimeline(car, now) {
     const curColor = DRIVER_COLORS[(driverIdx[car.currentDriverId] ?? 0) % DRIVER_COLORS.length];
     leg(`<rect x="${lx}" y="${gy}" width="14" height="9" rx="2" style="fill:${curColor}"/>`, 'driven');
     leg(`<rect x="${lx}" y="${gy}" width="14" height="9" rx="2" style="fill:${curColor}" opacity=".4"/><rect x="${lx}" y="${gy}" width="14" height="9" rx="2" fill="url(#tl-hatch)"/>`, 'projected');
-    leg(`<line x1="${lx + 7}" y1="${gy - 2}" x2="${lx + 7}" y2="${gy + 11}" style="stroke:var(--red)" stroke-width="2" stroke-linecap="round"/>`, 'pit stop');
+    leg(`<line x1="${lx + 7}" y1="${gy - 2}" x2="${lx + 7}" y2="${gy + 11}" style="stroke:var(--red)" stroke-width="2" stroke-linecap="round"/>`,
+      'pit stop · time in the lane above');
     if (car.plan?.stints?.length)
       leg(`<path d="M ${lx + 2.5} ${gy} l 4.5 8 l 4.5 -8 z" style="fill:var(--amber)"/>`, 'plan');
     if (nightBands.length)

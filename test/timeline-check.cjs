@@ -1,8 +1,9 @@
 // Visual check of the race timeline on a real station window: the night
 // ribbon lands where 21:00–06:00 falls in the running race, projected blocks
-// are hatched rather than merely faded, the NOW pill exists, and the legend
-// explains its marks with glyphs. Everything here is asserted against the
-// SVG the station actually drew, then captured for eyes.
+// are hatched rather than merely faded, every pit stop is marked on the bar
+// and priced above it, the NOW pill exists, and the legend explains its marks
+// with glyphs. Everything here is asserted against the SVG the station
+// actually drew, then captured for eyes.
 //
 // Run with:  npx electron test/timeline-check.cjs [outputDir]
 const { app, BrowserWindow, ipcMain } = require('electron');
@@ -55,6 +56,10 @@ app.whenReady().then(async () => {
   await station.webContents.executeJavaScript(
     "localStorage.setItem('serverPort','8492');" +
     "localStorage.setItem('serverIp','127.0.0.1');" +
+    // Pinned dark, so the night board is what the first capture shows whatever
+    // hour the check is run at — on AUTO it would follow the sun and the two
+    // captures could come out the same.
+    "localStorage.setItem('themeMode','dark');" +
     "localStorage.setItem('carId','1'); true"
   );
   await station.webContents.reload();
@@ -93,7 +98,8 @@ app.whenReady().then(async () => {
   check('the night ribbon is on the bar', /var\(--tl-night\)/.test(svg));
   check('NOW is a pill, not floating text', /rx="8\.5"/.test(svg) && />NOW<\/text>/.test(svg));
   check('pit ticks have round caps', /stroke-linecap="round"/.test(svg));
-  const legend = ['driven', 'projected', 'pit stop', 'night'].filter(w => svg.includes(`>${w}</text>`));
+  const legend = ['driven', 'projected', 'pit stop · time in the lane above', 'night']
+    .filter(w => svg.includes(`>${w}</text>`));
   check('the legend explains its marks', legend.length === 4, legend.join(', '));
   check('the old sentence legend is gone', !/solid = driven/.test(svg));
 
@@ -108,6 +114,60 @@ app.whenReady().then(async () => {
   })()`);
   check('a night band has real width', band && band.w > 4 && band.x >= 0 && band.x <= band.W,
     band ? `x=${Math.round(band.x)} w=${Math.round(band.w)} of ${band.W}` : 'no band');
+
+  // ---- the pit-stop lane -------------------------------------------------
+  // Stops in the past are the whole point of the lane, and nothing a client
+  // can send puts one there: a stop applies at the instant it is asked for.
+  // So the stint sheet is written directly — two stops the feed timed (one of
+  // them a long one) and a third the engineer applied by hand, which the feed
+  // never saw and which can only be priced by what it was planned to take.
+  const t0 = Date.now() - 100 * 60e3;
+  const drv = shared.cars['1'].drivers;
+  send({ type: 'race', patch: { durationH: 4, startMs: t0 } });
+  send({ type: 'update', carId: '1', patch: {
+    stintHistory: [
+      { startMs: t0, endMs: t0 + 32 * 60e3, driverId: drv[0].id, laps: 18, pitSec: 68.4, stationarySec: 41.2, estStationarySec: 63 },
+      { startMs: t0 + 32 * 60e3, endMs: t0 + 63 * 60e3, driverId: drv[1].id, laps: 17, pitSec: 152, stationarySec: 126, estStationarySec: 70 },
+      { startMs: t0 + 63 * 60e3, endMs: t0 + 88 * 60e3, driverId: drv[0].id, laps: 14, pitSec: null, stationarySec: null, estStationarySec: 57 }
+    ],
+    // A tank that runs out before the flag, so the bar also carries stops
+    // still to come — the ones priced as estimates rather than facts.
+    state: { stintStartMs: t0 + 88 * 60e3, fuelLiters: 25 }
+  } });
+  await until(() => shared.cars['1'].stintHistory.length === 3);
+  await wait(1600); // one render tick with the stops on the sheet
+
+  const tl = await js(`(() => {
+    const svg = document.getElementById('timeline');
+    const W = svg.clientWidth;
+    const marks = [...svg.querySelectorAll('line')]
+      .filter(n => (n.getAttribute('style') || '').includes('--red'))
+      .map(n => +n.getAttribute('x1'));
+    return {
+      W, marks,
+      chips: [...svg.querySelectorAll('g > text')].map(n => n.textContent),
+      notes: [...svg.querySelectorAll('title')].map(n => n.textContent),
+      // Chip lane, bar top: the times have to be ABOVE the bar, not on it.
+      chipBottom: Math.max(...[...svg.querySelectorAll('g > rect')].map(n => +n.getAttribute('y') + +n.getAttribute('height')), 0),
+      barTop: +[...svg.querySelectorAll('rect')].find(n => (n.getAttribute('style') || '').includes('--well')).getAttribute('y')
+    };
+  })()`);
+
+  check('every stop is marked on the bar', tl.marks.length >= 4, `${tl.marks.length} markers`);
+  check('the flag is not marked as a stop', !tl.marks.some(v => v >= tl.W - 1),
+    `rightmost ${Math.round(Math.max(...tl.marks))} of ${tl.W}`);
+  check('a timed stop is priced above the bar', tl.chips.includes('68s'), tl.chips.join(' '));
+  check('a long stop reads in minutes, not seconds', tl.chips.includes('2:32'));
+  check('an untimed stop falls back to the planned figure', tl.chips.includes('57s'));
+  check('stops still to come are marked as estimates', tl.chips.some(t => t.startsWith('~')),
+    tl.chips.join(' '));
+  check('the times sit above the bar', tl.chipBottom > 0 && tl.chipBottom <= tl.barTop,
+    `chips end ${tl.chipBottom}, bar starts ${tl.barTop}`);
+  check('a marker says what the stop cost on hover',
+    tl.notes.some(n => /^Stop 1 · .*68\.4 s in the lane, 41\.2 s stationary$/.test(n)),
+    tl.notes[0] || 'no notes');
+  check('a hand-applied stop says the feed never timed it',
+    tl.notes.some(n => /did not time this stop/.test(n)));
 
   await js("document.querySelector('.timeline-wrap').scrollIntoView(); true");
   await wait(400);
