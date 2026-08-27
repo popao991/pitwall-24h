@@ -48,13 +48,15 @@
   <!-- The feed is showing a different session than the race on screen. Until
        this is answered the feed drives nothing (laps, clock and flags held). -->
   <div class="sessionstrip hidden" id="session-strip">
-    <span class="ss-title"><i data-icon="warn"></i> WHICH SESSION?</span>
+    <span class="ss-title" id="session-title"><i data-icon="warn"></i> WHICH SESSION?</span>
     <div class="ss-body">
       <div class="ss-line" id="session-line"></div>
       <div class="ss-sub" id="session-sub"></div>
     </div>
     <button class="primary" id="btn-session-new">START FRESH RACE</button>
     <button id="btn-session-keep">KEEP THIS RACE</button>
+    <button class="danger" id="btn-session-undo" hidden>PUT THE OLD RACE BACK</button>
+    <button id="btn-session-ok" hidden>OK</button>
   </div>
 
   <div class="condstrip hidden" id="cond-strip">

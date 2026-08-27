@@ -427,23 +427,48 @@ in an e-mail, and can be written the week before with nothing running at all.
     rewritten to the truth and marked corrected.
   - **NO STOP HAPPENED — UNDO IT** unwinds the whole thing: fuel, rubber,
     driver, seat time, wear and the sheet, back to the moment before.
+- **Every visit is logged, planned or not** — a stop that never went through
+  the card is still a stop, and a sheet that quietly skips it shows one endless
+  stint for the whole race. Any visit long enough to have been a service closes
+  the stint and lands on the timeline where it happened. What is *not* guessed
+  at is the service: with nothing armed, no fuel, no rubber and no driver
+  change are applied, and the station asks **WHAT WAS DONE TO THE CAR?** — with
+  the driver live timing reads in the car already preselected in the answer.
+  The stop is drawn in amber on the timeline and flagged in the stint sheet
+  until somebody answers, and the pit wall carries the same note per car so an
+  unattended station cannot hide it.
+- **Where the app reads a stop from** — three columns of the board, not one:
+  the state token (`In Pit`), the **PIT** stop counter, and the **LAST PIT**
+  stopwatch. They arrive together and are folded into a single visit, so a
+  board configured without a state column — a common setup, and one that used
+  to mean *no stop was ever detected all session* — still logs every stop. The
+  stopwatch is also what times them: the length on the sheet is the
+  timekeeper's own measurement, which is why a stop that straddles a feed
+  reconnect is still timed correctly instead of degrading to a drive-through.
+- **A stop taken while the feed was down** cannot be reconstructed — both ends
+  of it are lost with the link. The board's stop counter survives, so on
+  reconnect the station is told **STOP MISSING FROM THE SHEET** with the number
+  of stops the board is carrying that the sheet is not. It is never applied
+  blind: one button logs it, one dismisses the note.
 - **What the app will not do by itself** — a pit-lane visit only counts as a
-  stop when the car stood there longer than driving the lane takes *and* a stop
-  was armed. The bar is the **drive-through time** (pit wall → SETTINGS → RACE →
-  event settings): time one clean lap of the pit lane without stopping, type it
-  in, and the app adds five seconds of safety. Left at 0 it works the figure out
-  from lane length and speed limit, and with neither it falls back to 25 s. The
-  line under the form always states the bar in force. Otherwise the station says
+  stop when the car stood there longer than driving the lane takes. The bar is
+  the **drive-through time** (pit wall → SETTINGS → RACE → event settings):
+  time one clean lap of the pit lane without stopping, type it in, and the app
+  adds five seconds of safety. Left at 0 it works the figure out from lane
+  length and speed limit, and with neither it falls back to 25 s. The line
+  under the form always states the bar in force. Otherwise the station says
   what it saw and nothing is applied:
   - **PIT LANE PASS** — a drive-through or a penalty: fuel, tyres, brakes and
     the stint clock are untouched, and the armed stop stays armed. One button
     corrects it if it really was a stop.
-  - **NO STOP PLANNED** — long enough to have been serviced with nothing
-    planned: the app asks instead of guessing.
-  - **RACE STOPPED** — a car sitting in the lane under a red flag is not a
-    stop.
   - **RACE STOPPED** — a car sitting in the lane under a red flag is not a stop
     either; the numbers are left alone and the station says why.
+- **Who is in the car** — live timing's driver name is matched against the
+  roster and shown under the driver on both the station and the wall. When it
+  disagrees, **SEAT THEM** on the station puts that driver in the seat in one
+  tap: the running stint is credited to them and no stop is logged, which is
+  exactly right for a swap made on the radio. A change made *at* a stop belongs
+  in the stop planner instead.
 - **📋 PLAN** (top bar) opens the stint planner. **GENERATE FROM DRIVER
   SETTINGS** builds a full-race stint plan from the driver table: stint length
   is min(max stint, a full tank at the driver's dry burn), night stints
@@ -754,10 +779,25 @@ The race data on screen belongs to **one** session, and the app remembers which
 one. When the feed turns out to be showing a different session — the next race
 of the weekend, another session picked from the feed's list, an app left
 connected since qualifying, or a connection made to a session already under way
-— nothing from the feed is allowed near the numbers until the pit wall says
-which it is. A **WHICH SESSION?** strip appears under the top bar and, while it
-is open, feed laps, the session clock and flags are all held (the stations show
-the same warning and hand lap logging back to the crew):
+— nothing from the feed is allowed near the numbers until it is settled which
+it is: feed laps, the session clock and flags are all held from the moment the
+session changes.
+
+**A session that starts right now settles itself.** If the new session's clock
+reads zero (or the first minutes) and no car has completed a lap on it, nothing
+on screen can possibly belong to it — so the app saves the race that is on
+screen as a backup and starts a fresh race on the new session by itself. Nobody
+confirms at the start of every session that a new session started. A **NEW
+SESSION STARTED** strip then says what was saved and when; **PUT THE OLD RACE
+BACK** restores it (and runs it on the session the feed is showing) if that read
+the day wrong, and **OK** clears the strip. The save is an ordinary timestamped
+backup — it is in the restore list under **SETTINGS → Backups** like any other.
+
+Only the genuinely ambiguous case reaches the pit wall: a feed that has joined a
+session **already under way**, or one that will not say what session it is on.
+Then the **WHICH SESSION?** strip appears under the top bar and the feed stays
+held until it is answered (the stations show the same warning and hand lap
+logging back to the crew):
 
 - **START FRESH RACE** — the data on screen was the previous session's. Laps,
   stint history, seat time, tyre sets, learning and the clock start over (car

@@ -273,9 +273,10 @@ function renderTiming() {
   // default), the manual lap-logging block is dead weight — hide it and say
   // in one line who is counting. It comes back if the feed drops or auto lap
   // is switched off.
-  // The feed is showing a different session than this race: the pit wall has
-  // to say which it is, and until then nothing from the feed counts — so lap
-  // logging comes back to the crew.
+  // The feed is showing a different session than this race: until that is
+  // settled nothing from the feed counts — so lap logging comes back to the
+  // crew. A session that is starting now settles itself in a second (the app
+  // saves this race and rolls onto it); anything else the pit wall answers.
   const held = !!state.timing?.sessionAlert;
   const connected = timing?.conn === 'connected';
   const feedDriving = auto && connected && !held;
@@ -301,9 +302,20 @@ function renderTiming() {
   }
 
   const stateEl = $('lt-state');
+  // A race that reset itself under the crew has to say why: the session it was
+  // running on ended and this one started. Said for the first minutes of the
+  // new session — long enough to be read at the stations, not so long that it
+  // sits over the flag and the clock for the rest of the race.
+  const rolled = state.timing?.sessionRolled;
+  const rolledFresh = !held && rolled && Date.now() - rolled.ms < 300e3;
   if (held) {
     const a = state.timing.sessionAlert;
-    stateEl.textContent = `NEW SESSION ON THE FEED — "${a.to}" · answer on the pit wall (feed held)`;
+    stateEl.textContent = a.pending
+      ? `NEW SESSION ON THE FEED — "${a.to}" · reading what it is (feed held)`
+      : `NEW SESSION ON THE FEED — "${a.to}" · answer on the pit wall (feed held)`;
+    stateEl.className = 'v warn';
+  } else if (rolledFresh) {
+    stateEl.textContent = `NEW SESSION "${rolled.to}" — fresh race started, the old one was saved`;
     stateEl.className = 'v warn';
   } else if (!timing || !timing.conn || timing.conn === 'off') {
     stateEl.textContent = 'off — connect on the pit wall';
@@ -354,8 +366,12 @@ function renderTiming() {
   if (rec && rec.id !== car.currentDriverId) {
     feedTag.hidden = false;
     feedTag.className = 'sub drvfeed warn';
-    feedTag.innerHTML = `${icon('warn')} feed: ${esc(rec.name)}`;
-    feedTag.title = `Live timing shows "${e.driver}" in the car. A change made at a stop belongs in the stop planner — click the driver name to correct the seat by hand.`;
+    // The disagreement is worth nothing on its own — a tag that only reports
+    // it leaves the sheet wrong for the rest of the race. The name the feed
+    // reads is one tap from being the name in the car.
+    feedTag.innerHTML = `${icon('warn')} feed: ${esc(rec.name)} ` +
+      `<button class="seatbtn" data-act="seat" data-drv="${esc(rec.id)}">SEAT THEM</button>`;
+    feedTag.title = `Live timing shows "${e.driver}" in the car. SEAT THEM moves the seat without logging a stop; a change made AT a stop belongs in the stop planner.`;
   } else if (rec) {
     feedTag.hidden = false;
     feedTag.className = 'sub drvfeed ok';
@@ -876,6 +892,7 @@ $('pit-visit').addEventListener('click', e => {
   else if (act === 'apply') send({ type: 'applyStop' });
   else if (act === 'confirm') send({ type: 'confirmStop' });
   else if (act === 'dispute') send({ type: 'disputeStop' });
+  else if (act === 'dismisspit') { pitVisitKey = ''; send({ type: 'clearPitNote' }); }
   else if (act === 'cancel') { pitVisitKey = ''; send({ type: 'undisputeStop' }); }
   else if (act === 'save') {
     const el = $('pit-visit');
@@ -2632,6 +2649,12 @@ function correctForm(car) {
   const sets = (car.tyreSets || []).filter(t => !t.scrapped);
   const fittedId = car.state.currentTyreSetId;
   const prevDrvId = h.driverId; // who was in the car before the stop
+  // Nothing was planned, so there is no planned driver change to show — but
+  // live timing usually already knows who climbed in. Offer that as the
+  // preselected answer rather than making the engineer find the name: it is
+  // the single most common thing an unplanned stop got wrong.
+  const wantDrv = svc.driverChange ||
+    (h.unplanned && !h.corrected && feedDriverId && feedDriverId !== prevDrvId ? feedDriverId : null);
   return `<span class="correctform">
     <label>FUEL LEFT WITH <input data-fix="fuel" type="number" min="0" step="1"
       value="${Math.round(Number(svc.fuelLiters) || 0)}" title="0 = no fuel was taken"></label>
@@ -2641,7 +2664,7 @@ function correctForm(car) {
     </select></label>
     <label>DRIVER <select data-fix="driver">
       <option value="">no change${prevDrvId ? ' — ' + esc(car.drivers.find(d => d.id === prevDrvId)?.name || '') : ''}</option>
-      ${car.drivers.map(d => `<option value="${d.id}" ${svc.driverChange === d.id ? 'selected' : ''}>${esc(d.name)} got in</option>`).join('')}
+      ${car.drivers.map(d => `<option value="${d.id}" ${wantDrv === d.id ? 'selected' : ''}>${esc(d.name)} got in${d.id === feedDriverId ? ' · live timing says so' : ''}</option>`).join('')}
     </select></label>
     <span class="fixbrakes">${BRAKE_AXLES.map(a => {
       const work = svc[a.discs] ? 'kit' : svc[a.pads] ? 'pads' : 'none';
@@ -2664,22 +2687,39 @@ function correctForm(car) {
   </span>`;
 }
 
-// What the last pit-lane visit was, and what the app did about it. Three
-// things it can say: the stop applied itself (with an undo while it is still
-// fresh), the car only drove through so nothing was touched, or it stayed long
-// enough to have been serviced with nothing planned — the one case where the
-// app asks instead of guessing.
+// What the last pit-lane visit was, and what the app did about it. Four things
+// it can say: the stop applied itself (with an undo while it is still fresh),
+// the car was serviced with nothing planned — so the visit is on the sheet but
+// nobody has said what was done to the car — the car only drove through so
+// nothing was touched, or the board is carrying a stop the sheet never saw.
+//
+// None of these expire. A notice that quietly removes itself is how a whole
+// session goes by with a stop missing from the sheet and nobody the wiser:
+// they are answered, or they stay on screen.
 let pitVisitKey = '';
 function renderPitVisit(car) {
   const el = $('pit-visit');
   if (!el) return;
   const v = car.state.lastPitVisit;
-  // An applied stop stays up until it is signed off — the engineer always says
-  // what happened. The "nothing was applied" notes are only news for a while.
-  const fresh = v && (v.applied || Date.now() - v.atMs < 5 * 60e3);
-  if (!v || !fresh) {
+  const miss = car.state.pitCatchUp;
+  if (!v && !miss) {
     el.classList.add('hidden');
     pitVisitKey = '';
+    return;
+  }
+  // A stop missing outright outranks one that only needs signing off.
+  if (miss && !(v && v.applied && !v.disputed && v.atMs > miss.atMs)) {
+    const key = `miss:${miss.atMs}:${miss.stops}`;
+    if (key === pitVisitKey) return;
+    pitVisitKey = key;
+    el.classList.remove('hidden');
+    el.innerHTML = `<span class="lab" style="color:var(--amber)">STOP MISSING FROM THE SHEET</span>
+      <b style="color:var(--amber)">NOTHING APPLIED</b>
+      <span class="mil">live timing came back showing <b>${miss.stops}</b> more stop${miss.stops === 1 ? '' : 's'}
+        than the sheet has — the car pitted while the feed was down</span>
+      <span class="acts">
+        <button class="keep" data-act="apply">APPLY AS A STOP</button>
+        <button data-act="dismisspit">OK</button></span>`;
     return;
   }
   // Rebuilt only when the answer state changes — otherwise a half-typed
@@ -2690,10 +2730,11 @@ function renderPitVisit(car) {
   el.classList.remove('hidden');
   const timing = v.pitSec != null
     ? `${v.pitSec} s in the lane · ${v.stationarySec} s stationary` +
+      (v.feedTimed ? ' <span style="opacity:.7">(timed by the feed)</span>' : '') +
       (v.transitSec ? ` <span style="opacity:.7">(drive-through ${v.transitSec} s)</span>` : '')
-    : 'applied by hand';
+    : v.byHand ? 'applied by hand' : 'the feed did not time this visit';
 
-  if (v.kind === 'service' && v.applied && v.disputed) {
+  if (v.applied && v.disputed) {
     // Denied: the stop is on the sheet as planned, and now the engineer writes
     // down what really happened. Saving moves every figure to match.
     el.innerHTML = `<span class="lab" style="color:var(--amber)">WHAT ACTUALLY HAPPENED</span>
@@ -2702,6 +2743,19 @@ function renderPitVisit(car) {
         <button data-act="undo" class="scrap">NO STOP HAPPENED — UNDO IT</button>
         <button data-act="cancel">BACK</button>
         <button class="keep" data-act="save">${icon('check')} SAVE WHAT HAPPENED</button></span>`;
+  } else if (v.unplanned && v.applied) {
+    // Nothing was ordered and the car was serviced anyway — a stop taken on
+    // the radio, or one the crew simply never put through the card. The visit
+    // is on the sheet and on the timeline where it happened, and NO service
+    // has been applied: the fuel, the rubber and the seat are still whatever
+    // they were. That is the question, and it stays up until it is answered.
+    el.innerHTML = `<span class="lab" style="color:var(--amber)">STOP LOGGED · NOTHING WAS PLANNED</span>
+      <b>WHAT WAS DONE TO THE CAR?</b>
+      <span class="mil">${timing} — the stint is closed, no fuel, tyres or driver change applied</span>
+      <span class="acts">
+        <button class="scrap" data-act="undo">NO STOP HAPPENED — UNDO IT</button>
+        <button data-act="confirm">NOTHING WAS DONE</button>
+        <button class="keep" data-act="dispute">${icon('check')} SAY WHAT WAS DONE</button></span>`;
   } else if (v.kind === 'service' && v.applied) {
     // The stop is in the numbers, but nobody has vouched for it yet. It stays
     // on screen until the engineer answers — there is no timer on it, because
@@ -2723,7 +2777,7 @@ function renderPitVisit(car) {
   } else {
     el.innerHTML = `<span class="lab">${v.kind === 'held' ? 'RACE STOPPED' : 'NO STOP PLANNED'}</span>
       <b style="color:var(--amber)">NOTHING APPLIED</b>
-      <span class="mil">${timing}${v.kind === 'held' ? ' — the clock is not running' : ' — the car was serviced without a plan'}</span>
+      <span class="mil">${timing}${v.kind === 'held' ? ' — the car was in the lane with the clock stopped' : ' — the car was serviced without a plan'}</span>
       <span class="acts">
         <button class="keep" data-act="apply">APPLY AS A STOP</button>
         <button data-act="dismiss">OK</button></span>`;
@@ -3029,6 +3083,22 @@ function openIncar() {
   }
   incarOverlay.classList.remove('hidden');
 }
+// One tap on the feed's disagreement puts its driver in the seat. It does not
+// log a stop — the whole point is that this is the swap nobody logged — so the
+// current stint keeps running and is credited to the driver now named on it,
+// exactly as the manual correction in the dialog behind it does.
+$('now-driver-feed').addEventListener('click', e => {
+  const b = e.target.closest('button[data-act="seat"]');
+  if (!b) return;
+  e.stopPropagation(); // the strip behind it opens the full correction dialog
+  const car = state?.cars[carId];
+  const drv = car?.drivers.find(d => d.id === b.dataset.drv);
+  if (!drv || drv.id === car.currentDriverId) return;
+  if (!confirm(`Put ${drv.name} in the car?\n\nLive timing reads them in it. ` +
+    'The running stint is credited to them and NO pit stop is logged — if they got in at a stop, log the stop instead.')) return;
+  send({ type: 'setDriver', driverId: drv.id });
+});
+
 $('now-driver-itm').addEventListener('click', openIncar);
 $('now-stint-itm').addEventListener('click', openIncar);
 $('btn-incar-close').addEventListener('click', () => incarOverlay.classList.add('hidden'));
@@ -3283,6 +3353,9 @@ function renderStintSheet(car) {
     const lPerLap = h.fuelUsedL != null && h.laps > 0 ? h.fuelUsedL / h.laps : null;
     return { i, driverId: h.driverId, fromMs: h.startMs, toMs: h.endMs, laps: h.laps,
       bestSec: h.bestSec, avgSec: h.avgSec, fuelUsedL: h.fuelUsedL, lPerLap,
+      // The stop that ended this stint was never planned and nobody has said
+      // what was done at it — the row is real, the service behind it is blank.
+      open: !!h.unplanned && !h.confirmed,
       tyreSet: setName(h.tyreSetId), live: false };
   });
   if (clock.running && car.state.stintStartMs) {
@@ -3308,7 +3381,9 @@ function renderStintSheet(car) {
     const d = drvOf(e.driverId);
     const dot = `<span class="dot" style="background:${DRIVER_COLORS[idxOf(e.driverId) % DRIVER_COLORS.length]}"></span>`;
     return `<tr class="${e.live ? 'cur' : ''}">
-      <td class="num">${e.i + 1}</td>
+      <td class="num">${e.i + 1}${e.open
+        ? ` <span style="color:var(--amber)" title="the stop that ended this stint was not planned — nobody has said what was done">${icon('warn')}</span>`
+        : ''}</td>
       <td class="drv">${dot} ${d ? esc(d.name) : '?'}${e.live ? ' ' + icon('play') : ''}</td>
       <td class="num">${new Date(e.fromMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</td>
       <td class="num">${fmtMinSec(e.toMs - e.fromMs)}</td>
@@ -4430,14 +4505,19 @@ function drawStops(parts, car, race, clock, blocks, x, geo) {
     const at = h.endMs - race.startMs;
     if (!(at > 0) || at >= clock.totalMs) return;
     const sec = h.pitSec != null ? h.pitSec : h.estStationarySec;
+    // A stop the app logged because it happened, with nothing planned against
+    // it and nobody having said yet what was done, is drawn in amber: it IS on
+    // the sheet — that is the point — but the service behind it is still blank.
+    const open = !!h.unplanned && !h.confirmed;
     stops.push({
-      at, done: true, sec: sec > 0 ? sec : null,
+      at, done: true, open, sec: sec > 0 ? sec : null,
       note: `Stop ${i + 1} · ${new Date(h.endMs).toLocaleTimeString()} · ` +
         (h.pitSec != null
           ? `${h.pitSec} s in the lane, ${h.stationarySec} s stationary`
           : sec > 0
             ? `${Math.round(sec)} s planned — the feed did not time this stop`
-            : 'not timed')
+            : 'not timed') +
+        (open ? ' — nothing was planned, nobody has said what was done' : '')
     });
   });
 
@@ -4460,14 +4540,17 @@ function drawStops(parts, car, race, clock, blocks, x, geo) {
   // of the stop after it.
   for (const s of stops) {
     const px = x(s.at);
-    parts.push(`<line x1="${px}" y1="${barY - 3}" x2="${px}" y2="${barY + barH + 3}" ` +
-      `style="stroke:var(--red)" stroke-width="2" stroke-linecap="round"${s.done ? '' : ' opacity=".7"'}/>`);
+    const col = s.open ? 'var(--amber)' : 'var(--red)';
+    parts.push(`<g><title>${esc(s.note)}</title>` +
+      `<line x1="${px}" y1="${barY - 3}" x2="${px}" y2="${barY + barH + 3}" ` +
+      `style="stroke:${col}" stroke-width="${s.open ? 3 : 2}" stroke-linecap="round"${s.done ? '' : ' opacity=".7"'}/></g>`);
   }
 
   let lastRight = -Infinity;
   for (const s of stops) {
     if (!(s.sec > 0)) continue;
     const px = x(s.at);
+    const col = s.open ? 'var(--amber)' : 'var(--red)';
     const txt = (s.done ? '' : '~') + fmtPitSec(s.sec);
     const cw = txt.length * 7 + 12;
     const cx = Math.min(Math.max(px - cw / 2, 1), W - cw - 1);
@@ -4476,14 +4559,15 @@ function drawStops(parts, car, race, clock, blocks, x, geo) {
     if (cx < lastRight + 4) continue;
     lastRight = cx + cw;
     const box = s.done
-      ? 'style="fill:var(--red)"'
-      : 'style="fill:var(--panel);stroke:var(--red)" stroke-width="1.5" stroke-dasharray="3 2"';
+      ? `style="fill:${col}"`
+      : `style="fill:var(--panel);stroke:${col}" stroke-width="1.5" stroke-dasharray="3 2"`;
     parts.push(`<g><title>${esc(s.note)}</title>` +
-      `<path d="M ${cx + cw / 2} ${stopY + stopH} L ${px} ${barY}" fill="none" style="stroke:var(--red)" stroke-width="1" opacity=".5"/>` +
+      `<path d="M ${cx + cw / 2} ${stopY + stopH} L ${px} ${barY}" fill="none" style="stroke:${col}" stroke-width="1" opacity=".5"/>` +
       `<rect x="${cx}" y="${stopY}" width="${cw}" height="${stopH}" rx="4" ${box}/>` +
       `<text x="${cx + cw / 2}" y="${stopY + stopH - 5}" text-anchor="middle" font-size="11" font-weight="700" ` +
-      `style="fill:${s.done ? 'var(--bg)' : 'var(--red)'}">${txt}</text></g>`);
+      `style="fill:${s.done ? 'var(--bg)' : col}">${txt}</text></g>`);
   }
+  return stops.some(s => s.open);
 }
 
 function renderTimeline(car, now) {
@@ -4601,7 +4685,7 @@ function renderTimeline(car, now) {
       }
     });
     parts.push(...labels);
-    drawStops(parts, car, race, clock, blocks, x, { W, barY, barH, stopY, stopH });
+    const openStops = drawStops(parts, car, race, clock, blocks, x, { W, barY, barH, stopY, stopH });
     // Plan overlay: amber markers where the shared stint plan expects each
     // stop, so plan-vs-projection divergence is visible at a glance.
     if (car.plan?.stints?.length) {
@@ -4631,6 +4715,9 @@ function renderTimeline(car, now) {
     leg(`<rect x="${lx}" y="${gy}" width="14" height="9" rx="2" style="fill:${curColor}" opacity=".4"/><rect x="${lx}" y="${gy}" width="14" height="9" rx="2" fill="url(#tl-hatch)"/>`, 'projected');
     leg(`<line x1="${lx + 7}" y1="${gy - 2}" x2="${lx + 7}" y2="${gy + 11}" style="stroke:var(--red)" stroke-width="2" stroke-linecap="round"/>`,
       'pit stop · time in the lane above');
+    if (openStops)
+      leg(`<line x1="${lx + 7}" y1="${gy - 2}" x2="${lx + 7}" y2="${gy + 11}" style="stroke:var(--amber)" stroke-width="3" stroke-linecap="round"/>`,
+        'stop nobody has said what was done at');
     if (car.plan?.stints?.length)
       leg(`<path d="M ${lx + 2.5} ${gy} l 4.5 8 l 4.5 -8 z" style="fill:var(--amber)"/>`, 'plan');
     if (nightBands.length)

@@ -242,6 +242,10 @@ $('btn-reset').addEventListener('click', () => {
 // the feed's list, an app left running since qualifying, a mid-session join).
 // Laps, clock and flags from the feed are held until this is answered, so the
 // previous session's numbers can never bleed into the new one.
+//
+// Only the genuinely ambiguous half reaches these buttons: a session that is
+// starting right now is saved-and-rolled by the server without asking, and
+// leaves a notice here instead — with the way back, if it read it wrong.
 
 $('btn-session-new').addEventListener('click', () => {
   const to = state?.timing?.sessionAlert?.to || 'this session';
@@ -259,17 +263,73 @@ $('btn-session-keep').addEventListener('click', () => {
   net.send({ type: 'sessionKeep' });
 });
 
+$('btn-session-undo').addEventListener('click', () => {
+  const r = state?.timing?.sessionRolled;
+  if (!r?.backup) return;
+  if (!confirm(`Put "${r.from || 'the saved race'}" back on every screen?
+
+` +
+      'It is restored exactly as it was saved, and then runs on ' +
+      `"${r.to}" — the session the feed is showing.
+
+` +
+      'Everything counted on the new session since is lost.')) return;
+  net.send({ type: 'sessionRollUndo' });
+});
+$('btn-session-ok').addEventListener('click', () => net.send({ type: 'sessionRollOk' }));
+
 function renderSessionAlert() {
   const a = state?.timing?.sessionAlert;
-  $('session-strip').classList.toggle('hidden', !a);
-  if (!a) return;
-  $('session-line').textContent = a.from
-    ? `Live timing moved to "${a.to}" — the race on screen is "${a.from}".`
-    : `Live timing is on "${a.to}" — the race on screen was not started from it.`;
-  const laps = a.laps || 0;
-  $('session-sub').textContent =
-    (laps ? `${laps} lap${laps === 1 ? '' : 's'} counted on it. ` : 'Nothing counted on it yet. ') +
-    'Feed laps, clock and flags are held until you answer.';
+  const rolled = state?.timing?.sessionRolled;
+  // A question the wall has to answer outranks a notice about one it did not.
+  const asking = !!a && !a.pending;
+  const settling = !!a && !!a.pending;
+  const show = !!a || !!rolled;
+  $('session-strip').classList.toggle('hidden', !show);
+  // Amber is for the question. The rest is the app reporting what it did.
+  $('session-strip').classList.toggle('info', show && !asking);
+  $('btn-session-new').hidden = !asking;
+  $('btn-session-keep').hidden = !asking;
+  $('btn-session-undo').hidden = !(!a && rolled?.backup);
+  $('btn-session-ok').hidden = !(!a && rolled);
+  if (!show) return;
+
+  const title = $('session-title');
+  const line = $('session-line');
+  const sub = $('session-sub');
+
+  // Held while the feed says what the new session is — a second, no more, and
+  // the wall never has to touch it.
+  if (settling) {
+    setLine(title, icon('feed') + ' NEW SESSION');
+    line.textContent = `Live timing moved to "${a.to}" — reading what it is.`;
+    sub.textContent = 'Laps, clock and flags are held for a moment.';
+    return;
+  }
+
+  if (asking) {
+    setLine(title, icon('warn') + ' WHICH SESSION?');
+    line.textContent = a.from
+      ? `Live timing moved to "${a.to}" — the race on screen is "${a.from}".`
+      : `Live timing is on "${a.to}" — the race on screen was not started from it.`;
+    const laps = a.laps || 0;
+    sub.textContent =
+      (laps ? `${laps} lap${laps === 1 ? '' : 's'} counted on it. ` : 'Nothing counted on it yet. ') +
+      'Feed laps, clock and flags are held until you answer.';
+    return;
+  }
+
+  // Rolled by itself: say what was thrown away and where it went.
+  setLine(title, icon('save') + ' NEW SESSION STARTED');
+  line.textContent = rolled.from
+    ? `"${rolled.to}" started — "${rolled.from}" was saved and a fresh race runs on it.`
+    : `"${rolled.to}" started — the race that was on screen was saved and a fresh one runs on it.`;
+  const laps = rolled.laps || 0;
+  const at = new Date(rolled.ms).toLocaleTimeString();
+  sub.textContent = rolled.backup
+    ? `${laps ? `${laps} lap${laps === 1 ? '' : 's'} saved` : 'Saved'} at ${at} — ` +
+      'in the backup list under SETTINGS, or put straight back here.'
+    : `Nothing could be saved at ${at} — no backup folder on this PC.`;
 }
 
 // ---- race settings modal ----
@@ -1021,6 +1081,7 @@ function buildCards() {
         <div class="vsub" data-f="v-sub" style="display:none"></div>
       </div>
       <div class="stationline" data-f="station" style="display:none"></div>
+      <div class="stationline" data-f="pitnote" style="display:none"></div>
       <div class="grab" data-f="tiles"></div>
       <div class="extra" data-f="extra" style="display:none"></div>
       <div class="ltline" data-f="lt" style="display:none"></div>
@@ -1323,6 +1384,31 @@ function render() {
     card.className = 'wallcard' +
       (parked ? ' nocar' :
         inPit ? ' inpit' : stop.status === 'box' ? ' box' : stop.status === 'sent' ? ' sent' : '');
+
+    // A stop the app logged with nothing planned against it, or one the board
+    // is carrying that the sheet never saw, is a question sitting unanswered
+    // on a station — and a station nobody is looking at is exactly how it goes
+    // unanswered for the rest of the race. The wall says so for every car at
+    // once. It does not offer the answer: race-time decisions are the crew's,
+    // taken at the car's own station. Set before the early exits below, so a
+    // car with no station and no feed row still carries its note.
+    const pitNoteEl = f('pitnote');
+    const miss = car.state.pitCatchUp;
+    const lpv = car.state.lastPitVisit;
+    const openStop = lpv?.applied && lpv.unplanned && !lpv.disputed;
+    if (miss) {
+      pitNoteEl.style.display = '';
+      pitNoteEl.className = 'stationline lost';
+      pitNoteEl.innerHTML = `${icon('warn')} ${miss.stops} STOP${miss.stops === 1 ? '' : 'S'} MISSING FROM THE SHEET — ` +
+        'taken while the feed was down · answer at the station';
+    } else if (openStop) {
+      pitNoteEl.style.display = '';
+      pitNoteEl.className = 'stationline lost';
+      pitNoteEl.innerHTML = `${icon('warn')} STOP LOGGED, NOTHING WAS PLANNED — ` +
+        'no fuel, tyres or driver change applied · answer at the station';
+    } else {
+      pitNoteEl.style.display = 'none';
+    }
 
     // head
     f('number').textContent = car.number;

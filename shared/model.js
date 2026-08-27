@@ -215,7 +215,13 @@ export function defaultTiming() {
     // question when the feed is showing a different one (see the session
     // guard in server.js). null/null = nothing bound, nothing asked.
     sessionKey: null,
-    sessionAlert: null // { from, to, ms, laps } while the pit wall has not answered
+    // { from, to, ms, laps, pending } while the feed is held: `pending` means
+    // the answer may still come by itself (see feedSessionAge) and the wall is
+    // not asked yet.
+    sessionAlert: null,
+    // The last session the app rolled onto by itself — what was saved, and
+    // where, so the wall can say so and put it back if it was wrong.
+    sessionRolled: null // { from, to, ms, laps, backup }
   };
 }
 
@@ -244,6 +250,36 @@ export function createFeedSeen() {
     },
     has: nr => seen.has(String(nr).trim())
   };
+}
+
+// How far into the session the feed is showing is the race actually run? A
+// session change is normally a question only the pit wall can answer — the
+// next race of the weekend, or a laptop reconnecting into a session that has
+// been running for hours look identical from here. But a session that has only
+// now begun is not ambiguous: nothing on screen can belong to it, so there is
+// nothing to weigh up and nothing to ask.
+//
+//   'fresh'   — the session clock has only just started (or has not started
+//               at all) and no car has completed a lap: it starts here.
+//   'running' — laps on the board, or the clock is well past the start: this
+//               one has to be answered by hand.
+//   'unknown' — the feed has not said yet. A session change wipes the board
+//               and (on TeamStream) the whole session window with it, so the
+//               first second after one carries no evidence either way.
+export const SESSION_FRESH_MS = 120e3;
+
+export function feedSessionAge(snap, freshMs = SESSION_FRESH_MS) {
+  const s = snap?.session;
+  if (!s) return 'unknown';
+  // A completed lap outranks any clock: a board with laps on it has been
+  // raced, whatever a session window says (or fails to say).
+  for (const e of snap.entries || []) {
+    if ((Number(e.laps) || 0) > 0) return 'running';
+  }
+  // Only positive evidence counts — an absent clock is not a young one.
+  if (s.totalUs == null || s.remainUs == null) return 'unknown';
+  const elapsedMs = Math.max(0, (s.totalUs - s.remainUs) / 1000);
+  return elapsedMs <= freshMs ? 'fresh' : 'running';
 }
 
 // Every timing number the team answers to (nr → car). One lookup shared by
@@ -1495,6 +1531,11 @@ export function defaultCar(id, number) {
       totalLaps: 0,
       inPit: false,
       pitEnterMs: null,
+      pitEnterFeed: false, // the entry stamp came from the feed, not from us
+      // When the last pit visit was closed. The feed reports one visit from
+      // three columns at once, and a car cannot re-enter the lane seconds
+      // after leaving it — this is what keeps that one visit one visit.
+      pitClosedMs: null,
       fuelLiters: 100,
       tyreLapsOnSet: 0,
       tyreSetsUsed: 1,
@@ -1533,7 +1574,15 @@ export function defaultCar(id, number) {
       // or { laps: 0, gap, atMs } when the discrepancy was too large to apply
       // blind and the crew has to answer it. A lap count that jumps must say
       // why it jumped.
-      lapCatchUp: null
+      lapCatchUp: null,
+      // The same anchor for STOPS. A pit visit that happens entirely inside a
+      // feed outage is invisible to the events — but the board's own stop
+      // counter carries on, so on reconnect it is ahead of the sheet by
+      // exactly the stops nobody saw. When and how long they were cannot be
+      // recovered, so they are never applied blind: `pitCatchUp` = { stops,
+      // atMs } is the crew being told a stop is missing from the sheet.
+      feedPits: null,
+      pitCatchUp: null
     },
     nextStop: emptyStop(),
     // Which situation columns this car shows on the wall's grab list. Both
@@ -2605,8 +2654,11 @@ export const STOP_REVIEW_MS = 120e3;
 //
 //   'service'      — a stop was armed and the car stayed long enough: apply it
 //   'driveThrough' — too quick to have been serviced: apply nothing
-//   'unplanned'    — long enough to be a stop, but nothing was planned: the
-//                    engineer is asked rather than guessed at
+//   'unplanned'    — long enough to be a stop, but nothing was planned. The
+//                    VISIT is still logged — it happened, and a sheet that
+//                    quietly skips it shows one endless stint — but no service
+//                    is applied with it: the fuel, the rubber and the seat stay
+//                    as they were until the engineer says what was done.
 export function pitVisitKind(car, pitMs, armed) {
   const cfg = car.config;
   const pitSec = Math.max(0, pitMs / 1000);

@@ -1697,6 +1697,19 @@ body.show-help .modal .hint.help { display: block; }
 .drvfeed.ok { color: var(--green); }
 .drvfeed.warn { color: var(--amber); font-weight: 700; }
 .drvfeed .ico { width: 12px; height: 12px; vertical-align: -2px; }
+/* one-tap answer to the feed disagreeing about who is in the car */
+button.seatbtn {
+  min-width: 0;
+  padding: 1px 6px;
+  margin-left: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  vertical-align: 1px;
+  background: var(--amber);
+  border-color: var(--amber);
+  color: #1a1200;
+}
 /* on/off toggle buttons (driver flags, auto-lap on station + pit wall links) */
 button.flag { min-width: 60px; font-weight: 700; font-size: 12px; }
 button.flag.on { background: var(--green); color: #04180a; border-color: var(--green); }
@@ -3085,6 +3098,11 @@ body.light { --trk-s1: #c92730; --trk-s2: #7f8f0a; --trk-s3: #0e93a0; --trk-s4: 
 }
 .sessionstrip .ss-sub { font-size: 12px; color: var(--dim); }
 .sessionstrip button { white-space: nowrap; }
+/* Amber is reserved for the question the wall has to answer. When the app has
+   already decided — reading a new session, or reporting one it rolled onto by
+   itself — the strip says so quietly instead of shouting for attention. */
+.sessionstrip.info { background: var(--panel); border-color: var(--line); }
+.sessionstrip.info .ss-title { color: var(--accent); }
 
 .rcstrip {
   display: flex;

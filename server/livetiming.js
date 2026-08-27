@@ -1469,6 +1469,20 @@ export class TimingEngine {
     return String(this.grid[row]?.[this._ci('nr')] ?? '').trim();
   }
 
+  _cellOf(row, key) {
+    const col = this._ci(key);
+    return col === undefined ? undefined : this.grid[row]?.[col];
+  }
+
+  // What the row's LAST PIT cell says about the visit right now: the entry
+  // timestamp while the car is still in the lane, the measured length once it
+  // is out. Read at the moment a pit event fires, so every stop the app logs
+  // is timed by the TIMEKEEPER — not by when the pit wall happened to see the
+  // cells change, and not lost at all when a reconnect hides the entry.
+  _pitCell(row) {
+    return pitCellUs(this._cellOf(row, 'lpit')) || {};
+  }
+
   // Write one cell; when the value changed, push [row, colKey, val, prev].
   _setCell(row, colKey, val, changes) {
     if (val === undefined || val === null) return;
@@ -1485,6 +1499,19 @@ export class TimingEngine {
   // A changed LAST cell with a previous value = a completed lap; a STATE cell
   // toggling the "In Pit" convention = pit entry/exit. `silent` suppresses
   // events for baseline loads (bootstrap init, TeamStream <all/> history).
+  //
+  // A pit visit is read from THREE columns, not one. The state token is the
+  // clearest, but plenty of boards are configured without it — and a whole
+  // session then goes by with no stop ever detected. The board's own stop
+  // counter and its pit stopwatch say the same thing independently:
+  //
+  //   entry   STATE → "In Pit"    PIT +1    LAST PIT → "S<entry µs>"
+  //   exit    STATE → "OutLap"              LAST PIT → "L<length µs>"
+  //
+  // (verified against a getraceresults board: all three land in one delta
+  // frame). Every source emits the same pitIn/pitOut, so any ONE of the three
+  // columns is enough to log the stop; the consumer folds the duplicates into
+  // a single visit.
 
   _processChanges(changes, { silent = false } = {}) {
     if (silent) return;
@@ -1499,8 +1526,24 @@ export class TimingEngine {
       } else if (colKey === 'state') {
         const wasPit = isInPitState(prev);
         const nowPit = isInPitState(val);
-        if (!wasPit && nowPit) this.onEvent({ type: 'pitIn', nr });
-        else if (wasPit && !nowPit) this.onEvent({ type: 'pitOut', nr });
+        if (!wasPit && nowPit) this.onEvent({ type: 'pitIn', nr, src: 'state', ...this._pitCell(row) });
+        else if (wasPit && !nowPit) this.onEvent({ type: 'pitOut', nr, src: 'state', ...this._pitCell(row) });
+      } else if (colKey === 'pit') {
+        // The official stop counter went up: the car is in the lane, whatever
+        // the state column does or does not say.
+        const now = parseInt(val, 10);
+        const before = parseInt(prev, 10);
+        if (now > before) {
+          this.onEvent({ type: 'pitIn', nr, src: 'count', count: now, ...this._pitCell(row) });
+        }
+      } else if (colKey === 'lpit') {
+        // The pit stopwatch: it starts on entry and freezes on release, so its
+        // frozen length is both "the visit is over" and how long it took.
+        const cur = pitCellUs(val);
+        if (cur?.pitUs) this.onEvent({ type: 'pitOut', nr, src: 'lpit', pitUs: cur.pitUs });
+        else if (cur?.atUs && cur.atUs !== pitCellUs(prev)?.atUs) {
+          this.onEvent({ type: 'pitIn', nr, src: 'lpit', atUs: cur.atUs });
+        }
       }
     }
   }
@@ -2651,6 +2694,13 @@ export class TimingEngine {
     return this.serverTimeUs + (nowMs - this.serverTimeSampleMs) * 1000;
   }
 
+  // The upstream wall clock as it stands now (µs epoch), or null when the feed
+  // has not published one. Lets a consumer turn a feed timestamp — the entry
+  // stamp on a pit event — into a local time without a snapshot round-trip.
+  serverNowUs(nowMs = Date.now()) {
+    return this._serverNowUs(nowMs);
+  }
+
   remainingUs(nowMs = Date.now()) {
     // TeamStream session window: remaining is the official clock against the
     // absolute window end, clamped to the window — exact across the start
@@ -2845,6 +2895,22 @@ function isInPitState(val) {
   if (typeof val !== 'string' || val[0] !== 'S') return false;
   const label = val.slice(1).trim();
   return label === 'In Pit' || label.includes('Pit') && !label.includes('Out');
+}
+
+// LAST PIT cell → the visit it describes, in the vendor's letter-prefix
+// convention: "L<µs>" is the frozen length of a finished visit, "S<µs>" /
+// "E<µs>" the entry timestamp on the feed's server clock while the stopwatch
+// is still running. Anything else (a preformatted string, a bare number) is
+// not something a stop can be timed from, and is ignored rather than guessed
+// at — a wrong pit time turns a stop into a drive-through.
+function pitCellUs(val) {
+  const m = String(val ?? '').trim().match(/^([A-Za-z])(\d+)$/);
+  if (!m) return null;
+  const n = parseInt(m[2], 10);
+  if (!(n > 0)) return null;
+  if (m[1] === 'L') return n < 12 * 3600e6 ? { pitUs: n } : null;
+  // Anything beyond ~11 days is a server-clock timestamp, not a duration.
+  return n > 1e12 ? { atUs: n } : null;
 }
 
 function akStateVal(d, row) {
@@ -3404,6 +3470,14 @@ export function createTimingService({ onEvent, onLog, replayDir = null } = {}) {
       clearTimeout(watchTimer);
       watchStop();
       Object.assign(watch, { conn: 'off', url: null, flag: null, name: null, error: null });
+    },
+    // test seam: drive the engine as if a live feed were connected. The
+    // session guard (and the automatic roll onto a session that starts here)
+    // is only reachable through a *connected* feed, and standing up a real
+    // upstream to reach it proves nothing the frames themselves do not.
+    _liveTest(frame) {
+      conn = 'connected';
+      if (frame) engine.applyFrame(frame);
     },
     // test seam: feed a board frame into the watch without a network connection
     _flagWatchTest(frame) {

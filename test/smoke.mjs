@@ -13,6 +13,7 @@ import {
   driverLapTimes, paceWindowStats, paceWindowLaps, PACE_WINDOW_DEFAULT, PACE_WINDOW_MAX,
   carPickLabel, DEFAULT_CAR_NUMBERS, defaultCarNumber,
   driverAbbrev, matchTimingDriver, createFeedSeen, wallShowsPlan,
+  feedSessionAge, SESSION_FRESH_MS,
   pitCostSec, pitSegments, pitLaneTimeSec, refuelTimeSec, fuelBreakEven, recommendedStop,
   greenSpeedKmh, neutralSpeedKmh, timingNrOf,
   tyreSetNames, generateTyreSets, TYRE_SET_GEN_MAX, tyreBudget, stopTyreSet, reconcileTyreSets,
@@ -431,6 +432,38 @@ check('the slots start on the team race numbers',
   fsn.update({ conn: 'replay', session: { name: 'Night Race' }, sessions: { selected: 's2' }, entries: [{ nr: 26 }] });
   check('feed-seen: session-picker switch starts over', !fsn.has('7'));
   check('feed-seen: replay posts count, numeric nr matches', fsn.has('26'));
+}
+
+// ---- "did this session start right now?" ----
+// The half of the session question the app answers on its own: a session that
+// is starting here cannot be the one on screen, so the race that is on screen
+// is saved and a fresh one rolls onto the new session with nothing to confirm.
+// Everything else — and every "the feed has not said yet" — goes to the wall.
+{
+  const sess = (totalUs, remainUs) => ({ totalUs, remainUs });
+  const H = 3600e6;
+  check('session age: not started yet is fresh',
+    feedSessionAge({ session: sess(24 * H, 24 * H), entries: [{ nr: '15', laps: 0 }] }) === 'fresh');
+  check('session age: a minute in is fresh',
+    feedSessionAge({ session: sess(H, H - 60e6), entries: [] }) === 'fresh');
+  check('session age: past the window is running',
+    feedSessionAge({ session: sess(H, H - (SESSION_FRESH_MS + 1e3) * 1e3), entries: [] }) === 'running');
+  check('session age: hours in is running',
+    feedSessionAge({ session: sess(24 * H, 21 * H), entries: [] }) === 'running');
+  // A completed lap outranks the clock: a board with laps on it has been raced.
+  check('session age: laps on the board are running whatever the clock says',
+    feedSessionAge({ session: sess(24 * H, 24 * H), entries: [{ nr: '15', laps: 0 }, { nr: '27', laps: 3 }] }) === 'running');
+  // Absence of evidence is never youth: an unheld race must not be thrown away
+  // because the feed has not published a clock yet (the first frames after a
+  // session change carry neither window nor board).
+  check('session age: no session window is unknown',
+    feedSessionAge({ session: sess(null, 2 * H), entries: [] }) === 'unknown');
+  check('session age: no remaining is unknown',
+    feedSessionAge({ session: sess(24 * H, null), entries: [] }) === 'unknown');
+  check('session age: an empty snapshot is unknown',
+    feedSessionAge({ entries: [] }) === 'unknown' && feedSessionAge(null) === 'unknown');
+  check('session age: the finish is running, not fresh',
+    feedSessionAge({ session: sess(24 * H, 0), entries: [] }) === 'running');
 }
 
 // ---- driver recognition from the timing feed ----
@@ -1907,6 +1940,110 @@ check('the engineer signs off what happened',
   state.cars['1'].stintHistory[histDt].confirmed.atMs > 0);
 check('the signed-off stop keeps its measured time',
   state.cars['1'].stintHistory[histDt].pitSec >= 74);
+
+// ---- a stop nobody planned is still a stop ----------------------------------
+// The crew never put it through the card — the driver came in on the radio, or
+// the engineer was busy. The visit goes on the sheet where it happened with NO
+// service applied (nothing was ordered, so nothing is guessed at), and the
+// question of what was actually done goes to the station.
+{
+  send({ type: 'update', carId: '1', patch: { nextStop: emptyStop() } });
+  await until(() => state.cars['1'].nextStop.status === 'draft');
+  const carU = () => state.cars['1'];
+  const histU = carU().stintHistory.length;
+  const fuelU = carU().state.fuelLiters;
+  const setU = carU().state.currentTyreSetId;
+  info.timing.engine.onEvent({ type: 'pitIn', nr: '17' });
+  await until(() => carU().state.inPit === true);
+  send({ type: 'update', carId: '1', patch: { state: { pitEnterMs: Date.now() - 95000 } } });
+  await until(() => carU().state.pitEnterMs < Date.now() - 94000);
+  info.timing.engine.onEvent({ type: 'pitOut', nr: '17' });
+  await until(() => carU().stintHistory.length === histU + 1);
+  const h = carU().stintHistory[histU];
+  check('an unplanned stop reaches the stint sheet', h.unplanned === true && h.pitSec >= 94);
+  check('an unplanned stop applies no service',
+    Math.abs(carU().state.fuelLiters - fuelU) < 0.01 && carU().state.currentTyreSetId === setU);
+  check('an unplanned stop closes the stint', carU().state.lapsThisStint === 0);
+  check('the station is asked what was done',
+    carU().state.lastPitVisit.applied === true && carU().state.lastPitVisit.unplanned === true);
+  // ...and it can be taken back whole if the car really only drove through.
+  send({ type: 'undoStop', carId: '1' });
+  await until(() => state.cars['1'].stintHistory.length === histU);
+  check('an unplanned stop can be undone', carU().state.lastPitVisit === null);
+}
+
+// ---- the stop counter and the pit stopwatch are second sources --------------
+// Plenty of boards are configured with no state column at all. The vendor's own
+// PIT count and LAST PIT stopwatch describe the same visit, and either one on
+// its own has to be enough — otherwise a whole session goes by with the car
+// pitting and nothing ever logged.
+{
+  const eng = info.timing.engine;
+  const carP = () => state.cars['1'];
+  const row = eng._rowFor('17');
+  const col = k => eng._ci(k);
+  const put = (key, v) => { eng.grid[row] ??= {}; eng.grid[row][col(key)] = v; };
+  // Baseline the row the way a board does, then move only PIT and LAST PIT.
+  put('nr', '17');
+  put('pit', 3);
+  put('lpit', 'L60000000');
+  // The visits above were seconds ago; a real one is a stint apart, and the
+  // re-entry guard is there precisely so seconds-apart reports fold together.
+  send({ type: 'update', carId: '1', patch: { state: { pitClosedMs: Date.now() - 600e3 } } });
+  await until(() => state.cars['1'].state.pitClosedMs < Date.now() - 599e3);
+  const histP = carP().stintHistory.length;
+  // entry: the counter ticks and the stopwatch starts, no state token at all
+  eng._processChanges([[row, 'pit', 4, 3], [row, 'lpit', 'S' + 9e14, 'L60000000']]);
+  await until(() => carP().state.inPit === true);
+  check('the stop counter alone puts the car in the lane', carP().state.inPit === true);
+  // release: the stopwatch freezes at 88 s — the timekeeper's own measurement
+  eng._processChanges([[row, 'lpit', 'L88000000', 'S' + 9e14]]);
+  await until(() => carP().stintHistory.length === histP + 1);
+  const h = carP().stintHistory[histP];
+  check('the frozen pit stopwatch releases the car', carP().state.inPit === false);
+  check('the stop is timed by the feed, not by us', h.pitSec === 88);
+}
+
+// A board that ticks its counter on RELEASE instead of on arrival must not
+// leave the car sitting in the lane for the rest of the race.
+{
+  const eng = info.timing.engine;
+  const carP = () => state.cars['1'];
+  const row = eng._rowFor('17');
+  eng._processChanges([[row, 'pit', 5, 4]]);
+  await wait(150);
+  check('a counter tick just after a release is not a new visit',
+    state.cars['1'].state.inPit === false);
+}
+
+// ---- a stop taken while the feed was down --------------------------------
+// Both ends of the visit are lost with the link, so nothing can be logged from
+// events. The board's stop counter is the one thing that survives the outage,
+// and what it says is never applied blind — the crew is told a stop is missing
+// from the sheet. The reconciliation itself runs on the connected-feed tick
+// (like the lap catch-up beside it, it needs a live upstream and is not driven
+// from here); what is checked here is that the note reaches the stations and
+// that the crew can answer it.
+{
+  const carG = () => state.cars['1'];
+  send({ type: 'update', carId: '1', patch: { state: { pitCatchUp: { stops: 2, atMs: Date.now() } } } });
+  await until(() => state.cars['1'].state.pitCatchUp?.stops === 2);
+  check('a missing stop is reported to the stations, not invented into the sheet',
+    carG().state.pitCatchUp.stops === 2 &&
+    carG().stintHistory.every(h => h.atMs !== carG().state.pitCatchUp.atMs));
+  send({ type: 'clearPitNote', carId: '1' });
+  await until(() => state.cars['1'].state.pitCatchUp === null);
+  check('the crew can clear the missing-stop note', carG().state.pitCatchUp === null);
+  // ...and logging it by hand answers the note too.
+  send({ type: 'update', carId: '1', patch: { state: { pitCatchUp: { stops: 1, atMs: Date.now() } } } });
+  await until(() => state.cars['1'].state.pitCatchUp?.stops === 1);
+  send({ type: 'applyStop', carId: '1' });
+  await until(() => state.cars['1'].state.pitCatchUp === null);
+  check('applying the stop by hand answers it', carG().state.pitCatchUp === null);
+  send({ type: 'undoStop', carId: '1' });
+  await wait(150);
+}
+
 // ---- a stop that did not go to plan is rewritten to what happened ----
 // The plan said 90 L, new rubber, a driver change and front pads. The crew
 // only splashed 55 L and changed nothing else — and two laps have been run
@@ -3449,12 +3586,19 @@ check('stintStats filters outliers', (() => {
   await until(() => state.cars['1'].state.totalLaps === 1);
   check('feed laps count for the bound session', state.cars['1'].state.totalLaps === 1);
 
-  // The feed moves to the next session of the weekend.
+  // The feed moves to the next session of the weekend. This stub publishes no
+  // session clock at all, so the app cannot tell whether the new session is
+  // starting here or has been running for hours — and what it cannot tell, it
+  // does not decide: after the settle window the question goes to the wall.
   feedSession = 'Race 2';
   await until(() => !!state.timing.sessionAlert);
+  check('the feed is held from the moment the session changes',
+    !!state.timing.sessionAlert && state.cars['1'].state.totalLaps === 1);
+  await until(() => state.timing.sessionAlert?.pending === false);
   const alert = state.timing.sessionAlert;
   check('session change with a race on screen asks the pit wall',
-    alert && alert.from === 'Race 1' && alert.to === 'Race 2' && alert.laps === 1);
+    alert && alert.pending === false &&
+    alert.from === 'Race 1' && alert.to === 'Race 2' && alert.laps === 1);
   check('the race stays bound to its own session', state.timing.sessionKey === 'Race 1');
 
   info.timing.engine.onEvent({ type: 'lap', nr: '17', lapUs: 101e6, lapSec: 101 });
@@ -3477,8 +3621,11 @@ check('stintStats filters outliers', (() => {
   feedSession = 'Race 3';
   info.timing.engine.onEvent({ type: 'session', name: 'Race 3', prevName: 'Race 2' });
   await until(() => !!state.timing.sessionAlert);
-  check('a session-change event asks straight away',
+  check('a session-change event holds the feed straight away',
     state.timing.sessionAlert?.to === 'Race 3');
+  await until(() => state.timing.sessionAlert?.pending === false);
+  check('and reaches the wall once the feed has had its say',
+    state.timing.sessionAlert?.pending === false);
 
   // NEW: the previous session's race is over — start this one clean.
   const set2 = state.cars['1'].state.currentTyreSetId;
@@ -4275,6 +4422,83 @@ check('stintStats filters outliers', (() => {
   check('the ranking that travels stays small',
     JSON.stringify(neutralPlan.caution).length < 700,
     `${JSON.stringify(neutralPlan.caution).length} bytes`);
+}
+
+// ---- a session that starts here is not a question --------------------------
+// Driven through a *connected* feed (the guard reads nothing else), one heat
+// frame at a time: the app adopts the session it is started on, rolls onto the
+// next one by itself when that one begins here — saving what was on screen
+// first — and still stops and asks when the feed joins a session already under
+// way, which is the case that can throw away a running race.
+{
+  const rollDir = path.join(os.tmpdir(), `pitwall-roll-${process.pid}`);
+  fs.rmSync(rollDir, { recursive: true, force: true });
+  const infoR = startServer({ dataFile: null, backupDir: rollDir, port: 8490, tickMs: 3600e3 });
+  await bound(infoR, 'session roll');
+  const wsR = new WebSocket('ws://127.0.0.1:' + infoR.port);
+  let stateR = null;
+  wsR.on('message', raw => {
+    const m = JSON.parse(raw);
+    if (m.type === 'state') stateR = m.state;
+  });
+  await new Promise(r => wsR.on('open', r));
+  const sendR = o => wsR.send(JSON.stringify(o));
+  // A one-hour session `elapsedUs` into it, on the board's own clock.
+  const heat = (n, elapsedUs) => ({ handle: 'h_i', payload: { n, f: 2, lt: 3600e6, r: elapsedUs }, ts: Date.now() });
+  await wait(200);
+
+  infoR.timing._liveTest(heat('Qualifying', 1800e6));
+  await wait(1300); // the guard runs on the 1 s tick
+  check('an empty race adopts the session the feed is on', stateR.timing.sessionKey === 'Qualifying');
+  check('adopting one asks nothing', !stateR.timing.sessionAlert && !stateR.timing.sessionRolled);
+
+  sendR({ type: 'lap', carId: '1', lapSec: 100 });
+  sendR({ type: 'lap', carId: '1', lapSec: 101 });
+  await wait(250);
+  check('the qualifying laps are on the sheet', stateR.cars['1'].state.totalLaps === 2);
+
+  // Next session of the weekend, its clock at zero: nothing on screen can
+  // belong to it, so it is saved and the race rolls onto the new one.
+  infoR.timing._liveTest(heat('Race', 0));
+  await wait(300);
+  check('a session that starts here needs no answer on the wall', !stateR.timing.sessionAlert);
+  check('the race rolls onto it', stateR.timing.sessionKey === 'Race' &&
+    stateR.cars['1'].state.totalLaps === 0);
+  const rolled = stateR.timing.sessionRolled;
+  check('what was on screen is saved first', rolled?.from === 'Qualifying' && rolled?.to === 'Race' &&
+    rolled?.laps === 2 && !!rolled?.backup);
+  check('the save is in the restore list on the wall',
+    infoR.listBackups().some(b => b.name === rolled.backup));
+
+  // …and the wall can overturn it: the saved race comes back, running on the
+  // session the feed is showing.
+  sendR({ type: 'sessionRollUndo' });
+  await wait(300);
+  check('putting the old race back restores its laps', stateR.cars['1'].state.totalLaps === 2);
+  check('the restored race runs on the session the feed is on',
+    stateR.timing.sessionKey === 'Race' && !stateR.timing.sessionAlert && !stateR.timing.sessionRolled);
+
+  // A feed joining a session that has been running for half an hour is the
+  // ambiguous one — that still stops everything and asks.
+  infoR.timing._liveTest(heat('Race 2', 1800e6));
+  await wait(300);
+  const alert = stateR.timing.sessionAlert;
+  check('a session already under way is still asked', !!alert && alert.to === 'Race 2' &&
+    alert.from === 'Race' && alert.pending === false);
+  check('nothing is thrown away while it is asked', stateR.cars['1'].state.totalLaps === 2 &&
+    stateR.timing.sessionKey === 'Race');
+
+  // A feed that publishes the new session's name before its clock is asked —
+  // and unasked again the moment the clock turns up reading zero. Nobody has
+  // to answer a question the feed has since answered itself.
+  infoR.timing._liveTest(heat('Race 2', 0));
+  await wait(1300);
+  check('a clock that arrives late still takes the question off the wall',
+    !stateR.timing.sessionAlert && stateR.timing.sessionKey === 'Race 2' &&
+    stateR.cars['1'].state.totalLaps === 0);
+  check('and the race it replaced was saved on the way',
+    stateR.timing.sessionRolled?.from === 'Race' && !!stateR.timing.sessionRolled?.backup);
+  fs.rmSync(rollDir, { recursive: true, force: true });
 }
 
 // ---- port walk -------------------------------------------------------------

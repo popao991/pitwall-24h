@@ -18,7 +18,7 @@ import {
   defaultAllBrakeSets, reconcileBrakeSets, stopBrakeSet, brakeSetsOf, DEFAULT_BRAKE_SET_COUNT,
   reconcileBrakeKits, linkBrakeKit, syncBrakeKitToCar, brakeAxle, kitOfDiscSet,
   stopBrakeKit, stopPadSet,
-  PACE_WINDOW_DEFAULT, applyCarFile, stintStartOf, raceClock
+  PACE_WINDOW_DEFAULT, applyCarFile, stintStartOf, raceClock, feedSessionAge
 } from '../shared/model.js';
 import { createTimingService } from './livetiming.js';
 
@@ -170,6 +170,8 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
       c.config.paceAvgLaps ??= PACE_WINDOW_DEFAULT;
       c.state.inPit ??= false;
       c.state.pitEnterMs ??= null;
+      c.state.pitEnterFeed ??= false;
+      c.state.pitClosedMs ??= null;
       c.state.avgLapSecLive ??= null;
       if (!Array.isArray(c.state.recentLapSec)) c.state.recentLapSec = [];
       if (!Array.isArray(c.state.stintLapSec)) c.state.stintLapSec = [];
@@ -184,6 +186,10 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
       c.state.feedGap ??= false;
       c.state.manualLaps ??= 0;
       c.state.lapCatchUp ??= null;
+      // The same anchor for the board's stop counter, so a stop taken during a
+      // feed outage can be reported rather than silently lost.
+      c.state.feedPits ??= null;
+      c.state.pitCatchUp ??= null;
       c.nextStop.tyreSetId ??= null;
       // The stop plan gained a situation, per-line pins and an approval.
       // `plan` is null by design — the card follows whatever is flying until
@@ -497,21 +503,110 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
     return true;
   }
 
-  function finishPitVisit(car, pitMs) {
+  // ---- one visit, however many columns reported it -------------------------
+  // The feed announces the same pit visit up to three times in one frame (the
+  // state token, the stop counter, the pit stopwatch — see _processChanges).
+  // These two funnels fold that into a single visit, and are the only place
+  // the in-pit flags are moved by the feed.
+
+  // A car cannot be back in the lane moments after leaving it: the out-lap
+  // alone is a lap of the circuit. Inside this window an INFERRED entry — a
+  // counter that ticked, a stopwatch that started — is the board describing
+  // the release we just handled, not a new visit. An explicit "In Pit" token
+  // is never second-guessed: it says where the car is.
+  const PIT_REOPEN_MS = 60e3;
+  // The columns of one frame arrive together; a board that splits them across
+  // two publishes is still describing one release.
+  const PIT_ECHO_MS = 15e3;
+
+  // Feed timestamp (µs on the upstream server clock) → local time. Used for
+  // the pit ENTRY stamp so a stop is measured from when the timekeeper saw the
+  // car, not from when this frame reached the pit wall.
+  function feedMsOf(atUs) {
+    if (!(atUs > 0)) return 0;
+    const nowUs = timing.engine.serverNowUs();
+    if (!(nowUs > 0)) return 0;
+    const ms = Date.now() - Math.round((nowUs - atUs) / 1000);
+    // Rubbish in the cell (a stamp from another session, a clock that has not
+    // settled) must not date a stop into next week or into last night.
+    return ms > 0 && ms <= Date.now() + 2000 && Date.now() - ms < 6 * 3600e3
+      ? Math.min(ms, Date.now()) : 0;
+  }
+
+  function openPitVisit(car, ev, now) {
+    const s = car.state;
+    if (s.inPit) return false; // already in the lane — a second report of it
+    // Some boards tick the stop counter on RELEASE rather than on arrival, and
+    // that tick lands in the same frame as the pit-out. Taken at face value it
+    // would open a visit the car has just finished and leave it in the lane
+    // for the rest of the race.
+    const inferred = ev.src === 'count' || ev.src === 'lpit';
+    if (inferred && s.pitClosedMs && now - s.pitClosedMs < PIT_REOPEN_MS) return false;
+    const feedEnter = feedMsOf(ev.atUs);
+    s.inPit = true;
+    s.pitEnterMs = feedEnter || now;
+    s.pitEnterFeed = !!feedEnter;
+    // The pit-lane crawl makes the fuel span unrepresentative.
+    dirtyFuelRef(car);
+    return true;
+  }
+
+  function closePitVisit(car, ev, now) {
+    const s = car.state;
+    // The feed's own measured lane time, when it published one. It beats
+    // anything computed here: it survives a reconnect that hid the entry, and
+    // it is the number the timekeeper will publish in the results.
+    const feedMs = ev.pitUs > 0 ? Math.round(ev.pitUs / 1000) : 0;
+    if (!s.inPit) {
+      // No visit open. Either this is the second column of one release —
+      // already handled — or a stop that began before we were watching: a
+      // reconnect mid-stop loads "In Pit" as a baseline, so the entry never
+      // fires and only the published length says the stop happened at all.
+      // Without that length there is nothing to log.
+      if (!feedMs) return false;
+      if (s.pitClosedMs && now - s.pitClosedMs < PIT_ECHO_MS) return false;
+    }
+    const pitMs = feedMs || (s.pitEnterMs ? now - s.pitEnterMs : 0);
+    const timed = !!feedMs || !!s.pitEnterMs;
+    s.inPit = false;
+    s.pitEnterMs = null;
+    s.pitEnterFeed = false;
+    s.pitClosedMs = now;
+    finishPitVisit(car, pitMs, { timed, feedTimed: !!feedMs });
+    return true;
+  }
+
+  // A pit-lane visit is over. Every visit long enough to have been a stop is
+  // written to the stint sheet — planned or not. An unplanned one applies no
+  // service at all (nothing was ordered, so nothing is guessed at): it closes
+  // the stint, puts the stop on the timeline where it happened, and asks the
+  // engineer what was done to the car. A session must never go by with the
+  // car pitting and the sheet showing one endless stint.
+  function finishPitVisit(car, pitMs, { timed = true, feedTimed = false } = {}) {
     const armed = car.nextStop.status !== 'draft';
     const visit = pitVisitKind(car, pitMs, armed);
     const running = state.race.startMs && Date.now() >= state.race.startMs;
     const stopped = raceCondition(state.race).pace === 'stopped'; // red / chequered
     visit.atMs = Date.now();
     visit.applied = false;
+    visit.feedTimed = feedTimed;
+    // Not timed at all (no entry seen, no length published) — the visit is
+    // real but its length is unknown, so the drive-through test cannot be the
+    // thing that throws it away, and a made-up 0 s must not reach the sheet.
+    if (!timed) {
+      if (visit.kind === 'driveThrough') visit.kind = armed ? 'service' : 'unplanned';
+      visit.pitSec = null;
+      visit.stationarySec = null;
+    }
+    visit.unplanned = visit.kind === 'unplanned';
     // A car sitting in the lane under a red flag has not done a pit stop.
-    if (visit.kind === 'service' && running && !stopped) {
+    if (visit.kind !== 'driveThrough' && running && !stopped) {
       const review = openStopReview(car, visit);
       applyStop(car, visit);
       car.state.lastPitVisit = review;
       return;
     }
-    if (visit.kind === 'service') visit.kind = 'held'; // right length, wrong moment
+    if (visit.kind !== 'driveThrough') visit.kind = 'held'; // right length, wrong moment
     // The station reads this to say what happened, and to offer the one-tap
     // correction when the app deliberately did nothing.
     car.state.lastPitVisit = visit;
@@ -590,6 +685,14 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
     state.timing.sessionAlert = null;
   }
 
+  // How long the feed gets to say what the new session is before the question
+  // goes to the pit wall. A session change clears the board and (TeamStream)
+  // the session window with it, so the evidence arrives a beat behind the
+  // change itself — but only a beat: it is published in the same message, and
+  // three guard ticks is already generous. The feed is held throughout, so
+  // waiting longer for a feed that is never going to say costs laps.
+  const SESSION_SETTLE_MS = 3000;
+
   // Reconcile the bound session with what the feed is showing. `name` is the
   // session-change event's own name, used because a couple of feeds clear the
   // board before the new name reaches the snapshot.
@@ -598,10 +701,13 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
     if (!key) return false;
     const alert = state.timing.sessionAlert;
     if (alert) {
-      // Already asked — keep the question pointed at the session the feed is
-      // on now, in case it moved on again while nobody answered.
+      // Already raised — keep it pointed at the session the feed is on now, in
+      // case it moved on again while nobody answered. A different session is a
+      // different question: judge this one from scratch too.
       if (alert.to === key) return false;
       alert.to = key;
+      alert.ms = Date.now();
+      alert.pending = true;
       return true;
     }
     if (state.timing.sessionKey === key) return false;
@@ -613,9 +719,76 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
       from: state.timing.sessionKey,
       to: key,
       ms: Date.now(),
-      laps: Object.values(state.cars).reduce((n, c) => n + c.state.totalLaps, 0)
+      laps: Object.values(state.cars).reduce((n, c) => n + c.state.totalLaps, 0),
+      // Not a question yet: a session that starts here answers it itself.
+      pending: true
     };
-    console.log(`[server] feed session "${state.timing.sessionKey || '—'}" → "${key}" — feed held until the pit wall answers`);
+    console.log(`[server] feed session "${state.timing.sessionKey || '—'}" → "${key}" — feed held`);
+    return true;
+  }
+
+  // The half of the session question the app can answer on its own: a session
+  // that is starting now cannot be the one on screen, so the race that IS on
+  // screen is saved and a fresh one starts on the new session — nobody should
+  // have to confirm at the start of every session that a new session started.
+  // Only a session already under way (or one the feed still says nothing about
+  // after the settle window) goes to the wall as a question.
+  function resolveSessionAlert() {
+    const alert = state.timing.sessionAlert;
+    if (!alert) return false;
+    const age = feedSessionAge(timing.snapshot());
+    // Proof that the session starts here answers the question outright, even
+    // if it has already gone up on the wall: a feed that publishes its clock
+    // late does not make an obvious session change into a real question. What
+    // is on screen is saved either way, and the wall can still put it back.
+    if (age === 'fresh') {
+      rollToSession(alert);
+      return true;
+    }
+    if (!alert.pending) return false;
+    if (age === 'running' || Date.now() - alert.ms >= SESSION_SETTLE_MS) {
+      alert.pending = false;
+      console.log(`[server] session "${alert.to}" is ${age === 'running' ? 'already under way' : 'not saying what it is'}` +
+        ' — the pit wall has to answer');
+      return true;
+    }
+    return false;
+  }
+
+  // Save the race that is on screen, then start the next one on the session the
+  // feed has moved to. The save is a normal timestamped backup, so it is in the
+  // wall's restore list like any other — and the notice left behind can put it
+  // straight back if the roll was wrong.
+  function rollToSession(alert) {
+    const saved = writeBackup();
+    if (saved) lastBackupMs = Date.now();
+    const rolled = {
+      from: alert.from,
+      to: alert.to,
+      ms: Date.now(),
+      laps: alert.laps,
+      backup: saved ? path.basename(saved) : null
+    };
+    startFreshForSession(alert.to);
+    // After the reset: bindSession() clears the question, not this notice.
+    state.timing.sessionRolled = rolled;
+    console.log(`[server] session "${alert.from || '—'}" → "${alert.to}" started now — ` +
+      `saved (${rolled.backup || 'no backup dir'}) and rolled onto it automatically`);
+  }
+
+  // "That was the wrong call": put the saved race back and keep it on the
+  // session the feed is showing — the KEEP answer, taken after the fact.
+  function undoSessionRoll() {
+    const rolled = state.timing.sessionRolled;
+    if (!rolled?.backup) return false;
+    const r = restoreBackup(rolled.backup);
+    if (!r.ok) {
+      console.error('[server] session roll undo failed:', r.error);
+      return false;
+    }
+    bindSession(sessionKeyOf(timing.snapshot()) || rolled.to);
+    state.timing.sessionRolled = null;
+    console.log(`[server] session roll undone — "${rolled.from || '—'}" is back, running on "${rolled.to}"`);
     return true;
   }
 
@@ -637,7 +810,11 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
     // The session change is the one event that must be seen while the feed is
     // held — it is what raises (or re-points) the question in the first place.
     if (ev.type === 'session') {
-      if (syncSessionFromFeed(ev.name)) broadcast();
+      let dirty = syncSessionFromFeed(ev.name);
+      // Feeds that carry the new session's clock in the same frame as its name
+      // can be judged here and now, with no held second in between.
+      if (resolveSessionAlert()) dirty = true;
+      if (dirty) broadcast();
       return;
     }
     if (ev.type !== 'lap' && ev.type !== 'pitIn' && ev.type !== 'pitOut') return;
@@ -661,17 +838,9 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
         if (!running) continue;
         recordLap(car, ev.lapSec);
       } else if (ev.type === 'pitIn') {
-        car.state.inPit = true;
-        car.state.pitEnterMs = now;
-        // The pit-lane crawl makes the fuel span unrepresentative.
-        dirtyFuelRef(car);
+        openPitVisit(car, ev, now);
       } else {
-        // Pit exit: the feed has just told us the whole stop is over, so the
-        // engineer should not have to press anything to end it.
-        const enteredMs = car.state.pitEnterMs;
-        car.state.inPit = false;
-        car.state.pitEnterMs = null;
-        finishPitVisit(car, enteredMs ? now - enteredMs : 0);
+        closePitVisit(car, ev, now);
       }
       changed = true;
     }
@@ -725,14 +894,27 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
       const nr = timingNrOf(state.timing, car);
       const entry = snap.entries?.find(e => String(e.nr).trim() === nr);
       const laps = entry?.laps;
+      const pits = entry?.pits;
       if (!(laps > 0)) continue; // no count published yet — wait for a crossing
 
       if (s.feedLaps == null) { // baseline: this reading counts for nothing
         Object.assign(s, { feedLaps: laps, feedGap: false, manualLaps: 0 });
+        s.feedPits = pits >= 0 ? pits : null;
         changed = true;
         continue;
       }
       if (s.feedGap) {
+        // A stop taken while the link was down is invisible to the events —
+        // the reconnect rebuilds the board and both the entry and the release
+        // land as baselines. The board's stop counter is the one thing that
+        // carries across the gap, so it is what says a stop is missing. It is
+        // never applied blind: nothing here knows when it happened or what was
+        // done, and a stop logged at the wrong minute is worse than one the
+        // crew is asked about.
+        if (s.feedPits != null && pits > s.feedPits) {
+          s.pitCatchUp = { stops: pits - s.feedPits, atMs: Date.now() };
+          console.log(`[server] car ${car.id}: board shows ${pits - s.feedPits} stop(s) taken during the feed outage — not applied`);
+        }
         const missed = laps - s.feedLaps - s.manualLaps;
         if (missed > 0 && missed <= CATCHUP_MAX_LAPS && running) {
           // No lap times: the feed only kept the count. Wear and the counters
@@ -753,6 +935,7 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
         changed = true;
       }
       if (s.feedLaps !== laps) { s.feedLaps = laps; changed = true; }
+      if (pits >= 0 && s.feedPits !== pits) { s.feedPits = pits; changed = true; }
     }
     return changed;
   }
@@ -900,6 +1083,9 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
       // Which session is this? Answered first — while it is open the feed
       // drives nothing: not the clock, not the duration, not the flag.
       if (syncSessionFromFeed()) dirty = true;
+      // …and answered by the feed itself where it can be (a session starting
+      // now), before anything downstream reads the hold.
+      if (resolveSessionAlert()) dirty = true;
       if (!state.timing.sessionAlert) {
         if (state.timing.followClock) {
           if (syncRaceClockFromFeed(1500)) dirty = true;
@@ -1197,8 +1383,10 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
 
       case 'resetRace':
         resetRaceData();
-        // A hand reset makes whatever the feed is showing this race's session.
+        // A hand reset makes whatever the feed is showing this race's session,
+        // and settles anything the app rolled onto by itself before it.
         bindSession(sessionKeyOf(timing.snapshot()));
+        state.timing.sessionRolled = null;
         break;
 
       // ---- the pit wall answers "which session is this race?" ---------------
@@ -1212,6 +1400,17 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
 
       case 'sessionKeep':
         bindSession(state.timing.sessionAlert?.to || state.timing.sessionKey);
+        break;
+
+      // ---- the wall reads (or overturns) an automatic session roll ---------
+      // UNDO puts the saved race back and runs it on the session the feed is
+      // showing; OK is just "read it", and the notice goes.
+      case 'sessionRollUndo':
+        undoSessionRoll();
+        break;
+
+      case 'sessionRollOk':
+        state.timing.sessionRolled = null;
         break;
 
       // Manual override of the race condition, sent by the wall or ANY
@@ -1452,6 +1651,14 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
         if (car) car.state.lapCatchUp = null;
         break;
 
+      // "Seen it" — the board is carrying stops the sheet never saw (a visit
+      // that happened entirely inside a feed outage). Clearing the note takes
+      // the app's word for the count from here on; APPLY AS A STOP is next to
+      // it for the crew that would rather put the stop on the sheet.
+      case 'clearPitNote':
+        if (car) car.state.pitCatchUp = null;
+        break;
+
       // Who is really in the car, said straight out — the manual override for
       // a seat the sheet has wrong: a swap done on track radio that never
       // reached the stop planner, or a feed reading the wrong name. The whole
@@ -1612,6 +1819,10 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
         if (car) {
           car.state.inPit = !!m.inPit;
           car.state.pitEnterMs = m.inPit ? Date.now() : null;
+          // Marked out of the lane by hand ends the visit as far as the feed's
+          // second sources are concerned: a counter that ticks a moment later
+          // is that release being reported, not the car going back in.
+          if (!m.inPit) car.state.pitClosedMs = Date.now();
           dirtyFuelRef(car);
         }
         break;
@@ -1624,10 +1835,14 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
           // read as a drive-through and the engineer has just overruled — but
           // this is a service stop now, whatever that visit was called.
           const prev = car.state.lastPitVisit;
-          const visit = prev && Date.now() - prev.atMs < 5 * 60e3 ? { ...prev, kind: 'service' } : { kind: 'service' };
+          const visit = prev && Date.now() - prev.atMs < 5 * 60e3
+            ? { ...prev, kind: 'service', unplanned: false } : { kind: 'service' };
           const review = openStopReview(car, visit);
           applyStop(car, visit.pitSec ? visit : null);
           car.state.lastPitVisit = { ...review, byHand: true };
+          // Whatever the board was carrying that the sheet wasn't, this is the
+          // crew answering it.
+          car.state.pitCatchUp = null;
         }
         break;
 
@@ -1867,6 +2082,10 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
       tyreSetId: s.currentTyreSetId ?? null,
       brakeSetIds: { ...(s.currentBrakeSetId || {}) }, // the parts that ran this stint
       service: { ...stop },
+      // Nothing was ordered for this one — the app logged the visit because it
+      // happened, and no service is applied until the engineer says what was
+      // done. The sheet and the timeline both mark it.
+      unplanned: !!visit?.unplanned,
       // What the stop actually took, when the feed timed it.
       pitSec: visit?.pitSec ?? null,
       stationarySec: visit?.stationarySec ?? null,
