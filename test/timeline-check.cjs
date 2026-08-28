@@ -97,8 +97,7 @@ app.whenReady().then(async () => {
   check('projected blocks are hatched', /url\(#tl-hatch\)/.test(svg));
   check('the night ribbon is on the bar', /var\(--tl-night\)/.test(svg));
   check('NOW is a pill, not floating text', /rx="8\.5"/.test(svg) && />NOW<\/text>/.test(svg));
-  check('pit ticks have round caps', /stroke-linecap="round"/.test(svg));
-  const legend = ['driven', 'projected', 'pit stop · time in the lane above', 'night']
+  const legend = ['driven', 'projected', 'in the pit lane · time above', 'night']
     .filter(w => svg.includes(`>${w}</text>`));
   check('the legend explains its marks', legend.length === 4, legend.join(', '));
   check('the old sentence legend is gone', !/solid = driven/.test(svg));
@@ -121,9 +120,23 @@ app.whenReady().then(async () => {
   // So the stint sheet is written directly — two stops the feed timed (one of
   // them a long one) and a third the engineer applied by hand, which the feed
   // never saw and which can only be priced by what it was planned to take.
+  //
+  // Flags the same way: the race is given a safety car the second stop was
+  // made under, a Code 60 later on, and a red flag that is still out — the
+  // one condition the server is asked to call for real, so the log it keeps
+  // and the clocks that stop with the field are exercised end to end.
   const t0 = Date.now() - 100 * 60e3;
   const drv = shared.cars['1'].drivers;
   send({ type: 'race', patch: { durationH: 4, startMs: t0 } });
+  send({ type: 'fcy', mode: 'red' });
+  const logged = await until(() => shared.race.flagLog?.some(p => p.id === 'red' && p.toMs == null));
+  check('a red flag called by hand is logged as an open period', logged,
+    JSON.stringify(shared.race.flagLog));
+  send({ type: 'race', patch: { flagLog: [
+    { id: 'sc', fromMs: t0 + 58 * 60e3, toMs: t0 + 66 * 60e3, source: 'feed' },
+    { id: 'code60', fromMs: t0 + 75 * 60e3, toMs: t0 + 80 * 60e3, source: 'feed' },
+    { id: 'red', fromMs: t0 + 94 * 60e3, toMs: null, source: 'manual' }
+  ] } });
   send({ type: 'update', carId: '1', patch: {
     stintHistory: [
       { startMs: t0, endMs: t0 + 32 * 60e3, driverId: drv[0].id, laps: 18, pitSec: 68.4, stationarySec: 41.2, estStationarySec: 63 },
@@ -134,40 +147,97 @@ app.whenReady().then(async () => {
     // still to come — the ones priced as estimates rather than facts.
     state: { stintStartMs: t0 + 88 * 60e3, fuelLiters: 25 }
   } });
-  await until(() => shared.cars['1'].stintHistory.length === 3);
+  await until(() => shared.cars['1'].stintHistory.length === 3 && shared.race.flagLog?.length === 3);
   await wait(1600); // one render tick with the stops on the sheet
 
-  const tl = await js(`(() => {
+  const readBar = `(() => {
     const svg = document.getElementById('timeline');
     const W = svg.clientWidth;
-    const marks = [...svg.querySelectorAll('line')]
-      .filter(n => (n.getAttribute('style') || '').includes('--red'))
-      .map(n => +n.getAttribute('x1'));
+    const rects = [...svg.querySelectorAll('rect')];
+    const well = rects.find(n => (n.getAttribute('style') || '').includes('--well'));
+    const barTop = +well.getAttribute('y'), barBottom = barTop + +well.getAttribute('height');
+    // Blocks ON the bar (inside its rows) are told from legend glyphs and
+    // chips by where they sit; a legend glyph is below the bar, a chip above.
+    const onBar = n => +n.getAttribute('y') > barTop && +n.getAttribute('y') < barBottom && n.parentNode.nodeName === 'g';
+    const box = n => ({ x: +n.getAttribute('x'), w: +n.getAttribute('width'), y: +n.getAttribute('y'), h: +n.getAttribute('height') });
     return {
-      W, marks,
-      chips: [...svg.querySelectorAll('g > text')].map(n => n.textContent),
+      W, barTop,
+      lanes: rects.filter(n => onBar(n) && /--tl-lane|--amber/.test(n.getAttribute('style') || '')).map(box),
+      reds: rects.filter(n => onBar(n) && /--red/.test(n.getAttribute('style') || '')).map(box),
+      // The flag row: bands with their own corner radius, above the chips.
+      flags: rects.filter(n => n.getAttribute('rx') === '3' && +n.getAttribute('y') < barTop).map(box),
+      chips: [...svg.querySelectorAll('g > rect[rx="4"]')].map(box),
+      texts: [...svg.querySelectorAll('g > text')].map(n => n.textContent),
       notes: [...svg.querySelectorAll('title')].map(n => n.textContent),
-      // Chip lane, bar top: the times have to be ABOVE the bar, not on it.
-      chipBottom: Math.max(...[...svg.querySelectorAll('g > rect')].map(n => +n.getAttribute('y') + +n.getAttribute('height')), 0),
-      barTop: +[...svg.querySelectorAll('rect')].find(n => (n.getAttribute('style') || '').includes('--well')).getAttribute('y')
+      held: !document.getElementById('stint-held').hidden,
+      stint: document.getElementById('stint-time').textContent
     };
-  })()`);
+  })()`;
+  const tl = await js(readBar);
 
-  check('every stop is marked on the bar', tl.marks.length >= 4, `${tl.marks.length} markers`);
-  check('the flag is not marked as a stop', !tl.marks.some(v => v >= tl.W - 1),
-    `rightmost ${Math.round(Math.max(...tl.marks))} of ${tl.W}`);
-  check('a timed stop is priced above the bar', tl.chips.includes('68s'), tl.chips.join(' '));
-  check('a long stop reads in minutes, not seconds', tl.chips.includes('2:32'));
-  check('an untimed stop falls back to the planned figure', tl.chips.includes('57s'));
-  check('stops still to come are marked as estimates', tl.chips.some(t => t.startsWith('~')),
-    tl.chips.join(' '));
-  check('the times sit above the bar', tl.chipBottom > 0 && tl.chipBottom <= tl.barTop,
-    `chips end ${tl.chipBottom}, bar starts ${tl.barTop}`);
-  check('a marker says what the stop cost on hover',
+  check('every stop is a block on the bar', tl.lanes.length >= 4, `${tl.lanes.length} lane blocks`);
+  check('a one-minute stop is still visible on a four-hour bar', tl.lanes.every(l => l.w >= 6),
+    tl.lanes.map(l => Math.round(l.w)).join(' '));
+  check('the flag is not marked as a stop', !tl.lanes.some(l => l.x + l.w >= tl.W - 1),
+    `rightmost ${Math.round(Math.max(...tl.lanes.map(l => l.x + l.w)))} of ${tl.W}`);
+  check('a timed stop is priced above the bar', tl.texts.includes('68s'), tl.texts.join(' '));
+  check('a long stop reads in minutes, not seconds', tl.texts.includes('2:32'));
+  check('an untimed stop falls back to the planned figure', tl.texts.includes('57s'));
+  check('stops still to come are marked as estimates', tl.texts.some(t => t.startsWith('~')),
+    tl.texts.join(' '));
+  const chipBottom = Math.max(...tl.chips.map(c => c.y + c.h), 0);
+  check('the times sit above the bar', chipBottom > 0 && chipBottom <= tl.barTop,
+    `chips end ${chipBottom}, bar starts ${tl.barTop}`);
+  check('a block says what the stop cost on hover',
     tl.notes.some(n => /^Stop 1 · .*68\.4 s in the lane, 41\.2 s stationary$/.test(n)),
     tl.notes[0] || 'no notes');
   check('a hand-applied stop says the feed never timed it',
     tl.notes.some(n => /did not time this stop/.test(n)));
+
+  // ---- flags on the bar --------------------------------------------------
+  check('every flag period has a band in the flag row', tl.flags.length === 3, `${tl.flags.length} bands`);
+  const flagBottom = Math.max(...tl.flags.map(f => f.y + f.h), 0);
+  const chipTop = Math.min(...tl.chips.map(c => c.y), Infinity);
+  check('the flag row sits above the stop chips', flagBottom <= chipTop, `flags end ${flagBottom}, chips start ${chipTop}`);
+  check('a band is labelled with type and length', tl.texts.includes('SC 8m') && tl.texts.includes('RED 6m'),
+    tl.texts.filter(t => /^(SC|FCY|RED) /.test(t)).join(', '));
+  check('Code 60 is called FCY on the bar', tl.texts.includes('FCY 5m') && !tl.texts.some(t => /C60|CODE/.test(t)));
+  check('a stop under the safety car says so on hover',
+    tl.notes.some(n => /^Safety car · .* · 8m · from the feed · we stopped under it$/.test(n)),
+    tl.notes.find(n => /^Safety car/.test(n)) || 'no note');
+  check('the running red flag reads as still out',
+    tl.notes.some(n => /^Red flag · .* – still out · 6m · called by hand$/.test(n)),
+    tl.notes.find(n => /^Red flag ·/.test(n)) || 'no note');
+  check('the running stint is cut into a red block', tl.reds.length === 1 && tl.reds[0].w > 4,
+    JSON.stringify(tl.reds));
+  check('the red block runs up to NOW', tl.reds.length === 1 &&
+    Math.abs((tl.reds[0].x + tl.reds[0].w) - (100 / 240) * tl.W) < 4,
+    tl.reds.length ? `ends ${Math.round(tl.reds[0].x + tl.reds[0].w)}, NOW at ${Math.round((100 / 240) * tl.W)}` : 'no block');
+
+  // ---- the stint clock under red ------------------------------------------
+  // The stint began 12 minutes ago and the red flag 6 minutes ago: the clock
+  // holds at six minutes, says so, and does not move between two ticks.
+  check('the stint clock stands still under red', tl.held && /^6:0\d$/.test(tl.stint), tl.stint);
+  await wait(2200);
+  const later = await js(readBar);
+  check('two ticks later it has not moved', later.stint === tl.stint && later.held, `${tl.stint} → ${later.stint}`);
+  send({ type: 'fcy', mode: 'auto' });
+  await until(() => shared.race.flagLog.every(p => p.toMs > 0));
+  check('back to green closes the period on the log', shared.race.flagLog[2].toMs > 0);
+  await wait(2200);
+  const moving = await js(readBar);
+  check('and the stint clock runs again', !moving.held && moving.stint !== tl.stint, `${tl.stint} → ${moving.stint}`);
+  const svgFlags = await js("document.getElementById('timeline').innerHTML");
+  check('the legend explains the flags', svgFlags.includes('>SC · FCY</text>') && svgFlags.includes('>red flag · stint clock held</text>'));
+  // Back under red for the pictures: a held clock is what the bar is for.
+  send({ type: 'fcy', mode: 'red' });
+  await until(() => shared.race.flagLog.some(p => p.id === 'red' && p.toMs == null));
+  send({ type: 'race', patch: { flagLog: [
+    { id: 'sc', fromMs: t0 + 58 * 60e3, toMs: t0 + 66 * 60e3, source: 'feed' },
+    { id: 'code60', fromMs: t0 + 75 * 60e3, toMs: t0 + 80 * 60e3, source: 'feed' },
+    { id: 'red', fromMs: t0 + 94 * 60e3, toMs: null, source: 'manual' }
+  ] } });
+  await wait(1600);
 
   await js("document.querySelector('.timeline-wrap').scrollIntoView(); true");
   await wait(400);

@@ -74,7 +74,12 @@ and every tyre or brake set that has already run stay exactly as they are, and
 the event settings are never overwritten — so a file can be loaded at 3 a.m.
 to correct a wrong tank size without costing the car its race. Rack names from
 the file replace only the sets nobody has run; a set that is on the car, used
-or scrapped keeps its place and its mileage.
+or scrapped keeps its place and its mileage, and a set the file names by a
+number already on the rack is that same set — it keeps its id, so a stop
+calling for it and the warmer holding it still point at it after the load.
+The tyre rack travels with its **compounds**, so the sets marked as wets come
+back as wets; a file written before compounds existed says nothing about them
+and changes nothing.
 
 **The file itself** is plain JSON, grouped the way the settings tabs are
 (`car`, `fuel`, `pace`, `wear`, `drivers`, `tyreRack`, `warmerRack`,
@@ -220,7 +225,7 @@ in an e-mail, and can be written the week before with nothing running at all.
   | GREEN | the driver's own rate | **untouched** — green is the normal state and must not compete for attention |
   | FULL COURSE YELLOW / CODE 60 | the car's FCY rate | flashing yellow |
   | SAFETY CAR | the car's Safety Car rate | flashing yellow, labelled SAFETY CAR |
-  | RED FLAG | burn stops | solid red, steady |
+  | RED FLAG | burn stops; the stint clock stands still (**HELD** next to it) and the red minutes are left out of seat time, the drive-time regulations and brake hours | solid red, steady |
   | CHEQUERED FLAG | burn stops | solid, steady |
 
   Only the conditions that change a pit decision *right now* flash — reserving
@@ -259,8 +264,16 @@ in an e-mail, and can be written the week before with nothing running at all.
   real number from the car.
 - The **NEXT STOP** banner shows what runs out first — fuel, tyres, or driver
   time — and when. The **timeline** shows driven stints (solid, coloured per
-  driver), the projected rest of the current stint (faded), and projected
-  future stops (red ticks) to the end of the 24 hours.
+  driver, ending where the car entered the lane), every pit visit as a grey
+  block from lane entry to release with its lane time above it (a stop nobody
+  has accounted for is amber), the projected rest of the current stint
+  (hatched), and the stops still to come as hatched lane blocks the size of
+  the pit loss, to the end of the 24 hours. A row above the bar carries every
+  flag period — SC and FCY bands in yellow (Code 60 reads as FCY), with a
+  tint through the bar so a stop under the safety car is a grey block inside
+  a yellow band; a red flag cuts the stint into a red block where it fell,
+  and the stint clock holds while it is out. Hover any band or block for the
+  start, end, length and where it came from.
 - **Brakes** accrue running hours per part (pads F/R, discs F/R) against
   the life you set; meters go amber at 75 %, red at 90 %.
 - **Pads are bedded onto discs, and that pair is a KIT.** A pad set bedded onto
@@ -396,6 +409,16 @@ in an e-mail, and can be written the week before with nothing running at all.
     the app** — recomputed as fuel burns, tyres wear and the flag changes — or
     is **pinned** by you and held exactly there. Pinning one line never freezes
     the others, and never touches the other two situations' plans.
+  - **DRIVER on GREEN is the running order.** The line follows the stint plan —
+    it names whoever the plan has down for the next stint — and a driver called
+    for by hand here is written back into it: they are moved up to the next
+    stint and the order behind them slides one stint back, so nobody gains or
+    loses a stint and every row after the stop still says who gets in and when.
+    Anything that then breaks a driver's settings (a night stint for someone
+    who does not drive at night, a double for someone not down for one, a
+    drive-time limit) is called out on the line itself. CODE 60 and SAFETY CAR
+    pins are for that stop alone — a safety car plan written hours ahead for a
+    flag that never flies must not reorder the race — so they never touch it.
   - **APPROVE** is the line between "the app suggests" and "we are doing this":
     one tap freezes the figures into the stop and turns the wall card green with
     your name and the time. It signs off **the situation on screen** — each of
@@ -462,7 +485,9 @@ in an e-mail, and can be written the week before with nothing running at all.
     the stint clock are untouched, and the armed stop stays armed. One button
     corrects it if it really was a stop.
   - **RACE STOPPED** — a car sitting in the lane under a red flag is not a stop
-    either; the numbers are left alone and the station says why.
+    either; the numbers are left alone and the station says why. The red
+    period itself is kept on the race's flag log, which is what the timeline
+    draws and what the stint clock stands still by.
 - **Who is in the car** — live timing's driver name is matched against the
   roster and shown under the driver on both the station and the wall. When it
   disagrees, **SEAT THEM** on the station puts that driver in the seat in one
@@ -470,13 +495,23 @@ in an e-mail, and can be written the week before with nothing running at all.
   exactly right for a swap made on the radio. A change made *at* a stop belongs
   in the stop planner instead.
 - **📋 PLAN** (top bar) opens the stint planner. **GENERATE FROM DRIVER
-  SETTINGS** builds a full-race stint plan from the driver table: stint length
-  is min(max stint, a full tank at the driver's dry burn), night stints
-  (21:00–06:00) only go to night-capable drivers, ⏩ double-stint drivers run
-  two stints back-to-back, and seat time is balanced across the crew. The plan
-  shows race time, wall-clock time, driver, laps and fuel per stint plus
-  per-driver totals, and is shared to every screen. Regenerate any time after
+  SETTINGS** builds a full-race stint plan from the driver table: a stint is a
+  tank of fuel — it runs until the usable fuel (tank less safety litres) is
+  burnt at the driver's dry burn, read as a time through the dry lap, and is
+  only cut shorter by the max stint time; nothing is rounded to whole laps.
+  Night stints (21:00–06:00) only go to night-capable drivers, ⏩ double-stint
+  drivers run two stints back-to-back, and seat time is balanced across the
+  crew. The plan shows race time, wall-clock time, driver, length and fuel
+  used per stint plus per-driver totals, and is shared to every screen. Regenerate any time after
   changing the driver table.
+  - **When it will not build, it says why.** GENERATE and REPLAN need a live
+    link to the pit wall (the plan is race state and lives there, so every
+    station and the wall read the same one — a station cannot build one alone),
+    a crew in the driver table, and a race length. Any of those missing is
+    named in the panel the moment it is opened and again on the button, rather
+    than leaving a press that does nothing. A plan whose stints come out so
+    short that it cannot reach the flag — usually a tank that is all safety
+    fuel — says where it stopped instead of looking finished.
   - **Plan timeline**: the plan is built for the race length and start time in
     the two fields at the top — prefilled from the current session but freely
     editable. So the full 24 h race plan can be prepared (and iterated on)
@@ -486,6 +521,15 @@ in an e-mail, and can be written the week before with nothing running at all.
     a saved plan the active shared plan again. Saved plans live in the race
     state on the pit wall PC — build the race plan early, save it, run the
     short sessions, and load it back when the race starts.
+  - **The DRIVER column is live in both directions**: reassign any stint that
+    has not run, or let the GREEN stop card insert a driver for you (above).
+    When the order stops matching the driver table — a night stint on a driver
+    who does not drive at night, back-to-back stints for someone not down for
+    doubles, three in a row, a driver squeezed out of the plan entirely, or a
+    6 h / total drive limit the plan would bust — an amber strip above the
+    table names every fault and the rows themselves are flagged. A plan
+    straight out of GENERATE is clean, so anything showing there is the
+    consequence of a hand edit, or of a driver setting that has changed since.
   - **Plan vs actual**: once the race runs, every plan row shows what actually
     happened — the real driver (flagged when it differs), real laps, and how
     far each stop landed from the plan (Δ end). A headline line gives the
@@ -593,31 +637,38 @@ column is headed by its own flag badge in its own colour — amber **CODE 60**,
 white **SAFETY CAR**, green **GREEN** — with the line under it saying when the
 column applies (*if it drops*, *planned · 45:30*), so which plan a column
 answers for reads before the words do. Under green the code 60 and safety car
-plans get a column each as soon as the engineer has made them say different
-things (while they agree they share one column, *code 60 · sc*); under an
-actual neutralisation only the flag that is flying gets a column. Every cell
-always states its own instruction in full — nobody reading one column has to
-look sideways to learn what it asks for — and a cell that only repeats the
-column beside it is simply dimmed, so where the columns *differ* is the only
-thing carrying colour: under a splash-and-dash that is the whole message.
+plans get a column each, whether they currently say the same thing or not:
+which columns stand is decided by the flag and by what the engineer keeps on
+the wall, never by what a plan happens to say — a column that appeared the
+moment two plans diverged would read as news to a crew glancing up. Under an
+actual neutralisation only the flag that is flying gets a column, and sending
+a stop takes none of them down: the work order the crew has been given becomes
+the card's anchor column (**this stop**, in the accent colour) and the *if it
+drops* columns stay up beside it, because a yellow can still fall while the car
+is on its way in. Every cell always states its own instruction in full — nobody
+reading one column has to look sideways to learn what it asks for — and a cell
+that only repeats the column beside it is simply dimmed, so where the columns
+*differ* is the only thing carrying colour: under a splash-and-dash that is the
+whole message.
 Figures are the ones
 a mechanic acts on — FULL rather than a litre count that keeps moving, the rig
 figure and seconds, the set number with its mileage, the driver's name, which
-brake work by axle — the kit's name, then the numbers to pull off the rack. The
-row that forces the next stop is marked.
+brake work by axle — the kit's name, then the numbers to pull off the rack.
+Which of the four forces the next stop is named in words in the band above
+(*FUEL limited*), so the part names down the side all read in the one colour.
 
 **Colour on a card is the instruction, not a health score.** The board is read
 by people with parts in their hands, so it uses the only two colours everybody
-already reads the same way: **green means it changes** — the car comes in, that
-set comes off, that driver gets out — and **red means it stays as it is** —
-stay out, KEEP, STAYS IN, NO FUEL. Green cells carry a tint as well as the
+already reads the same way: **red means it changes** — the car comes in, that
+set comes off, that driver gets out — and **green means it stays as it is** —
+stay out, KEEP, STAYS IN, NO FUEL. Red cells carry a tint as well as the
 figure, so what has to be fetched is what pulls the eye from across the garage;
-red is text alone, because a car with nothing to change must not read as an
+green is text alone, because a car with nothing to change must not read as an
 alarm. **Amber** never answers box-or-stay: it only warns about the answer —
-the stop is sent and the crew should prepare, the fuel is running low, the row
-that forces the next stop, or a change that is asked for with nothing free in
-the rack to do it with. **Blue** is the stop already happening (car in the pit
-lane). The words always say it too, so nobody has to know the code.
+the stop is sent and the crew should prepare, the fuel is running low, or a
+change is asked for with nothing free in the rack to do it with. **Blue** is
+the stop already happening (car in the pit lane). The words always say it too,
+so nobody has to know the code.
 
 Under the list, the card says whether an engineer has read the plan the stop
 would actually follow — the flag that is flying, or the plan the engineer is
@@ -721,7 +772,9 @@ that limit gives back its padding, then the detail lines under each
 instruction, rather than clipping the bottom of a work order. Saved per PC,
 like the theme.
 
-**RESET** (double confirmation) clears the race but keeps every car's setup.
+**RESET** (double confirmation) clears the race but keeps every car's setup —
+the racks included: the sets come back with their own numbers, compounds and
+kits and nothing on them (see *Which session is this race?*).
 
 ## Live timing
 
@@ -800,9 +853,14 @@ held until it is answered (the stations show the same warning and hand lap
 logging back to the crew):
 
 - **START FRESH RACE** — the data on screen was the previous session's. Laps,
-  stint history, seat time, tyre sets, learning and the clock start over (car
-  setups are kept), the race clock takes the feed's session clock, and every car
-  starts a fresh stint on its configured start fuel.
+  stint history, seat time, tyre and brake mileage, learning and the clock start
+  over (car setups are kept), the race clock takes the feed's session clock, and
+  every car starts a fresh stint on its configured start fuel. The **racks
+  themselves are handed back, not rebuilt**: the crew's own set numbers, which
+  sets are the wets and which pads are bedded onto which discs are garage work
+  and survive every reset — only what the last race wrote on them (mileage,
+  hours, which sets have run, what was in the warmers) is wiped. A set the crew
+  binned stays binned until it is restored on the rack page.
 - **KEEP THIS RACE** — the race on screen is the real one (the feed just renamed
   or rejoined it). Nothing is cleared and the feed starts counting for it again.
 

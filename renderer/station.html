@@ -44,9 +44,11 @@
       <span class="itm edit" id="now-driver-itm" title="Click to correct who is in the car"><span class="lab">Driver</span><b id="now-driver">—</b>
         <span class="sub drvfeed" id="now-driver-feed" hidden></span></span>
       <span class="itm edit" id="now-stint-itm" title="Click to correct the stint clock"><span class="lab">Stint</span><b class="num" id="stint-time">0:00</b>
+        <span class="held" id="stint-held" title="Red flag — the stint clock stands still with the field" hidden>HELD</span>
         <span class="sub num">/ <span id="stint-max">—</span></span></span>
       <span class="itm"><span class="lab">Last</span><b class="num" id="last-lap">--:--.-</b></span>
       <span class="itm" title="Time until the tank hits the safety level"><span class="lab">Fuel</span><b class="num" id="now-fuel">—</b></span>
+      <span class="itm" title="Time of day the car is due in the lane under green — the binding limit, with the safety fuel already inside it"><span class="lab">Green stop</span><b class="num" id="now-greenstop">—</b></span>
       <span class="itm" title="Laps left in the tyre set"><span class="lab">Tyres</span><b class="num" id="now-tyres">—</b></span>
       <span class="alertchip" id="now-alert">RACE NOT STARTED</span>
     </div>
@@ -89,11 +91,11 @@
               <span class="v big" id="pace-avg">--:--.-</span>
             </div>
             <div class="lapstrip" id="pace-strip"></div>
-            <div class="kv"><span class="k">Last lap · vs average</span>
+            <div class="kv"><span class="k" id="pace-last-k">Last lap · vs average</span>
               <span class="v"><span id="pace-last">--:--.-</span> <span class="dlt" id="pace-delta"></span></span></div>
             <div class="kv"><span class="k">Best · slowest in window</span><span class="v" id="pace-range">—</span></div>
-            <div class="kv" title="Timed laps in the window, out of every timed lap this driver has done"><span class="k">Laps counted</span><span class="v" id="pace-count">0</span></div>
-            <div class="kv" id="pace-clean-row" hidden title="The same window without the in/out and traffic laps marked above"><span class="k">Clean-lap average</span><span class="v" id="pace-clean">—</span></div>
+            <div class="kv" title="Laps the average is read from, out of every timed lap this driver has done"><span class="k">Laps counted</span><span class="v" id="pace-count">0</span></div>
+            <div class="kv" id="pace-struck-row" hidden title="Laps over 107% of the window average — in/out laps, traffic, neutralisations. They are drawn on the strip but count in none of the figures above; the window reaches further back to replace them."><span class="k">Struck through</span><span class="v" id="pace-struck">—</span></div>
             </div>
             <!-- Where the lap time actually goes. A lap time says the car is
                  three tenths off; the sectors say whether that is one corner,
@@ -767,25 +769,43 @@
           <button id="btn-plan-replan" title="Keep the driven stints as they happened and regenerate the rest of the race from the live state"><i data-icon="refresh"></i> REPLAN REST FROM NOW</button>
         </div>
         <p class="hint help">
-          Built from the DRIVERS table: stint length = min(max stint, full tank at the
-          driver's dry burn); <i data-icon="moon"></i> night stints (21:00–06:00) only go to night-capable
+          Built from the DRIVERS table: a stint is a tank of fuel — it runs until the
+          usable fuel (tank less safety litres) is burnt at the driver's dry burn, and
+          only the max stint time cuts it shorter; <i data-icon="moon"></i> night stints (21:00–06:00) only go to night-capable
           drivers; <i data-icon="ff"></i> double-stint drivers run two stints back-to-back; seat time is
           balanced across the crew. Regenerate after changing driver settings, or
           REPLAN to rebuild only the remainder around what has actually been driven
           (REPLAN always follows the live session clock, not the timeline above).
+          Both need a live link to the pit wall — the plan is race state and lives
+          there, so every station reads the same one — and they need a crew in the
+          driver table and a race length. When something is missing they say which;
+          they never just sit there.
         </p>
-        <div id="plan-out"></div>
-        <h3 style="margin-top:18px">Saved plans</h3>
+        <h3 style="margin-top:16px">Saved plans</h3>
         <div class="preset-save">
           <input id="plan-name" type="text" placeholder="plan name, e.g. 24H race plan A" />
           <button class="primary" id="btn-plan-save"><i data-icon="save"></i> SAVE CURRENT PLAN</button>
         </div>
         <div id="plan-saved-list"><p class="hint">No plans saved yet.</p></div>
         <p class="hint help">
-          Saved plans live on the pit wall PC with the race state, so every station sees
-          the same list and they survive restarts. LOAD makes a saved plan the active
-          shared plan for this car — generate a plan for the real race, save it, run the
-          short session, and load it back when the race starts.
+          SAVE keeps the plan in the table below under a name. Saved plans live on the pit
+          wall PC with the race state, so every station sees the same list and they
+          survive restarts. LOAD makes a saved plan the active shared plan for this
+          car — generate a plan for the real race, save it, run the short session, and
+          load it back when the race starts.
+        </p>
+        <div id="plan-out"></div>
+        <p class="hint help">
+          The DRIVER column is the running order the stop card reads: GREEN's DRIVER
+          line names whoever this table has down for the next stint. It works the other
+          way round too — calling a driver by hand on the GREEN card moves them up to
+          the next stint here and slides the order behind them one stint back, so
+          nobody gains or loses a stint and every row after the stop still tells the
+          truth about who gets in and when. CODE 60 and SAFETY CAR pins are for that
+          stop alone and never touch the order. Anything the order then breaks — a
+          night stint on a driver who does not drive at night, a double for someone
+          who is not down for one, a drive-time limit — is called out above the table,
+          on the row itself, and back on the GREEN card's DRIVER line.
         </p>
         <h3 style="margin-top:18px">Stint sheet — as driven</h3>
         <div id="sheet-out"></div>

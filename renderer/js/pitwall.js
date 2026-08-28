@@ -1157,9 +1157,14 @@ function setTag(set) {
 // Each column is headed by its own flag chip in its own colour, so which
 // situation a column answers for reads before the words do.
 // The engineer keeps a separate plan per situation, so under green the code 60
-// and safety car plans get a column each — unless they say exactly the same
-// thing (they share one then), or the engineer has taken one off the wall.
-// Once the engineer sends a stop the card collapses to that one work order.
+// and safety car plans get a column each — whether they agree or not. Which
+// columns stand is settled by the flag and by what the engineer has left on
+// the wall, never by what a plan currently says: a column that came and went
+// as the plans converged would have the crew reading a layout change as news.
+// Sending a stop takes none of them down either. The stop becomes the card's
+// anchor column, and the IF columns stay beside it — the flag can still drop
+// while the car is on its way in, and that is exactly when the crew needs to
+// know what it would change.
 function renderGrab(card, car, c, plans, now) {
   const wrap = card.querySelector('[data-f="tiles"]');
   const stop = car.nextStop;
@@ -1172,10 +1177,19 @@ function renderGrab(card, car, c, plans, now) {
 
   // What one plan (or the live stop) asks the crew for, row by row.
   const rowsOf = src => {
-    const fuelTxt = src.fuelLiters > 0
-      ? (src.fuelMode === 'full' ? 'FULL' : `${src.fuelLiters} L`)
-      : 'NO FUEL';
+    // Fuel is planned as the level to leave with, but the crew's job is the
+    // fill — what actually goes in through the rig. So the fill is the figure
+    // on the card and the level it fills to rides underneath: nobody standing
+    // at the rig should have to subtract the gauge off the plan to work out
+    // how much to put in.
     const addL = Math.max(0, Math.ceil(src.fuelLiters - car.state.fuelLiters));
+    const fuelTxt = src.fuelLiters <= 0 ? 'NO FUEL'
+      : addL > 0 ? `+${addL} L` : 'NOTHING TO ADD';
+    const fuelNote = src.fuelLiters <= 0 ? ''
+      : addL > 0
+        ? `to ${src.fuelMode === 'full' ? 'FULL · ' : ''}${src.fuelLiters} L · ` +
+          `${Math.round(refuelTimeSec(car.config, addL))} s on the rig`
+        : `already above the ${src.fuelLiters} L it asks for`;
     const set = src.tyres
       ? (src.tyreSetId ? (car.tyreSets || []).find(t => t.id === src.tyreSetId) : stopTyreSet(car, { tyreSetId: null }))
       : null;
@@ -1186,7 +1200,7 @@ function renderGrab(card, car, c, plans, now) {
     const parts = BRAKE_AXLES.map(a => stopBrakeAxle(car, a.id, src))
       .filter(x => x.work !== 'none');
     return [
-      { v: fuelTxt, n: src.fuelLiters > 0 ? `rig +${addL} L · ${Math.round(addL / (car.config.refuelLps || 2.5))} s` : '', chg: src.fuelLiters > 0 },
+      { v: fuelTxt, n: fuelNote, chg: addL > 0 },
       { v: src.tyres ? (set ? `${esc(set.name)} · ${setTag(set)}` : 'NO SET FREE') : 'KEEP',
         n: src.tyres ? (set ? (set.used ? `${set.laps} laps on it` : 'unused') : 'every spare is used or scrapped') : '',
         chg: src.tyres, blocked: src.tyres && !set },
@@ -1207,6 +1221,26 @@ function renderGrab(card, car, c, plans, now) {
   };
 
   const cats = [['fuel', 'FUEL'], ['tyre', 'TYRES'], ['driver', 'DRIVER'], ['brake', 'BRAKES']];
+
+  // A neutralisation column is what the crew would grab if the flag were out
+  // now; under an actual neutralisation only the flag that is flying counts.
+  const neutralCol = (key, when) => {
+    const r = resolveStop(car, plans[key]);
+    return {
+      tone: key, ico: key === 'sc' ? 'safetycar' : 'flag', lab: PLAN_LABEL[key], when,
+      rows: rowsOf(r),
+      foot: `${Math.round(stopServiceTime(car, r).totalSec)} s stationary`
+    };
+  };
+  // Which situations get a column: the flag that is out, else the ones this
+  // car keeps on the wall. Never what a plan currently says — two that agree
+  // still stand side by side, the repeated cells simply going dim.
+  const neutrals = plans.live === 'fcy' || plans.live === 'sc'
+    ? [neutralCol(plans.live, 'flying now')]
+    : ['fcy', 'sc'].filter(k => wallShowsPlan(car, k)).map(k => neutralCol(k, 'if it drops'));
+
+  // The anchor column is the work order itself: the stop the crew has already
+  // been given, else the planned green one. The IF columns stand beside either.
   let cols;
   if (live) {
     cols = [{
@@ -1214,50 +1248,23 @@ function renderGrab(card, car, c, plans, now) {
       when: stop.status === 'box' || car.state.inPit ? 'now' : 'sent to the crew',
       rows: rowsOf(stop),
       foot: `${Math.round(stopServiceTime(car, stop).totalSec)} s stationary`
-    }];
+    }, ...neutrals];
   } else {
-    // A neutralisation column is what the crew would grab if the flag were out
-    // now; under an actual neutralisation only the flag that is flying counts.
-    const neutralCol = (key, when) => {
-      const r = resolveStop(car, plans[key]);
-      return {
-        tone: key, ico: key === 'sc' ? 'safetycar' : 'flag', lab: PLAN_LABEL[key], when,
-        rows: rowsOf(r),
-        foot: `${Math.round(stopServiceTime(car, r).totalSec)} s stationary`
-      };
-    };
-    if (plans.live === 'fcy' || plans.live === 'sc') {
-      // The flag is out: this IS the work order, whatever the engineer chooses
-      // to carry on the wall the rest of the time.
-      cols = [neutralCol(plans.live, 'flying now')];
-    } else {
-      // Only the situations this car keeps on the wall. A plan taken down
-      // still stands — it just stops spending a column of the crew's width
-      // saying what the column next to it already says.
-      const shown = ['fcy', 'sc'].filter(k => wallShowsPlan(car, k)).map(k => neutralCol(k, 'if it drops'));
-      // Two identical columns teach nothing and cost the width the crew reads
-      // from across the garage — they only split once the plans do.
-      const same = shown.length === 2 && shown[0].rows.every((cell, i) => cell.v === shown[1].rows[i].v);
-      cols = same ? [{ ...shown[0], lab: 'CODE 60 · SC', when: 'if either drops' }] : shown;
-    }
     const greenR = resolveStop(car, plans.green);
-    cols.push({
+    cols = [...neutrals, {
       tone: 'green', ico: 'flag', lab: 'GREEN',
       when: `planned · ${plans.green.dueMs != null ? fmtMinSec(Math.max(0, plans.green.dueMs)) : '—'}`,
       rows: rowsOf(greenR),
       foot: `${Math.round(stopServiceTime(car, greenR).totalSec + (car.config.pitLossSec || 0))} s total`
-    });
+    }];
   }
-
-  const limRow = c.clock.running ? (c.limit.key === 'reg' ? 'driver' : c.limit.key) : null;
-  const limIdx = ['fuel', 'tyre', 'driver', 'brake'].indexOf(limRow === 'tyres' ? 'tyre' : limRow);
 
   wrap.innerHTML = `<table class="grabtable">
     <thead><tr><th></th>${cols.map(col => `<th class="sc-${col.tone}">
       <span class="sit">${icon(col.ico)}<b>${col.lab}</b></span>
       <span class="when">${col.when}</span></th>`).join('')}</tr></thead>
     <tbody>${cats.map(([ic, label], i) => `
-      <tr class="${i === limIdx ? 'lim' : ''}">
+      <tr>
         <td class="cat">${icon(ic)}<span>${label}</span></td>
         ${cols.map((col, ci) => {
           const cell = col.rows[i];

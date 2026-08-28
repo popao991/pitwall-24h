@@ -3,14 +3,15 @@
 
 import {
   PORT, CONDITIONS, BRAKE_COMPONENTS, BRAKE_AXLES, DRIVER_COLORS,
-  carCalcs, raceClock, projectStints, defaultDriver, stintStartOf,
+  carCalcs, raceClock, projectStints, defaultDriver, stintStartOf, flagPeriods, drivenMs,
   stopServiceTime, fcyCalc, fuelStrategy, pitLaneCalc, pitEta, generatePlan,
   normalizeCurve, burnAtLapTime, emptyCurvePoint, LAP_AVG_WINDOW,
   paceWindowStats, paceWindowLaps, PACE_WINDOW_MIN, PACE_WINDOW_MAX,
   currentTyreSet, stopTyreSet, replanFromNow, planVsActual, stintStats, learnedOf,
+  plannedNextStintIndex, planDriverIssues, planBlockers, PLAN_STINT_CAP,
   tyreSetMileage, tyreLifeLapsOf, tyreKmLeft,
   warmableTyreSets, TYRE_WARMER_MAX,
-  newTyreSet, generateTyreSets, TYRE_SET_PATTERN, TYRE_SET_GEN_MAX,
+  newTyreSet, tyreCompoundOf, generateTyreSets, TYRE_SET_PATTERN, TYRE_SET_GEN_MAX,
   generateBrakeSets, nextSetNumber, BRAKE_SET_PATTERN,
   brakeSetsOf, usableBrakeSets, brakeSetHours,
   brakeAxle, brakeKitsOf, kitOfDiscSet, freePadSets, currentBrakeSet,
@@ -1808,6 +1809,7 @@ function renderCarFileSummary(car) {
   const drivers = (car.drivers || []).map(d => d.name).join(', ') || 'none';
   const curves = (car.drivers || []).filter(d => normalizeCurve(d.fuelCurve).length).length;
   const tyres = (car.tyreSets || []).length;
+  const wets = (car.tyreSets || []).filter(t => tyreCompoundOf(t) === 'wet').length;
   const brakes = BRAKE_COMPONENTS.map(b => `${b.short} ${brakeSetsOf(car, b.id).length}`).join(' · ');
   wrap.innerHTML = `
     <div class="kv"><span class="k">These buttons act on</span><span class="v">${onDraft()
@@ -1819,7 +1821,8 @@ function renderCarFileSummary(car) {
       curves ? ` (${curves} with a fuel curve)` : ''}</span></div>
     <div class="kv"><span class="k">Fuel</span><span class="v">${car.config.tankLiters} L tank · ${
       car.config.burnPerLap?.dry} L/lap dry · ${car.config.avgLapSec?.dry} s lap</span></div>
-    <div class="kv"><span class="k">Racks</span><span class="v">${tyres} tyre set${tyres === 1 ? '' : 's'} · ${brakes}</span></div>`;
+    <div class="kv"><span class="k">Racks</span><span class="v">${tyres} tyre set${tyres === 1 ? '' : 's'}${
+      wets ? ` (${wets} wet)` : ''} · ${brakes}</span></div>`;
 }
 
 $('btn-carfile-save').addEventListener('click', async () => {
@@ -2349,7 +2352,7 @@ function renderBrakeSets(car) {
     const now = Date.now();
     const start = stintStartOf(car, state.race);
     const stintH = raceClock(state.race, now).running && start
-      ? Math.max(0, now - start) / 3600e3 : 0;
+      ? drivenMs(state.race, start, now) / 3600e3 : 0;
     return Math.max(0, +car.state.brakeUsedH?.[comp] || 0) + stintH;
   };
 
@@ -3070,7 +3073,7 @@ function openIncar() {
   const clock = raceClock(state.race, Date.now());
   const startMs = clock.running ? stintStartOf(car, state.race) : null;
   const inp = $('incar-stint');
-  inp.value = startMs ? fmtClock(Math.max(0, Date.now() - startMs)) : '';
+  inp.value = startMs ? fmtClock(drivenMs(state.race, startMs, Date.now())) : '';
   inp.disabled = !startMs;
   inp.title = startMs ? 'h:mm:ss or m:ss' : 'No running stint — the stint clock starts with the race.';
   const hint = $('incar-feed-hint');
@@ -3121,7 +3124,7 @@ $('btn-incar-apply').addEventListener('click', () => {
     // Only a real edit is sent: the prefilled value keeps ticking underneath,
     // so re-applying an untouched field must not nudge the clock.
     const startMs = stintStartOf(car, state.race);
-    const curMs = startMs ? Math.max(0, Date.now() - startMs) : 0;
+    const curMs = startMs ? drivenMs(state.race, startMs, Date.now()) : 0;
     if (Math.abs(stintMs - curMs) >= 1500) send({ type: 'setStintTime', elapsedMs: stintMs });
   }
   incarOverlay.classList.add('hidden');
@@ -3153,8 +3156,17 @@ function toLocalInput(ms) {
 function fillPlanTimeline(force = false) {
   if (!state || (planTimelineDirty && !force)) return;
   planTimelineDirty = false;
-  $('plan-duration').value = state.race.durationH;
-  $('plan-start').value = state.race.startMs ? toLocalInput(state.race.startMs) : '';
+  // Written on every render until the engineer types, so a panel opened before
+  // the pit wall answered does not sit on two blank fields once it does. A
+  // field with the caret in it is left alone, and only a real change is
+  // written — a date input rewritten on every tick swallows its own picker.
+  const dur = $('plan-duration');
+  const start = $('plan-start');
+  const startVal = state.race.startMs ? toLocalInput(state.race.startMs) : '';
+  if (document.activeElement !== dur && dur.value !== String(state.race.durationH)) {
+    dur.value = state.race.durationH;
+  }
+  if (document.activeElement !== start && start.value !== startVal) start.value = startVal;
 }
 $('btn-plan-use-race').addEventListener('click', () => fillPlanTimeline(true));
 
@@ -3170,15 +3182,31 @@ function planRace() {
   };
 }
 
+// Why the plan cannot be built right now, or '' when it can. One reading for
+// the panel and for both buttons, so what the panel says and what a press does
+// can never disagree.
+const NO_LINK_WHY = 'The stint plan is race state and lives on the pit wall, so ' +
+  'every station and the wall itself read the same one — a station cannot build ' +
+  'one on its own.';
+function planRefusal() {
+  if (!state) return 'There is no link to the pit wall. ' + NO_LINK_WHY;
+  const why = planBlockers(state.cars[carId], planRace());
+  return why.length
+    ? 'The stint plan cannot be built yet:\n\n· ' + why.join('\n· ')
+    : '';
+}
+
 $('btn-plan-generate').addEventListener('click', () => {
-  if (!state) return;
+  const no = planRefusal();
+  if (no) return alert(no);
   const race = planRace();
   const plan = generatePlan(state.cars[carId], race, Date.now());
   plan.durationH = race.durationH;
   patchCar({ plan });
 });
 $('btn-plan-replan').addEventListener('click', () => {
-  if (!state) return;
+  const no = planRefusal();
+  if (no) return alert(no);
   const clock = raceClock(state.race, Date.now());
   if (!clock.running) return alert('The race is not running — use GENERATE for a pre-race plan.');
   const plan = replanFromNow(state.cars[carId], state.race, Date.now());
@@ -3198,9 +3226,12 @@ $('plan-out').addEventListener('change', e => {
 
 $('btn-plan-save').addEventListener('click', () => {
   if (!state) return;
-  const name = $('plan-name').value.trim();
-  if (!name) return alert('Give the plan a name first.');
-  if (!state.cars[carId].plan?.stints?.length) return alert('No plan to save — press GENERATE first.');
+  const plan = state.cars[carId].plan;
+  if (!plan?.stints?.length) return alert('No plan to save — press GENERATE first.');
+  // No name typed: name it after the race it was built for, so saving is one
+  // tap. A second save under the same default asks before overwriting.
+  const name = $('plan-name').value.trim() ||
+    `${plan.durationH || state.race.durationH} h race plan`;
   if (state.cars[carId].savedPlans?.[name] && !confirm(`Plan "${name}" exists — overwrite it?`)) return;
   send({ type: 'savePlan', name });
   $('plan-name').value = '';
@@ -3243,18 +3274,49 @@ function renderSavedPlans(car) {
 
 let planKey = '';
 function renderPlan(force = false) {
-  if (!state || planOverlay.classList.contains('hidden')) return;
+  if (planOverlay.classList.contains('hidden')) return;
+  // Opened with no pit wall to talk to — the documented way to work ahead of
+  // the event. The settings pages fall back to this PC's draft car there, but
+  // a plan cannot: it is shared race state and the wall is where it lives. So
+  // the panel says that, instead of showing two blank fields and two buttons
+  // that do nothing.
+  if (!state) {
+    planKey = 'nolink';
+    savedPlanKey = 'nolink';
+    $('plan-saved-list').innerHTML =
+      '<p class="hint">Saved plans live on the pit wall with the race state — there is no link to it.</p>';
+    $('sheet-out').innerHTML = '';
+    $('plan-out').innerHTML = `<p class="planwarn">${icon('warn')} <b>No link to the pit wall.</b> ${
+      esc(NO_LINK_WHY)} The crew can be filled in now under SETTINGS → DRIVERS — the plan itself builds in one press once the link is up.</p>`;
+    return;
+  }
   const car = state.cars[carId];
+  // A panel opened before the wall answered still has its fields to fill.
+  fillPlanTimeline();
   renderSavedPlans(car);
   const plan = car.plan;
+  // The running order is part of the key: a driver moved up from the stop card
+  // changes no timestamp, and the table would sit there showing the old order.
+  // So is the driver table itself — what the order is measured against — or a
+  // night flag turned off in SETTINGS would leave the plan silently approving
+  // a stint it should now be warning about.
   const key = (plan ? String(plan.generatedMs) : 'none') +
-    `|${car.stintHistory.length}|${car.state.lapsThisStint}`;
+    `|${car.stintHistory.length}|${car.state.lapsThisStint}` +
+    `|${plan?.stints ? plan.stints.map(st => st.driverId).join(',') : ''}` +
+    `|${car.drivers.map(d => `${d.id}:${d.name}:${d.night ? 1 : 0}${d.doubleStint ? 1 : 0}`).join('~')}` +
+    `|${car.config.regTotalMin || 0}:${car.config.reg6hMin || 0}`;
   if (!force && key === planKey) return;
   planKey = key;
   renderStintSheet(car);
   const out = $('plan-out');
   if (!plan || !plan.stints?.length) {
-    out.innerHTML = '<p class="hint">No plan yet — press GENERATE.</p>';
+    // "Press GENERATE" is no help when GENERATE cannot do anything: name what
+    // is missing, in the order the engineer would go and fix it.
+    const why = planBlockers(car, planRace());
+    out.innerHTML = why.length
+      ? `<p class="planwarn">${icon('warn')} <b>Nothing to build a plan from yet:</b> ${
+          why.map(esc).join(' · ')}.</p>`
+      : '<p class="hint">No plan yet — press GENERATE.</p>';
     return;
   }
   const drvOf = id => car.drivers.find(d => d.id === id);
@@ -3265,14 +3327,24 @@ function renderPlan(force = false) {
   // A stint already driven is history; the running one and everything after it
   // is still the crew's to reassign, which is what the stop recommendation reads.
   const firstEditable = car.stintHistory.length;
+  const issues = planDriverIssues(car);
+  const nextIdx = plannedNextStintIndex(car, state.race, Date.now());
   const rows = plan.stints.map((s, i) => {
     const d = drvOf(s.driverId);
     const editable = i >= firstEditable;
     const dot = `<span class="dot" style="background:${DRIVER_COLORS[idxOf(s.driverId) % DRIVER_COLORS.length]}"></span>`;
     const warn = s.noNightCover ? ` <span title="no night-capable driver — flag needs attention">${icon('warn')}</span>` : '';
+    // What this row breaks in the driver table. Amber on the row itself, so a
+    // hand-edited order shows where it went wrong and not just that it did.
+    const rowBad = issues.byStint[i] || [];
+    const bad = rowBad.length
+      ? ` <span class="warn" title="${esc(rowBad.map(x => x.text).join(' · '))}">${icon('warn')}</span>`
+      : '';
     const r = pva?.rows[i];
     let actual = '<td></td><td></td>';
     let rowCls = s.night ? 'night' : '';
+    if (i === nextIdx) rowCls += ' next';
+    if (rowBad.length) rowCls += ' offplan';
     if (r?.status === 'done') {
       const ad = drvOf(r.actualDriverId);
       const dn = r.driverMismatch ? `<span class="warn">${esc(ad ? ad.name : '?')}</span>` : icon('check');
@@ -3293,9 +3365,8 @@ function renderPlan(force = false) {
       <td class="drv">${dot} ${editable
         ? `<select class="plan-drv" data-idx="${i}">${car.drivers.map(o =>
             `<option value="${o.id}"${o.id === s.driverId ? ' selected' : ''}>${esc(o.name)}</option>`).join('')}</select>`
-        : (d ? d.name.replace(/</g, '&lt;') : '?')}${s.night ? ' ' + icon('moon') : ''}${warn}</td>
+        : (d ? d.name.replace(/</g, '&lt;') : '?')}${s.night ? ' ' + icon('moon') : ''}${warn}${bad}</td>
       <td class="num">${fmtMinSec(s.toMs - s.fromMs)}</td>
-      <td class="num">${s.laps}</td>
       <td class="num">${s.fuelL != null ? s.fuelL + ' L' : '—'}</td>
       ${actual}
     </tr>`;
@@ -3323,19 +3394,40 @@ function renderPlan(force = false) {
   // point of the custom timeline fields) — label it so nobody wonders why the
   // stints overshoot the session clock.
   const customTimeline = plan.durationH != null && plan.durationH !== state.race.durationH
-    ? `<p class="hint">${icon('timer')} Planned for a <b>${plan.durationH} h</b> race starting ${new Date(plan.startMs).toLocaleString()} — the live session is ${state.race.durationH} h. Save the plan below to keep it for the real race.</p>`
+    ? `<p class="hint">${icon('timer')} Planned for a <b>${plan.durationH} h</b> race starting ${new Date(plan.startMs).toLocaleString()} — the live session is ${state.race.durationH} h. SAVE CURRENT PLAN above keeps it for the real race.</p>`
+    : '';
+
+  // Everything the order now breaks, in one line above the table — the totals
+  // pills next to it are the other half of the same reading.
+  const issueLine = issues.list.length
+    ? `<p class="planwarn">${icon('warn')} <b>The running order no longer matches the driver table:</b> ` +
+      issues.list.map(x => esc(x.text) + (!x.indexes?.length ? ''
+        : ` (stint${x.indexes.length > 1 ? 's' : ''} ${x.indexes.map(n => n + 1).join(', ')})`)).join(' · ') +
+      ' — fix it in the DRIVER column, or REPLAN REST FROM NOW.</p>'
+    : '';
+
+  // The generator hit its stint cap before the flag. Never a planning choice —
+  // a stint length this short comes from a setting, and the plan on screen is
+  // not the race, so it is said before the table rather than left to be noticed
+  // in the last row.
+  const cutLine = plan.truncated
+    ? `<p class="planwarn">${icon('warn')} <b>This plan stops at ${
+        fmtClock(plan.truncated.atMs)} of ${fmtClock(plan.truncated.totalMs)}.</b> The stints came out so short that ${
+        PLAN_STINT_CAP} of them do not reach the flag — check the tank size and the safety fuel under SETTINGS → FUEL, and the max stint time under WEAR &amp; PIT.</p>`
     : '';
 
   out.innerHTML = `
     ${customTimeline}
+    ${cutLine}
+    ${issueLine}
     ${plan.assumedStart ? `<p class="hint">${icon('warn')} No race start time set — night hours assume the race starts now (${new Date(plan.startMs).toLocaleString()}). Set a start time on the pit wall for correct night stints.</p>` : ''}
     ${driftLine}
     <div class="plan-totals">${totals}</div>
     <table class="drv-table plan-table">
-      <thead><tr><th>#</th><th>Race time</th><th>Clock</th><th>Driver</th><th>Length</th><th>Laps</th><th>Fuel</th><th>Actual</th><th>Δ end</th></tr></thead>
+      <thead><tr><th>#</th><th>Race time</th><th>Clock</th><th>Driver</th><th>Length</th><th>Fuel used</th><th>Actual</th><th>Δ end</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    <p class="hint">${plan.replanned ? 'Replanned' : 'Generated'} ${new Date(plan.generatedMs).toLocaleString()} · ${plan.stints.length} stints. The plan is shared — every station and reconnect sees the same one. Rows: ✓/driver = as driven, Δ end = actual stop time vs plan.</p>`;
+    <p class="hint">${plan.replanned ? 'Replanned' : 'Generated'} ${new Date(plan.generatedMs).toLocaleString()} · ${plan.stints.length} stints. Each stint is a tank of fuel — it runs until the usable fuel is burnt at the driver's dry burn (only the max stint time cuts it shorter), so Fuel used is the litres the stint burns, not the fill. The plan is shared — every station and reconnect sees the same one. Rows: ✓/driver = as driven, Δ end = actual stop time vs plan.</p>`;
 }
 
 // ---- stint sheet (actual stints, from history + the running stint) ----
@@ -3711,9 +3803,24 @@ function render() {
   $('now-driver').textContent = drvNow ? drvNow.name : '—';
   $('stint-time').textContent = fmtMinSec(c.stintElapsedMs);
   $('stint-time').className = 'num' + (c.msDriverLeft < 5 * 60e3 ? ' crit' : c.msDriverLeft < 10 * 60e3 ? ' warn' : '');
+  // Under a red flag the stint clock stands still with the field: the tag
+  // says why the number is not moving.
+  $('stint-held').hidden = !c.stintHeld;
   $('stint-max').textContent = car.config.maxStintMin + ' min';
   $('now-fuel').textContent = c.clock.running ? fmtMinSec(fuelTick(c.msToSafety)) : '—';
   $('now-fuel').className = 'num' + (c.lapsToEmpty <= 3 ? ' crit' : c.lapsToEmpty <= 8 ? ' warn' : '');
+  // The hour the car is due in the lane under green: the same binding limit the
+  // alert chip counts down, laid on the wall clock so the crew reads a time of
+  // day and not a countdown. The limit stops at the safety fuel level, so this
+  // hour is the stop itself, not the moment the tank runs dry. Nothing to name
+  // once the limit falls beyond the flag — that stint runs to the end.
+  const gsEl = $('now-greenstop');
+  const stopDue = c.clock.running && c.limit.ms < c.clock.remainingMs;
+  gsEl.textContent = stopDue
+    ? new Date(now + c.limit.ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
+    : '—';
+  gsEl.className = 'num' + (!stopDue ? ''
+    : c.limit.ms < 5 * 60e3 ? ' crit' : c.limit.ms < 15 * 60e3 ? ' warn' : '');
   $('now-tyres').textContent = c.tyreLapsLeft + ' laps';
   $('now-tyres').className = 'num' + (c.tyreLapsLeft <= 3 ? ' crit' : c.tyreLapsLeft <= 8 ? ' warn' : '');
   // The alert chip carries exactly one message: the binding limit.
@@ -3804,9 +3911,11 @@ function renderPlanner(car, c, now) {
   }
 
   // ---- does the wall carry a column for this situation? Two neutralisation
-  // columns that say the same thing are width the crew cannot spare, so the
-  // engineer can take one down. Green never offers the switch: the planned
-  // stop is what the whole card is built around.
+  // columns that say the same thing are width the crew cannot spare — and the
+  // wall never folds them together on its own, because a column that comes and
+  // goes with what a plan happens to say reads as news across the garage. So it
+  // is the engineer who takes one down. Green never offers the switch: the
+  // planned stop is what the whole card is built around.
   const wallEl = $('plan-wall');
   const onWall = wallShowsPlan(car, tab);
   wallEl.classList.toggle('hidden', tab === 'green');
@@ -3876,7 +3985,26 @@ function renderPlanner(car, c, now) {
   // ---- the four lines, every option on screen
   const lines = planLineData(car, c, plan, r, pinned);
   const key = JSON.stringify([lines.map(l => [l.v, l.n, l.pinned, l.sel]), tab, pickSetOpen, pickBrakeOpen, live]);
-  if (key !== planLinesKey) {
+  // The notes underneath carry live figures — litres still to add, a seat-time
+  // countdown, hours left on the pads — so the key moves on nearly every tick,
+  // and rebuilding the lines throws away whatever field the engineer has their
+  // hands on. The hand-typed fuel figure could not be typed at all: every
+  // keystroke landed in a box that was replaced a second later. While a field
+  // in here holds focus the lines are left standing and only their live text is
+  // refreshed in place; the rebuild waits until the field is let go. Buttons
+  // take focus themselves, so a pin still redraws the moment it is pressed.
+  const typing = document.activeElement;
+  if (typing && typing.tagName === 'INPUT' && $('plan-lines').contains(typing)) {
+    planLinesKey = ''; // whatever else moved is drawn once the field is let go
+    $('plan-lines').querySelectorAll(':scope > .pline').forEach((el, i) => {
+      const l = lines[i];
+      if (!l) return;
+      const v = el.querySelector(':scope > .top > .kv2 > .v');
+      const n = el.querySelector(':scope > .top > .kv2 > .n');
+      if (v && v.innerHTML !== l.v) v.innerHTML = l.v;
+      if (n && n.innerHTML !== l.n) n.innerHTML = l.n;
+    });
+  } else if (key !== planLinesKey) {
     planLinesKey = key;
     $('plan-lines').innerHTML = lines.map(l => `
       <div class="pline ${l.pinned ? 'pinned' : ''} ${l.quiet ? 'quiet' : ''}">
@@ -4036,6 +4164,44 @@ function planLineData(car, c, plan, r, pinned) {
 
   const drv = car.drivers.find(d => d.id === r.driverChange);
   const drvPin = pinned.driver || null;
+  // The GREEN plan is the stint plan's running order: a driver called for here
+  // has already been moved up in it, so the line says so rather than letting
+  // the engineer find out by opening the plan. Anything the order now breaks
+  // is carried back to the same line — the warning belongs where the call is
+  // made, not only in a modal nobody has open — and it is shown on all three
+  // tabs, because a broken running order is broken whatever flag is flying.
+  const planIssues = car.plan?.stints?.length ? planDriverIssues(car) : null;
+  let drvNote = plan.driver.why;
+  if (planTab === 'green' && drvPin) {
+    drvNote = drvPin === 'stay'
+      ? 'written into the stint plan as a double stint'
+      : 'moved up in the stint plan — the order behind it slides one stint back';
+  }
+  if (planIssues) {
+    // What is wrong with THIS stop's stint, and what is wrong with the crew's
+    // race as a whole, said in full — those are the engineer's to answer now.
+    // A fault ten stints away is not: it is counted, so the card admits the
+    // order is broken, and reading it is a trip into the plan.
+    const at = plannedNextStintIndex(car, state.race, Date.now());
+    const here = [...new Set([
+      ...(planIssues.byStint[at] || []).map(x => x.text),
+      ...planIssues.list.filter(x => x.index == null).map(x => x.text)
+    ])];
+    const later = new Set();
+    for (const x of planIssues.list) {
+      if (here.includes(x.text)) continue;
+      for (const i of x.indexes || []) later.add(i);
+    }
+    const more = (here.length - 1) + (later.size ? 1 : 0);
+    if (here.length) {
+      drvNote += ` · <span class="warn">${icon('warn')} ${esc(here[0])}${
+        more > 0 ? ` · +${more} more in the stint plan` : ''}</span>`;
+    } else if (later.size) {
+      drvNote += ` · <span class="warn">${icon('warn')} ${later.size} later stint${
+        later.size === 1 ? '' : 's'} no longer match${
+        later.size === 1 ? 'es' : ''} the driver table</span>`;
+    }
+  }
   // The app's pick and "stays in" cover the normal calls; everyone else who
   // could take the car gets their own button, so a swap is one tap. The driver
   // already in the car is not offered — that is what STAYS IN means.
@@ -4090,7 +4256,7 @@ function planLineData(car, c, plan, r, pinned) {
     {
       id: 'driver', k: 'DRIVER', icon: 'driver', pinned: !!drvPin, quiet: !drv,
       v: drv ? `→ ${esc(drv.name)}` : 'STAYS IN',
-      n: plan.driver.why,
+      n: drvNote,
       sel: [!drvPin ? 'auto' : drvPin],
       opts: drvOpts
     },
@@ -4366,7 +4532,9 @@ function renderBrakes(c) {
 // widen it to read consistency over a stint, drop it to two or three laps
 // when the track is changing and only the newest laps mean anything.
 // The window follows the DRIVER, not the stint — a driver getting back in
-// keeps the laps they did earlier in the race.
+// keeps the laps they did earlier in the race. N counts LAPS THAT COUNT:
+// a lap over 107% of the average is struck through and replaced by an
+// older one, so the in-lap never lands in the number the crew calls.
 const PACE_STRIP_MAX = 10; // chips shown; anything older is counted, not drawn
 
 function renderPace(car) {
@@ -4376,14 +4544,21 @@ function renderPace(car) {
   $('pace-driver').textContent = drv ? drv.name : 'no driver';
   setInput($('pace-laps'), n);
   $('pace-avg').textContent = fmtLap(p.avgSec);
-  $('pace-count').textContent = `${p.laps.length} of ${p.total}`;
+  $('pace-count').textContent = `${p.counted} of ${p.total}`;
 
-  // Last lap against the window average — the number the crew actually calls.
+  // The last lap against the window average — the number the crew actually
+  // calls. When the newest lap was struck through (the in-lap, a yellow) the
+  // row falls back to the last lap that counted and says so, rather than
+  // calling a four-minute pit lap as this driver's pace.
+  $('pace-last-k').textContent = p.lastIsOut ? 'Last counted lap · vs average' : 'Last lap · vs average';
+  $('pace-last-k').title = p.lastIsOut
+    ? `the newest lap was a ${fmtLap(p.lastRawSec)} and is not representative`
+    : '';
   $('pace-last').textContent = fmtLap(p.lastSec);
   const dEl = $('pace-delta');
   // With a single lap in the window the lap IS the average; a "+0.0" there
   // would read as a measurement rather than as the tautology it is.
-  if (p.avgSec != null && p.lastSec != null && p.laps.length > 1) {
+  if (p.avgSec != null && p.lastSec != null && p.counted > 1) {
     const d = p.lastSec - p.avgSec;
     dEl.textContent = `${d >= 0 ? '+' : '−'}${Math.abs(d).toFixed(1)}`;
     dEl.className = 'dlt' + (d <= -0.1 ? ' fast' : d >= 0.1 ? ' slow' : '');
@@ -4396,12 +4571,13 @@ function renderPace(car) {
     ? `${fmtLap(p.bestSec)} · ${fmtLap(p.worstSec)}`
     : '—';
 
-  // An in-lap, an out-lap or a lap spent behind traffic drags the plain
-  // average down a tenth or more, so say what the window is worth without
-  // them — but only when the window actually holds one.
-  const cleanRow = $('pace-clean-row');
-  cleanRow.hidden = p.cleanAvgSec == null;
-  if (p.cleanAvgSec != null) $('pace-clean').textContent = fmtLap(p.cleanAvgSec);
+  // What the window threw away, and the time a lap had to beat to count —
+  // so a headline average that just jumped is explained on the same card.
+  const struckRow = $('pace-struck-row');
+  struckRow.hidden = !p.ignored;
+  if (p.ignored) {
+    $('pace-struck').textContent = `${p.ignored} lap${p.ignored === 1 ? '' : 's'} over ${fmtLap(p.cutSec)}`;
+  }
 
   const strip = $('pace-strip');
   if (!p.laps.length) {
@@ -4417,11 +4593,11 @@ function renderPace(car) {
     const cls = out ? ' out' : d <= -0.1 ? ' fast' : d >= 0.1 ? ' slow' : '';
     const last = idx === p.laps.length - 1 ? ' now' : '';
     const title = out
-      ? 'off the window median — in/out lap, traffic or a neutralisation'
+      ? `over ${fmtLap(p.cutSec)} — in/out lap, traffic or a neutralisation, in no figure on this card`
       : `${d >= 0 ? '+' : '−'}${Math.abs(d).toFixed(1)} on the average`;
     return `<span class="lap${cls}${last}" title="${title}">${fmtLap(t)}</span>`;
   });
-  if (hidden > 0) cells.unshift(`<span class="more" title="in the average, not drawn">+${hidden}</span>`);
+  if (hidden > 0) cells.unshift(`<span class="more" title="in the window, not drawn">+${hidden}</span>`);
   strip.innerHTML = cells.join('');
 }
 
@@ -4487,87 +4663,122 @@ function fmtPitSec(sec) {
   return sec < 120 ? `${Math.round(sec)}s` : fmtMinSec(sec * 1000);
 }
 
-// Pit stops on the timeline: a marker on the bar at every stop, and above it
-// what the visit costs in the pit lane — the point of the panel that the bare
-// stint blocks could not say, since two stints simply abut where a stop was.
+// The pit lane on the timeline: a block on the bar for every visit — lane
+// entry to release — and above it what the visit costs, the point of the
+// panel that the bare stint blocks could not say. The block is the marker:
+// a 60 s stop is one pixel wide on a 24 h bar, so it keeps a minimum width
+// and the chip above carries the real figure.
 //
-// Which stops carry a figure is a question of what is actually known:
+// Which blocks carry a figure is a question of what is actually known:
 //   done   — what the feed timed in the lane, or the planned figure when the
 //            stop was applied by hand and nobody timed it
+//   live   — the car is in the lane now: the seconds so far, ticking
 //   next   — the estimate the plan card quotes for the stop being planned
 //   later  — nothing. No service is planned against them yet, so any number
-//            would be invented; they stay markers.
-function drawStops(parts, car, race, clock, blocks, x, geo) {
+//            would be invented; they stay blocks.
+function drawLanes(parts, blocks, x, geo) {
   const { W, barY, barH, stopY, stopH } = geo;
-  const stops = [];
-
-  car.stintHistory.forEach((h, i) => {
-    const at = h.endMs - race.startMs;
-    if (!(at > 0) || at >= clock.totalMs) return;
-    const sec = h.pitSec != null ? h.pitSec : h.estStationarySec;
-    // A stop the app logged because it happened, with nothing planned against
-    // it and nobody having said yet what was done, is drawn in amber: it IS on
-    // the sheet — that is the point — but the service behind it is still blank.
-    const open = !!h.unplanned && !h.confirmed;
-    stops.push({
-      at, done: true, open, sec: sec > 0 ? sec : null,
-      note: `Stop ${i + 1} · ${new Date(h.endMs).toLocaleTimeString()} · ` +
-        (h.pitSec != null
-          ? `${h.pitSec} s in the lane, ${h.stationarySec} s stationary`
-          : sec > 0
-            ? `${Math.round(sec)} s planned — the feed did not time this stop`
+  const lanes = blocks.filter(b => b.kind === 'lane').map(b => {
+    const bx = x(b.from), bw = Math.max(6, x(b.to) - bx);
+    let txt = '', note;
+    if (b.done) {
+      txt = b.sec > 0 ? fmtPitSec(b.sec) : '';
+      // A stop the app logged because it happened, with nothing planned
+      // against it and nobody having said yet what was done, is drawn in
+      // amber: it IS on the sheet — that is the point — but the service
+      // behind it is still blank.
+      note = `Stop ${b.stint + 1} · ${new Date(state.race.startMs + b.to).toLocaleTimeString()} · ` +
+        (b.pitSec != null
+          ? `${b.pitSec} s in the lane, ${b.stationarySec} s stationary`
+          : b.sec > 0
+            ? `${Math.round(b.sec)} s planned — the feed did not time this stop`
             : 'not timed') +
-        (open ? ' — nothing was planned, nobody has said what was done' : '')
-    });
+        (b.open ? ' — nothing was planned, nobody has said what was done' : '');
+    } else if (b.live) {
+      txt = fmtPitSec(b.sec);
+      note = `In the lane now — ${Math.round(b.sec)} s so far`;
+    } else if (b.next && nextStopLaneSec > 0) {
+      txt = '~' + fmtPitSec(nextStopLaneSec);
+      note = `Next stop — about ${Math.round(nextStopLaneSec)} s in the lane on this plan`;
+    } else {
+      note = 'Projected stop — nothing planned against it yet';
+    }
+    return { ...b, bx, bw, cx: bx + bw / 2, txt, note,
+      col: b.open ? 'var(--amber)' : 'var(--tl-lane)', solid: b.done || b.live };
   });
 
-  blocks.forEach((b, bi) => {
-    // A block handing over to the next one is a stop. The current→projected
-    // pair is the NOW line cutting ONE stint in two, not a visit to the lane,
-    // and the last block ends on the flag with nothing after it.
-    if ((b.kind !== 'projected' && b.kind !== 'future') || !blocks[bi + 1]) return;
-    const sec = b.kind === 'projected' && nextStopLaneSec > 0 ? nextStopLaneSec : null;
-    stops.push({
-      at: b.to, done: false, sec,
-      note: sec
-        ? `Next stop — about ${Math.round(sec)} s in the lane on this plan`
-        : 'Projected stop — nothing planned against it yet'
-    });
-  });
-  stops.sort((a, b) => a.at - b.at);
-
-  // Every marker first, then the chips: a chip must never be cut by the line
+  // Every block first, then the chips: a chip must never be cut by the block
   // of the stop after it.
-  for (const s of stops) {
-    const px = x(s.at);
-    const col = s.open ? 'var(--amber)' : 'var(--red)';
-    parts.push(`<g><title>${esc(s.note)}</title>` +
-      `<line x1="${px}" y1="${barY - 3}" x2="${px}" y2="${barY + barH + 3}" ` +
-      `style="stroke:${col}" stroke-width="${s.open ? 3 : 2}" stroke-linecap="round"${s.done ? '' : ' opacity=".7"'}/></g>`);
+  for (const l of lanes) {
+    parts.push(`<g><title>${esc(l.note)}</title>` +
+      `<rect x="${l.bx}" y="${barY + 2}" width="${l.bw}" height="${barH - 4}" rx="2" style="fill:${l.col}"${l.solid ? '' : ' opacity=".55"'}/>` +
+      (l.solid ? '' : `<rect x="${l.bx}" y="${barY + 2}" width="${l.bw}" height="${barH - 4}" rx="2" fill="url(#tl-hatch)"/>`) +
+      '</g>');
   }
-
   let lastRight = -Infinity;
-  for (const s of stops) {
-    if (!(s.sec > 0)) continue;
-    const px = x(s.at);
-    const col = s.open ? 'var(--amber)' : 'var(--red)';
-    const txt = (s.done ? '' : '~') + fmtPitSec(s.sec);
-    const cw = txt.length * 7 + 12;
-    const cx = Math.min(Math.max(px - cw / 2, 1), W - cw - 1);
-    // On a crowded bar the chips are dropped, not shuffled: the marker still
+  for (const l of lanes) {
+    if (!l.txt) continue;
+    const cw = l.txt.length * 7 + 12;
+    const cx = Math.min(Math.max(l.cx - cw / 2, 1), W - cw - 1);
+    // On a crowded bar the chips are dropped, not shuffled: the block still
     // says where the stop is, and a row of overlapping times says nothing.
     if (cx < lastRight + 4) continue;
     lastRight = cx + cw;
-    const box = s.done
-      ? `style="fill:${col}"`
-      : `style="fill:var(--panel);stroke:${col}" stroke-width="1.5" stroke-dasharray="3 2"`;
-    parts.push(`<g><title>${esc(s.note)}</title>` +
-      `<path d="M ${cx + cw / 2} ${stopY + stopH} L ${px} ${barY}" fill="none" style="stroke:${col}" stroke-width="1" opacity=".5"/>` +
+    const box = l.solid
+      ? `style="fill:${l.col}"`
+      : `style="fill:var(--panel);stroke:${l.col}" stroke-width="1.5" stroke-dasharray="3 2"`;
+    parts.push(`<g><title>${esc(l.note)}</title>` +
+      `<path d="M ${cx + cw / 2} ${stopY + stopH} L ${l.cx} ${barY}" fill="none" style="stroke:${l.col}" stroke-width="1" opacity=".5"/>` +
       `<rect x="${cx}" y="${stopY}" width="${cw}" height="${stopH}" rx="4" ${box}/>` +
       `<text x="${cx + cw / 2}" y="${stopY + stopH - 5}" text-anchor="middle" font-size="11" font-weight="700" ` +
-      `style="fill:${s.done ? 'var(--bg)' : col}">${txt}</text></g>`);
+      `style="fill:${l.solid ? 'var(--bg)' : l.col}">${l.txt}</text></g>`);
   }
-  return stops.some(s => s.open);
+  return lanes.some(l => l.open);
+}
+
+// What the flag row calls each condition. Code 60 and a full course yellow
+// are the same thing to the strategy (one neutralised pace), so they share a
+// name on the bar; the safety car is the one to tell apart.
+const FLAG_LABELS = { sc: 'SC', fcy: 'FCY', code60: 'FCY', red: 'RED' };
+
+// A flag period's length the way the row says it: minutes, hours past sixty.
+function fmtFlagLen(ms) {
+  const m = Math.max(1, Math.round(ms / 60e3));
+  return m >= 60 ? `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}` : `${m}m`;
+}
+
+// Flag periods on the bar: a row of their own above the stop chips with one
+// band per period, coloured as the top bar flashes it (SC / FCY in the
+// condition yellow, the red flag red) and labelled with type and length; on
+// a crowded bar the label drops and the band stays, with everything on
+// hover. A neutralisation also tints the bar through its whole height, so a
+// stop under the safety car reads as a lane block inside a yellow band. A
+// red flag needs no tint — the stint blocks are cut into a red block where
+// it fell. A period still running ends at the NOW line.
+function drawFlags(parts, flags, x, geo) {
+  const { barY, barH, flagY, flagH } = geo;
+  let lastRight = -Infinity;
+  for (const f of flags) {
+    const col = f.id === 'red' ? 'var(--red)' : 'var(--cond-yellow)';
+    const fx = x(f.from), fw = Math.max(3, x(f.to) - fx);
+    if (f.id !== 'red') {
+      parts.push(`<g><title>${esc(f.note)}</title>` +
+        `<rect x="${fx}" y="${barY}" width="${fw}" height="${barH}" style="fill:${col}" opacity=".2"/>` +
+        `<line x1="${fx}" y1="${barY}" x2="${fx}" y2="${barY + barH}" style="stroke:${col}" stroke-width="1" opacity=".7"/>` +
+        (f.open ? '' : `<line x1="${fx + fw}" y1="${barY}" x2="${fx + fw}" y2="${barY + barH}" style="stroke:${col}" stroke-width="1" opacity=".7"/>`) +
+        '</g>');
+    }
+    const txt = `${FLAG_LABELS[f.id]} ${fmtFlagLen(f.to - f.from)}`;
+    const tw = txt.length * 6.6 + 8;
+    const inside = fw >= tw;
+    const lx = inside ? fx + fw / 2 : fx + fw + 4;
+    const drop = !inside && lx < lastRight + 6;
+    parts.push(`<g><title>${esc(f.note)}</title>` +
+      `<rect x="${fx}" y="${flagY}" width="${fw}" height="${flagH}" rx="3" style="fill:${col}"/>` +
+      (drop ? '' : `<text x="${lx}" y="${flagY + flagH - 4}" text-anchor="${inside ? 'middle' : 'start'}" font-size="11" font-weight="700" ` +
+        `style="fill:${inside ? 'var(--bg)' : col}">${txt}</text>`) + '</g>');
+    lastRight = Math.max(lastRight, inside || drop ? fx + fw : lx + tw);
+  }
 }
 
 function renderTimeline(car, now) {
@@ -4577,13 +4788,13 @@ function renderTimeline(car, now) {
   // Draw in real pixels (viewBox = client size): a fixed 1000-unit canvas
   // stretched to the panel width distorts everything, most visibly the text.
   // Fallback size covers the svg being display:none while another tab is up.
-  const W = svg.clientWidth || 1000, H = svg.clientHeight || 172;
-  // Vertical budget above the bar: the axis labels along the top, then the
-  // pit-stop lane — a stop is the one event on this bar that has to be read
-  // off it without counting blocks, so it gets a row of its own. Below the
-  // bar: the NOW pill and the glyph legend. 104 = both ends together.
-  const tickY = 13, stopY = 24, stopH = 18;
-  const barY = 58, barH = H - 104;
+  const W = svg.clientWidth || 1000, H = svg.clientHeight || 190;
+  // Vertical budget above the bar: the axis labels along the top, the flag
+  // row, then the pit-stop chips — a stop is the one event on this bar that
+  // has to be read off it without counting blocks, so it gets a row of its
+  // own. Below the bar: the NOW pill and the glyph legend. 118 = all of it.
+  const tickY = 13, flagY = 23, flagH = 15, stopY = 45, stopH = 18;
+  const barY = 72, barH = H - 118;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   const x = ms => (ms / clock.totalMs) * W;
   let parts = [];
@@ -4643,23 +4854,35 @@ function renderTimeline(car, now) {
     const labels = [];
     const blocks = projectStints(car, race, now)
       .map(b => ({ ...b, from: Math.max(0, b.from), to: Math.min(clock.totalMs, b.to) }))
-      .filter(b => b.to > b.from);
+      // A lane block keeps its place even at zero length (no pit loss
+      // configured): it is the stop marker, and a stop is never nothing.
+      .filter(b => b.kind === 'lane' ? b.to >= b.from : b.to > b.from);
+    // The laps figure reads once per stint, in its widest piece — a stint is
+    // two pieces when NOW cuts it, more when a red flag did.
+    const widest = {};
+    blocks.forEach((b, i) => {
+      if (b.kind === 'lane' || b.kind === 'red') return;
+      const w = blocks[widest[b.stint]];
+      if (!w || b.to - b.from > w.to - w.from) widest[b.stint] = i;
+    });
+    const clockAt = ms => new Date(race.startMs + ms).toLocaleTimeString();
     blocks.forEach((b, bi) => {
+      if (b.kind === 'lane') return;
       const bx = x(b.from), bw = Math.max(1, x(b.to) - x(b.from) - 1);
+      if (b.kind === 'red') {
+        const note = `Red flag · ${clockAt(b.from)} – ${b.open ? 'still out' : clockAt(b.to)} · ` +
+          `${fmtFlagLen(b.to - b.from)} · the stint clock stood still`;
+        parts.push(`<g><title>${esc(note)}</title>` +
+          `<rect x="${bx}" y="${barY + 2}" width="${bw}" height="${barH - 4}" style="fill:var(--red)" opacity=".85" rx="2"/></g>`);
+        return;
+      }
       const di = (driverIdx[b.driverId] ?? 0) % DRIVER_COLORS.length;
       const color = DRIVER_COLORS[di];
       // The driver's tag inside the block, when it fits: reading the bar must
       // not require decoding the colour legend from the DRIVERS table.
       const ab = b.driverId != null ? esc(driverAbbrev(car.drivers[driverIdx[b.driverId]] || {})) : '';
       // Proposed laps for the stint (to the safety fuel level, or the flag).
-      // The running stint is drawn as two blocks that share one figure — the
-      // laps line goes in the wider half so it reads once, not twice.
-      let laps = b.laps > 0 ? b.laps : null;
-      if (laps != null && (b.kind === 'current' || b.kind === 'projected')) {
-        const twin = b.kind === 'current' ? blocks[bi + 1] : blocks[bi - 1];
-        if (twin && (twin.kind === 'current' || twin.kind === 'projected') &&
-            Math.max(1, x(twin.to) - x(twin.from) - 1) > bw) laps = null;
-      }
+      const laps = widest[b.stint] === bi && b.laps > 0 ? b.laps : null;
       const lapsTxt = laps != null ? `${laps} laps` : '';
       const abFits = ab && bw > ab.length * 8 + 10;
       const lapsFits = lapsTxt && bw > lapsTxt.length * 6 + 8;
@@ -4684,8 +4907,25 @@ function renderTimeline(car, now) {
         label('style="fill:var(--text)"', '.7', '.6');
       }
     });
+
+    // Flag periods, clipped to the race: the neutralisations tint the bar
+    // under the labels and lane blocks, then the row above carries them all.
+    const flags = flagPeriods(race, now)
+      .filter(p => p.id !== 'finish')
+      .map(p => ({ ...p, from: Math.max(0, p.fromMs - race.startMs), to: Math.min(clock.totalMs, p.toMs - race.startMs) }))
+      .filter(p => p.to > p.from)
+      .map(p => {
+        const under = blocks.some(b => b.kind === 'lane' && b.done && b.to > p.from && b.from < p.to);
+        const name = { sc: 'Safety car', fcy: 'Full course yellow', code60: 'Code 60', red: 'Red flag' }[p.id] || p.id;
+        return { ...p, note: `${name} · ${clockAt(p.from)} – ${p.open ? 'still out' : clockAt(p.to)} · ${fmtFlagLen(p.to - p.from)}` +
+          ` · ${p.source === 'feed' ? 'from the feed' : 'called by hand'}` + (under ? ' · we stopped under it' : '') };
+      });
+    const geo = { W, barY, barH, stopY, stopH, flagY, flagH };
+    drawFlags(parts, flags.filter(f => f.id !== 'red'), x, geo);
     parts.push(...labels);
-    const openStops = drawStops(parts, car, race, clock, blocks, x, { W, barY, barH, stopY, stopH });
+    const openStops = drawLanes(parts, blocks, x, geo);
+    // The red bands go up last: their block on the bar is already drawn.
+    drawFlags(parts, flags.filter(f => f.id === 'red'), x, geo);
     // Plan overlay: amber markers where the shared stint plan expects each
     // stop, so plan-vs-projection divergence is visible at a glance.
     if (car.plan?.stints?.length) {
@@ -4713,11 +4953,13 @@ function renderTimeline(car, now) {
     const curColor = DRIVER_COLORS[(driverIdx[car.currentDriverId] ?? 0) % DRIVER_COLORS.length];
     leg(`<rect x="${lx}" y="${gy}" width="14" height="9" rx="2" style="fill:${curColor}"/>`, 'driven');
     leg(`<rect x="${lx}" y="${gy}" width="14" height="9" rx="2" style="fill:${curColor}" opacity=".4"/><rect x="${lx}" y="${gy}" width="14" height="9" rx="2" fill="url(#tl-hatch)"/>`, 'projected');
-    leg(`<line x1="${lx + 7}" y1="${gy - 2}" x2="${lx + 7}" y2="${gy + 11}" style="stroke:var(--red)" stroke-width="2" stroke-linecap="round"/>`,
-      'pit stop · time in the lane above');
+    leg(`<rect x="${lx + 4}" y="${gy - 1}" width="6" height="11" rx="1.5" style="fill:var(--tl-lane)"/>`, 'in the pit lane · time above');
     if (openStops)
-      leg(`<line x1="${lx + 7}" y1="${gy - 2}" x2="${lx + 7}" y2="${gy + 11}" style="stroke:var(--amber)" stroke-width="3" stroke-linecap="round"/>`,
-        'stop nobody has said what was done at');
+      leg(`<rect x="${lx + 4}" y="${gy - 1}" width="6" height="11" rx="1.5" style="fill:var(--amber)"/>`, 'stop nobody has said what was done at');
+    if (flags.some(f => f.id !== 'red'))
+      leg(`<rect x="${lx}" y="${gy}" width="14" height="9" rx="2" style="fill:var(--cond-yellow)"/>`, 'SC · FCY');
+    if (flags.some(f => f.id === 'red'))
+      leg(`<rect x="${lx}" y="${gy}" width="14" height="9" rx="2" style="fill:var(--red)"/>`, 'red flag · stint clock held');
     if (car.plan?.stints?.length)
       leg(`<path d="M ${lx + 2.5} ${gy} l 4.5 8 l 4.5 -8 z" style="fill:var(--amber)"/>`, 'plan');
     if (nightBands.length)

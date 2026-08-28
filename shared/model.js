@@ -132,6 +132,34 @@ export function raceCondition(race, timingFlag = null) {
   return { ...RACE_CONDITIONS.green, source: 'none', overridden: false, feedId: null };
 }
 
+// Every non-green condition the race has seen, oldest first, as the server
+// logged them: { id, fromMs, toMs, source }. A period still running has no
+// toMs on the log; here it reads as running to `now` (open-ended when no
+// `now` is given), so callers never meet a null end.
+export function flagPeriods(race, now = Infinity) {
+  return (race?.flagLog || [])
+    .filter(p => p && p.fromMs > 0 && RACE_CONDITIONS[p.id])
+    .map(p => ({ ...p, toMs: p.toMs ?? now, open: p.toMs == null }));
+}
+
+// Milliseconds of [fromMs, toMs] that fell under a red flag. The field stood
+// still for them, so nothing that counts driving — the stint clock, seat
+// time, brake hours — may count them.
+export function heldMs(race, fromMs, toMs) {
+  let held = 0;
+  for (const p of flagPeriods(race)) {
+    if (p.id !== 'red') continue;
+    held += Math.max(0, Math.min(toMs, p.toMs) - Math.max(fromMs, p.fromMs));
+  }
+  return held;
+}
+
+// Time driven between two instants: the wall-clock span less the red flags.
+export function drivenMs(race, fromMs, toMs) {
+  if (!(toMs > fromMs)) return 0;
+  return toMs - fromMs - heldMs(race, fromMs, toMs);
+}
+
 // Event-level settings: values that are by nature the same for every car in
 // the race (track properties and event regulations). They are edited on the
 // pit wall only; the server mirrors them into every car's config so all
@@ -489,8 +517,12 @@ export function generateTyreSets(car, opts = {}) {
 export function setTyreSetNames(car, names, { replaceUnused = false, skipExisting = false } = {}) {
   const existing = (car.tyreSets || []).map(t => ({ ...t }));
   const curId = car.state?.currentTyreSetId;
+  // A file naming a set that is already on the rack is talking about that set,
+  // so it survives the sweep with its own id — a stop, a plan or a warmer
+  // pointing at it must not find itself pointing at nothing after a load.
+  const named = skipExisting ? new Set(names) : new Set();
   const keep = replaceUnused
-    ? existing.filter(t => t.used || t.scrapped || t.id === curId)
+    ? existing.filter(t => t.used || t.scrapped || t.id === curId || named.has(t.name))
     : existing;
   const kept = new Set(keep.map(t => t.name));
   const duplicates = names.filter(n => kept.has(n));
@@ -852,8 +884,11 @@ export function generateBrakeSets(car, opts = {}) {
 export function setBrakeSetNames(car, comp, names, { replaceUnused = false, skipExisting = false } = {}) {
   const existing = brakeSetsOf(car, comp).map(t => ({ ...t }));
   const curId = car.state?.currentBrakeSetId?.[comp];
+  // As on the tyre rack: a part number the file lists is a part the car has,
+  // and it keeps its id (and whatever kit it is bedded into).
+  const named = skipExisting ? new Set(names) : new Set();
   const keep = replaceUnused
-    ? existing.filter(t => t.used || t.scrapped || t.id === curId)
+    ? existing.filter(t => t.used || t.scrapped || t.id === curId || named.has(t.name))
     : existing;
   const kept = new Set(keep.map(t => t.name));
   const duplicates = names.filter(n => kept.has(n));
@@ -1275,6 +1310,76 @@ export function stopBrakeAxle(car, axleId, stop) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Re-stocking the racks for a new race
+// ---------------------------------------------------------------------------
+// A reset is a new race, not a new team — and the racks belong to the team. The
+// crew books the allocation in by the numbers written on the rubber, marks
+// which sets are wets and beds the pads onto the discs; none of that is race
+// data, and re-seeding S1..S12 over it at the start of every session throws
+// away work that was done in the garage, off a car file or over the rack page.
+//
+// So a reset re-stocks rather than rebuilds: the same sets, same ids, same
+// names, same compounds, same kits — with everything the last race wrote on
+// them (mileage, hours, which ones have run) wiped off. A set the crew binned
+// stays binned: a flat-spotted tyre is not made round by a session change, and
+// one tap on the rack page restores it if the shelf really did get restocked.
+export function restockRacks(car) {
+  const carry = (fresh, old) => {
+    fresh.scrapped = !!old.scrapped;
+    fresh.scrapReason = fresh.scrapped ? (old.scrapReason || null) : null;
+    return fresh;
+  };
+  // The rubber.
+  const tyres = (car.tyreSets || []).map(t => carry(newTyreSet(t.id, t.name, tyreCompoundOf(t)), t));
+  car.tyreSets = tyres.length ? tyres : defaultTyreSets(car.config?.tyreSets || 12);
+  const onCar = car.tyreSets.find(t => !t.scrapped) || car.tyreSets[0];
+  onCar.used = true;
+  onCar.scrapped = false;
+  onCar.scrapReason = null;
+  car.state.currentTyreSetId = onCar.id;
+
+  // The brakes, kits and all: which pads sit on which discs is how the parts
+  // are laid out on the shelf, not something the last race decided.
+  const rack = {};
+  for (const b of BRAKE_COMPONENTS) {
+    const sets = brakeSetsOf(car, b.id).map(t => {
+      const fresh = carry(newBrakeSet(t.id, t.name, b.id), t);
+      if (isDiscComponent(b.id)) {
+        fresh.padSetId = t.padSetId || null;
+        fresh.kitName = t.kitName || null;
+      }
+      return fresh;
+    });
+    rack[b.id] = sets.length ? sets : defaultBrakeSets(b.id, car.config?.brakeSets?.[b.id]);
+  }
+  car.brakeSets = rack;
+  car.state.currentBrakeSetId = {};
+  // The car starts on a whole kit where the rack has one — fitting the first
+  // disc and the first pad independently could put a marriage on the car that
+  // the shelf says does not exist.
+  for (const a of BRAKE_AXLES) {
+    const kit = brakeKitsOf(car, a.id).find(k => !k.scrapped);
+    const disc = kit?.disc || rack[a.discs].find(t => !t.scrapped) || rack[a.discs][0];
+    const pad = kit?.pad || rack[a.pads].find(t => !t.scrapped) || rack[a.pads][0];
+    for (const [comp, set] of [[a.discs, disc], [a.pads, pad]]) {
+      set.used = true;
+      set.scrapped = false;
+      set.scrapReason = null;
+      car.state.currentBrakeSetId[comp] = set.id;
+    }
+  }
+
+  // The boxes stay — they are the garage's too — but a reset empties them,
+  // since nothing on the rack is hot any more.
+  for (const w of car.tyreWarmers || []) w.setId = null;
+
+  reconcileTyreSets(car);
+  reconcileTyreWarmers(car);
+  reconcileBrakeSets(car);
+  return car;
+}
+
 export function defaultDriver(n) {
   return {
     id: 'd' + n,
@@ -1634,7 +1739,7 @@ export function startFuelOf(car) {
 // event by somebody who never opens the app.
 
 export const CAR_FILE_KIND = 'pitwall-24h.car';
-export const CAR_FILE_VERSION = 1;
+export const CAR_FILE_VERSION = 2; // v2 adds the tyre rack's compounds
 export const CAR_FILE_EXT = 'pitcar.json';
 
 // Printed into every file, so the thing explains itself when it is opened
@@ -1642,8 +1747,9 @@ export const CAR_FILE_EXT = 'pitcar.json';
 export const CAR_FILE_README =
   'PitWall 24H car file. Everything in here belongs to this one car and is applied to ' +
   'whichever car slot it is loaded into: car identity, fuel model, pace, wear figures, ' +
-  'the driver table, the tyre/brake racks and how many tyre warmers the garage ' +
-  'has. Event settings (track length, pit lane, ' +
+  'the driver table, the tyre rack (set numbers and which of them are wets), the ' +
+  'brake rack with its kits, and how many tyre warmers the garage has. Event ' +
+  'settings (track length, pit lane, ' +
   'refuelling rig, drive-time regulations) are deliberately NOT in this file — they are ' +
   'the same for every car and are set once on the pit wall. Values may be edited by hand; ' +
   'unknown fields are ignored and missing ones leave the car as it is. Loading never ' +
@@ -1746,7 +1852,15 @@ export function buildCarFile(car, { app = '', savedMs = Date.now() } = {}) {
     return out;
   });
   const tyres = car?.tyreSets || [];
-  file.tyreRack = { count: tyres.length, names: tyres.map(t => String(t?.name ?? '')) };
+  // Slicks and wets are two stocks sharing one rack, and which set is which is
+  // written on the sticker, not decided by the race — so it travels with the
+  // names. A file from before compounds existed carries none, and everything
+  // in it is a slick, which is what those sets were.
+  file.tyreRack = {
+    count: tyres.length,
+    names: tyres.map(t => String(t?.name ?? '')),
+    compounds: tyres.map(t => tyreCompoundOf(t))
+  };
   // The warmers are equipment, so how many there are and what they are called
   // travels with the car. What is in them right now is race data and does not.
   const warmers = car?.tyreWarmers || [];
@@ -1818,6 +1932,15 @@ function coerceSetting(def, v) {
 
 const FUEL_MODELS = ['driver-avg', 'driver-laptime'];
 
+// A seat exactly as the app seeded it — "Driver 3", nothing typed, nothing
+// banked, no flag touched. It carries no information about anybody.
+function isPlaceholderDriver(d) {
+  return /^Driver \d+$/.test(String(d?.name ?? '')) &&
+    !(+d?.totalMs > 0) && !d?.abbrev && !d?.timingName &&
+    !(+d?.fuelDry > 0) && !(+d?.fuelWet > 0) && !normalizeCurve(d?.fuelCurve).length &&
+    d?.doubleStint !== false && d?.night !== false && d?.rain !== false;
+}
+
 // Load a file onto a car, in place. Only settings travel: laps, mileage,
 // banked hours, seat time, the sets that have run and everything else the race
 // has written stay exactly as they are — so a file can be loaded at 3 a.m. to
@@ -1874,10 +1997,38 @@ export function applyCarFile(car, input, { identity = true } = {}) {
   // Drivers. The roster is positional — it is the seat, not the person: seat 1
   // keeps the seat time seat 1 has banked, so loading a file mid-race corrects
   // names and consumption figures without rewriting the race.
+  //
+  // A file only ever FILLS seats. The seats past the end of its list are not
+  // in it, and what a file does not mention it leaves alone: the reserve who
+  // joined on Friday is not struck off by the file written in October, and
+  // seat time is never deleted by a settings file — removing a driver is the
+  // driver table's job, with its own warning. The one seat that may go is one
+  // still exactly as the app seeded it: it says nothing, and a phantom
+  // "Driver 4" under a three-driver file is worse than no row.
   if (Array.isArray(file.drivers) && file.drivers.length) {
     const defDriver = defaultDriver(1);
-    car.drivers = file.drivers.map((d, i) => {
-      const base = car.drivers?.[i] || defaultDriver(i + 1);
+    const had = Array.isArray(car.drivers) ? car.drivers : [];
+    // An id is the seat's for life — stops and plans point at it. A seat the
+    // car never had gets an id nobody on this car has ever carried: after a
+    // remove and an add the ids are no longer 1..n, and "d5" for the fifth
+    // seat could be the id the fourth already has, which would fold two
+    // people into one everywhere a driver is looked up by id.
+    const taken = new Set(had.map(d => d?.id).filter(Boolean));
+    const seen = new Set();
+    const freshId = () => {
+      let n = 1;
+      while (taken.has('d' + n)) n++;
+      taken.add('d' + n);
+      return 'd' + n;
+    };
+    const seatId = d => {
+      let id = d?.id;
+      if (!id || seen.has(id)) id = freshId();
+      seen.add(id);
+      return id;
+    };
+    const next = file.drivers.map((d, i) => {
+      const base = had[i] || defaultDriver(i + 1);
       const out = { ...base };
       for (const f of CAR_FILE_DRIVER_FIELDS) {
         if (f === 'id') continue; // the seat keeps its id — stops and plans point at it
@@ -1888,10 +2039,16 @@ export function applyCarFile(car, input, { identity = true } = {}) {
         const v = coerceSetting(defDriver[f], d?.[f]);
         if (v !== undefined) out[f] = v;
       }
-      out.id = base.id || 'd' + (i + 1);
+      out.id = seatId(had[i]);
       out.totalMs = Math.max(0, +base.totalMs || 0);
       return out;
     });
+    for (let i = file.drivers.length; i < had.length; i++) {
+      const d = had[i];
+      if (!d || (isPlaceholderDriver(d) && d.id !== car.currentDriverId)) continue;
+      next.push({ ...d, id: seatId(d) });
+    }
+    car.drivers = next;
     if (!car.drivers.some(d => d.id === car.currentDriverId)) {
       car.currentDriverId = car.drivers[0].id;
     }
@@ -1914,6 +2071,20 @@ export function applyCarFile(car, input, { identity = true } = {}) {
     const res = setTyreSetNames(car, tyreNames, { replaceUnused: true, skipExisting: true });
     car.tyreSets = res.sets;
     car.config.tyreSets = res.sets.length;
+    // Compounds follow the name they were written next to, for the sets that
+    // came out of the file and for the ones already on the rack under the same
+    // name — the file is the crew's own note of which sets are the wets.
+    const comps = Array.isArray(file.tyreRack.compounds) ? file.tyreRack.compounds : null;
+    if (comps) {
+      const byName = new Map();
+      (file.tyreRack.names || []).forEach((n, i) => {
+        const nm = String(n ?? '').trim();
+        if (nm && !byName.has(nm)) byName.set(nm, comps[i] === 'wet' ? 'wet' : 'slick');
+      });
+      for (const t of car.tyreSets) {
+        if (byName.has(t.name)) t.compound = byName.get(t.name);
+      }
+    }
     reconcileTyreSets(car);
     applied.push('tyre rack');
     // A name the file and the car share is the same physical set, so it stays
@@ -2041,7 +2212,11 @@ export function raceClock(race, now) {
 //
 // `pace` is the race condition's pace (null | 'sc' | 'fcy' | 'stopped'). It
 // also accepts the legacy `true` for FCY so older callers keep working.
-export function burnDetail(car, cond = car.condition, pace = null, lapSec = null) {
+//
+// `driverId` is whose consumption to read: the driver in the car unless a
+// caller is projecting a stint somebody else will drive.
+export function burnDetail(car, cond = car.condition, pace = null, lapSec = null,
+  driverId = car.currentDriverId) {
   const p = pace === true ? 'fcy' : pace;
   if (p === 'stopped') {
     return { burn: 0, source: 'stopped', lapSec: null };
@@ -2053,7 +2228,7 @@ export function burnDetail(car, cond = car.condition, pace = null, lapSec = null
     const burn = (p === 'fcy' ? (rates.fcy ?? rates.sc) : rates.sc) || 0;
     return { burn, source: p, lapSec: null };
   }
-  const d = car.drivers.find(x => x.id === car.currentDriverId);
+  const d = car.drivers.find(x => x.id === driverId);
   if (d && car.config.fuelModel === 'driver-laptime' && cond !== 'sc') {
     const ref = lapSec > 0 ? lapSec : car.config.avgLapSec?.[cond];
     const fromCurve = burnAtLapTime(d.fuelCurve, ref);
@@ -2087,6 +2262,19 @@ export const LAP_OUTLIER_FACTOR = 1.15;
 export const PACE_WINDOW_DEFAULT = 5;
 export const PACE_WINDOW_MIN = 1;
 export const PACE_WINDOW_MAX = 30;
+
+// A lap this far over the pace window's own average is not this driver's pace:
+// an in or out lap, a lap behind a slower class, a full-course yellow, a spin.
+// The card strikes those through and keeps them out of every figure it shows.
+// 107% is the same margin the regulations use to separate a representative lap
+// from one that was compromised, and it is tighter than the fuel model's 1.15
+// on purpose: the fuel curve would rather average a scrappy lap than nothing.
+export const PACE_OUTLIER_FACTOR = 1.07;
+
+// How much further back than its own width the window may reach to replace
+// struck laps — a five-lap average scans at most fifteen laps for five green
+// ones, and settles for what it found rather than reading a stale stint.
+export const PACE_WINDOW_REACH = 3;
 
 // Fold a new lap time into the rolling window and recompute the average that
 // the fuel curve is read at. Laps more than LAP_OUTLIER_FACTOR off the window
@@ -2170,8 +2358,9 @@ export function driveTimeStats(car, race, now) {
     // is not the driver's, however long the state file has been around.
     from = Math.max(from, raceStart);
     if (!s || !(to > from)) return;
-    s.totalMs += to - from;
-    s.windowMs += Math.max(0, Math.min(to, now) - Math.max(from, winStart));
+    // Red-flag minutes are not seat time: the field stood still for them.
+    s.totalMs += drivenMs(race, from, to);
+    s.windowMs += drivenMs(race, Math.max(from, winStart), Math.min(to, now));
     if (s.lastEndMs == null || to > s.lastEndMs) s.lastEndMs = to;
   };
   for (const h of car.stintHistory) addSpan(h.driverId, h.startMs, h.endMs);
@@ -2244,7 +2433,11 @@ export function carCalcs(car, race, now) {
   const clock = raceClock(race, now);
 
   const stintStartMs = stintStartOf(car, race);
-  const stintElapsedMs = clock.running && stintStartMs ? Math.max(0, now - stintStartMs) : 0;
+  // Seat time, not wall time: a red flag stops the field and the stint clock
+  // with it. `stintHeld` is the UI's cue to say so, rather than leaving a
+  // number that stopped moving to look like a stuck screen.
+  const stintElapsedMs = clock.running && stintStartMs ? drivenMs(race, stintStartMs, now) : 0;
+  const stintHeld = clock.running && !!stintStartMs && condition.id === 'red';
 
   // Fuel above the safety level is what strategy can actually spend; the
   // finish margin is what should still be on board at the flag.
@@ -2331,7 +2524,7 @@ export function carCalcs(car, race, now) {
   );
 
   return {
-    clock, stintStartMs, stintElapsedMs, burn, burnInfo, refLapSec, lapMs, fcyActive, condition,
+    clock, stintStartMs, stintElapsedMs, stintHeld, burn, burnInfo, refLapSec, lapMs, fcyActive, condition,
     safety, finishMargin, usableFuel,
     lapsToEmpty, msToEmpty, msToSafety,
     tyreLifeLaps, tyreLapsLeft, msToTyres, tyreMileage, tyreKmRemaining,
@@ -2344,62 +2537,127 @@ export function carCalcs(car, race, now) {
   };
 }
 
-// Stint blocks for the 24h timeline: past stints from history, the current
-// stint projected to the limiting factor, then repeated full fuel stints
-// until the end of the race.
+// A full-tank stint for the driver the plan puts in for future stint `k`
+// (0 = the stint after the one running), sized with that driver's own burn
+// when they have one and the car's default when they do not — the same rule
+// the live countdown follows. With no plan, or a plan row naming nobody the
+// car has, the driver in the car now is assumed to carry on. Under a
+// neutralisation every driver drains at the car's SC / FCY rate, exactly as
+// carCalcs does for the running stint.
+function futureStint(car, calcs, k) {
+  const cfg = car.config;
+  const row = car.plan?.stints?.[car.stintHistory.length + 1 + k];
+  const driverId = row?.driverId && car.drivers.some(d => d.id === row.driverId)
+    ? row.driverId : car.currentDriverId;
+  // Only the driver in the car has a live lap time to read a curve at; anyone
+  // else is read at the configured average, as the plan generator does.
+  const lapSec = driverId === car.currentDriverId ? calcs.refLapSec : null;
+  const burn = burnDetail(car, car.condition, calcs.condition.pace, lapSec, driverId).burn || calcs.burn;
+  const laps = Math.floor(Math.max(0, cfg.tankLiters - calcs.safety) / burn);
+  return { driverId, burn, laps, ms: Math.max(laps * calcs.lapMs, 10 * 60e3) };
+}
+
+// Stint blocks for the 24h timeline, in ms from the race start: past stints
+// from history, the current stint projected to the limiting factor, then
+// repeated full fuel stints until the end of the race — each sized for the
+// driver the plan gives it. Between them the pit lane: a `lane` block from
+// the entry to the release for every stop on the sheet (the stint's driving
+// ends at the entry, not at the release), one growing towards NOW while the
+// car is in the lane, and one the size of the pit-loss setting between the
+// stints still to come. A red flag cuts whatever stint it fell in: the field
+// stood still, so those minutes are a `red` block of their own and the stint
+// resumes after it. Every block names its stint (`stint`), so a cut stint
+// can still be labelled once.
 export function projectStints(car, race, now) {
   const clock = raceClock(race, now);
   if (!clock.running) return [];
   const calcs = carCalcs(car, race, now);
   const start = race.startMs;
   const end = start + clock.totalMs;
+  const reds = flagPeriods(race, now).filter(p => p.id === 'red');
   const blocks = [];
 
-  for (const h of car.stintHistory) {
-    blocks.push({ from: h.startMs - start, to: h.endMs - start, kind: 'past', driverId: h.driverId, laps: h.laps ?? null });
-  }
+  // A driving block, cut into a red block wherever a red flag fell in it.
+  const cut = b => {
+    let from = b.from;
+    for (const r of reds) {
+      const a = Math.max(r.fromMs, from), z = Math.min(r.toMs, b.to);
+      if (z <= a) continue;
+      if (a > from) blocks.push({ ...b, from, to: a });
+      blocks.push({ kind: 'red', from: a, to: z, stint: b.stint, open: r.open });
+      from = z;
+    }
+    if (b.to > from) blocks.push({ ...b, from, to: b.to });
+  };
+
+  car.stintHistory.forEach((h, i) => {
+    // What the visit took: the feed's lane time, else the planned figure the
+    // sheet already prices an untimed stop at.
+    const laneSec = h.pitSec != null ? h.pitSec : h.estStationarySec;
+    const laneFrom = Math.max(h.startMs, h.endMs - (laneSec > 0 ? laneSec * 1000 : 0));
+    cut({ from: h.startMs, to: laneFrom, kind: 'past', driverId: h.driverId, laps: h.laps ?? null, stint: i });
+    blocks.push({
+      kind: 'lane', from: laneFrom, to: h.endMs, stint: i, done: true,
+      sec: laneSec > 0 ? laneSec : null,
+      pitSec: h.pitSec ?? null, stationarySec: h.stationarySec ?? null,
+      open: !!h.unplanned && !h.confirmed
+    });
+  });
 
   const s = car.state;
   if (s.stintStartMs) {
+    const idx = car.stintHistory.length;
     const stopAt = Math.min(now + calcs.limit.ms, end);
     // Proposed laps for the running stint: laps banked plus what is left until
     // the limiting factor forces the stop (down to the safety level when fuel
-    // is the limit). One figure for both halves of the stint on the timeline.
+    // is the limit). One figure for every piece of the stint on the timeline.
     const curLaps = s.lapsThisStint + Math.max(0, Math.round(calcs.limit.ms / calcs.lapMs));
-    blocks.push({ from: calcs.stintStartMs - start, to: now - start, kind: 'current', driverId: car.currentDriverId, laps: curLaps });
-    blocks.push({ from: now - start, to: stopAt - start, kind: 'projected', driverId: car.currentDriverId, laps: curLaps });
+    // In the lane right now: the driving ended at the entry, and the visit is
+    // a block growing towards NOW until the release writes the stop.
+    const laneFrom = s.inPit && s.pitEnterMs
+      ? Math.min(Math.max(s.pitEnterMs, calcs.stintStartMs), now) : null;
+    cut({ from: calcs.stintStartMs, to: laneFrom ?? now, kind: 'current', driverId: car.currentDriverId, laps: curLaps, stint: idx });
+    if (laneFrom != null) {
+      blocks.push({ kind: 'lane', from: laneFrom, to: now, stint: idx, done: false, live: true, sec: (now - laneFrom) / 1000 });
+    }
+    blocks.push({ from: now, to: stopAt, kind: 'projected', driverId: car.currentDriverId, laps: curLaps, stint: idx });
 
-    // Future stints, fuel-limited full tanks.
-    const stintMs = Math.max(calcs.fullStintLaps * calcs.lapMs, 10 * 60e3);
-    let t = stopAt + (car.config.pitLossSec || 0) * 1000;
+    // Future stints, fuel-limited full tanks at the planned driver's burn,
+    // each behind a lane block the size of the pit loss. A stop with no stint
+    // after it (the last one runs to the flag) is not drawn.
+    const pitMs = (car.config.pitLossSec || 0) * 1000;
+    let t = stopAt;
     let i = 0;
-    while (t < end && i < 60) {
-      const to = Math.min(t + stintMs, end);
+    while (t + pitMs < end && i < 60) {
+      blocks.push({ kind: 'lane', from: t, to: t + pitMs, stint: idx + i, done: false, next: i === 0 });
+      t += pitMs;
+      const st = futureStint(car, calcs, i);
+      const to = Math.min(t + st.ms, end);
       // The last stint is cut by the flag — show the laps it actually holds.
-      blocks.push({ from: t - start, to: to - start, kind: 'future', driverId: null,
-        laps: Math.min(calcs.fullStintLaps, Math.round((to - t) / calcs.lapMs)) });
-      t = to + (car.config.pitLossSec || 0) * 1000;
+      blocks.push({ from: t, to, kind: 'future', driverId: null, stint: idx + i + 1,
+        laps: Math.min(st.laps, Math.round((to - t) / calcs.lapMs)) });
+      t = to;
       i++;
     }
   }
-  return blocks;
+  return blocks.map(b => ({ ...b, from: b.from - start, to: b.to - start }));
 }
 
 // Projected pit stop times for one car, as absolute wall-clock ms: the end of
 // the current stint (whatever runs out first), then repeated full stints to
-// the end of the race. The first entry carries the limiting factor.
+// the end of the race, each as long as its planned driver's tank lasts. The
+// first entry carries the limiting factor.
 export function projectedStops(car, race, now, horizonMs = Infinity) {
   const clock = raceClock(race, now);
   if (!clock.running || !car.state.stintStartMs) return [];
   const calcs = carCalcs(car, race, now);
   const end = race.startMs + clock.totalMs;
-  const stintMs = Math.max(calcs.fullStintLaps * calcs.lapMs, 10 * 60e3);
   const stops = [];
   let t = now + calcs.limit.ms;
   let i = 0;
   while (t < end && t <= now + horizonMs && i < 60) {
     stops.push({ atMs: t, limit: i === 0 ? calcs.limit.key : 'fuel' });
-    t += (car.config.pitLossSec || 0) * 1000 + stintMs;
+    t += (car.config.pitLossSec || 0) * 1000 + futureStint(car, calcs, i).ms;
     i++;
   }
   return stops;
@@ -3558,7 +3816,7 @@ export function cautionBand(sec) {
 /** Minutes the current stint has been running, or 0 before it starts. */
 export function stintMinutes(car, race, now) {
   const startMs = stintStartOf(car, race);
-  return startMs > 0 && now > startMs ? (now - startMs) / 60e3 : 0;
+  return startMs > 0 && now > startMs ? drivenMs(race, startMs, now) / 60e3 : 0;
 }
 
 /**
@@ -3706,13 +3964,20 @@ export function cautionSweep(car, race, now, pace, opts = {}) {
 // regulations permitting) with the least seat time takes over.
 // The driver the stint plan puts in the car for the stint AFTER the one running.
 // Returns null when there is no plan, or the plan has run out of stints.
+// The plan row a stop taken now would start. The running stint sits at
+// stintHistory.length; the stop being planned for ends it, so the stint that
+// follows is the next row after that. Before the flag nothing is running and
+// the plan starts at its first row. Everything that reads or writes "the next
+// stint" goes through here, so the stop call and the plan edit it makes can
+// never point at different rows.
+export function plannedNextStintIndex(car, race, now) {
+  return car.stintHistory.length + (raceClock(race, now).running ? 1 : 0);
+}
+
 export function plannedNextDriver(car, race, now) {
   const plan = car.plan;
   if (!plan?.stints?.length) return null;
-  // The running stint sits at stintHistory.length; the stop being planned for
-  // ends it, so the stint that follows is the next row after that.
-  const idx = car.stintHistory.length + (raceClock(race, now).running ? 1 : 0);
-  const st = plan.stints[idx];
+  const st = plan.stints[plannedNextStintIndex(car, race, now)];
   if (!st) return null;
   return car.drivers.find(d => d.id === st.driverId) || null;
 }
@@ -4221,18 +4486,45 @@ export function isNightAt(ms) {
 }
 
 // Generate a full-race stint plan from the driver settings table.
-// Rules: stint length = min(max stint time, a full tank at the driver's dry
-// burn); drivers with night=false are not scheduled between NIGHT_START_H and
-// NIGHT_END_H; doubleStint drivers run two stints back-to-back; seat time is
-// balanced by always picking the eligible driver with the least planned time.
+// Rules: a stint is a tank of fuel — it runs until the usable fuel (tank less
+// the safety litres) is burnt at the driver's dry burn, read as a time
+// through the configured dry lap, and is only cut shorter by the max stint
+// time. Nothing is rounded to whole laps: the sheet is a fuel budget, not a
+// lap count. Drivers with night=false are not scheduled between NIGHT_START_H
+// and NIGHT_END_H; doubleStint drivers run two stints back-to-back; seat time
+// is balanced by always picking the eligible driver with the least planned time.
 // If race.startMs is not set the plan assumes the race starts at assumedStartMs.
 // `opts` lets replanFromNow continue a race in progress: generation starts at
 // race-relative `fromMs`, seat-time balancing is seeded with `seedTotals`, and
 // `prevDriverId`/`prevRun` carry the double-stint state of the running stint.
+export const PLAN_STINT_CAP = 200;
+
+// Why a stint plan cannot be built from this car and this race, in the terms
+// the crew would use. Empty = it can be built. The panel shows this the moment
+// it is opened and GENERATE reads the same list before it runs, so a refusal is
+// never a button that simply does nothing.
+export function planBlockers(car, race) {
+  if (!car) return ['there is no car to plan for'];
+  const out = [];
+  if (!car.drivers?.length) {
+    out.push('the driver table is empty — add the crew in SETTINGS → DRIVERS first');
+  }
+  if (!(race?.durationH > 0)) {
+    out.push('the race has no length — set the duration on the pit wall');
+  }
+  return out;
+}
+
 export function generatePlan(car, race, assumedStartMs, opts = {}) {
   const cfg = car.config;
   const startMs = race.startMs || assumedStartMs;
   const totalMs = race.durationH * 3600e3;
+  // Nobody to put in the car, or no race to plan across: hand back an empty
+  // plan rather than throwing halfway down. The callers say why — this only
+  // has to make sure a bad table cannot take the panel down with it.
+  if (!car.drivers?.length || !(totalMs > 0)) {
+    return { generatedMs: assumedStartMs, startMs, assumedStart: !race.startMs, stints: [], totals: {}, truncated: null };
+  }
   const pitMs = (cfg.pitLossSec || 0) * 1000;
   const lapMs = ((cfg.avgLapSec && cfg.avgLapSec.dry) || 100) * 1000;
   const usable = Math.max(1, cfg.tankLiters - (cfg.safetyFuelL || 0));
@@ -4247,12 +4539,16 @@ export function generatePlan(car, race, assumedStartMs, opts = {}) {
     }
     return (d.fuelDry > 0 ? d.fuelDry : cfg.burnPerLap.dry) || 1;
   };
-  const stintFor = d => {
-    const fuelLaps = Math.max(1, Math.floor(usable / burnOf(d)));
-    const timeLaps = Math.max(1, Math.floor(((cfg.maxStintMin || 60) * 60e3) / lapMs));
-    const laps = Math.min(fuelLaps, timeLaps);
-    return { ms: laps * lapMs, laps, fuelL: +(laps * burnOf(d)).toFixed(1) };
-  };
+  // How long the usable fuel lasts this driver, in ms: litres over the burn
+  // per lap is a lap count, times the lap time is a stint — but it is never
+  // floored to whole laps, so the whole tank is spent and the fuel column is
+  // the usable fuel, not a lap count times a burn. Never shorter than one lap
+  // (a tank that is all safety fuel would otherwise plan zero-length stints).
+  const fuelMsOf = d => Math.max(lapMs, (usable / burnOf(d)) * lapMs);
+  const stintMs = d => Math.min(fuelMsOf(d), Math.max(lapMs, (cfg.maxStintMin || 60) * 60e3));
+  // Litres burnt over a stretch of the stint: the burn per lap spread evenly
+  // over the lap time.
+  const fuelOver = (d, ms) => +((ms / lapMs) * burnOf(d)).toFixed(1);
 
   const totals = {};
   for (const d of car.drivers) totals[d.id] = opts.seedTotals?.[d.id] || 0;
@@ -4261,7 +4557,7 @@ export function generatePlan(car, race, assumedStartMs, opts = {}) {
   let prev = opts.prevDriverId ? car.drivers.find(d => d.id === opts.prevDriverId) || null : null;
   let prevRun = prev ? opts.prevRun || 1 : 0;
 
-  while (t < totalMs && stints.length < 200) {
+  while (t < totalMs && stints.length < PLAN_STINT_CAP) {
     const night = isNightAt(startMs + t);
     let pool = car.drivers.filter(d => !night || d.night);
     const noNightCover = pool.length === 0;
@@ -4281,16 +4577,13 @@ export function generatePlan(car, race, assumedStartMs, opts = {}) {
     prevRun = prev && pick.id === prev.id ? prevRun + 1 : 1;
     prev = pick;
 
-    const st = stintFor(pick);
-    const endT = Math.min(t + st.ms, totalMs);
+    const endT = Math.min(t + stintMs(pick), totalMs);
     const actualMs = endT - t;
-    const actualLaps = Math.max(1, Math.round(actualMs / lapMs));
     stints.push({
       driverId: pick.id,
       fromMs: t,
       toMs: endT,
-      laps: actualLaps,
-      fuelL: +(actualLaps * burnOf(pick)).toFixed(1),
+      fuelL: fuelOver(pick, actualMs),
       night,
       noNightCover
     });
@@ -4303,8 +4596,156 @@ export function generatePlan(car, race, assumedStartMs, opts = {}) {
     startMs,
     assumedStart: !race.startMs,
     stints,
-    totals
+    totals,
+    // The generator gave up before the flag: at this stint length the race
+    // needs more stints than any real plan has. That is always a setting
+    // upstream — nearly always a tank that is all safety fuel — so the panel
+    // says so instead of showing a plan that quietly ends hours early.
+    truncated: t < totalMs ? { atMs: t, totalMs } : null
   };
+}
+
+// Seat-time totals read straight off the plan's rows. Every edit runs this, or
+// the totals over the table contradict the table.
+export function recountPlanTotals(car) {
+  const plan = car.plan;
+  if (!plan?.stints) return;
+  const totals = {};
+  for (const d of car.drivers) totals[d.id] = 0;
+  for (const s of plan.stints) totals[s.driverId] = (totals[s.driverId] || 0) + (s.toMs - s.fromMs);
+  plan.totals = totals;
+}
+
+// Move a driver up the running order to `index` — the way a stint sheet is
+// reordered by hand, not the way a name is rubbed out. The driver is taken out
+// of the stint they were next due in and inserted here; everyone in between
+// slides one stint later. Nobody gains or loses a stint and the rest of the
+// order keeps its shape, which is why this is an insert and not a swap: a swap
+// would send whoever was next to the far end of the race, and an overwrite
+// would quietly hand one driver two stints and another none.
+// A driver with no later stint to give up is a genuine insert — the tail
+// shifts and whoever held the last row loses it, which is why that case is
+// reported back rather than done in silence.
+// Stints already driven are history and are never touched.
+// Returns null when nothing moved, else what the move did.
+export function insertPlanDriver(car, index, driverId) {
+  const stints = car.plan?.stints;
+  if (!stints?.length) return null;
+  if (!(index >= car.stintHistory.length && index < stints.length)) return null;
+  if (!car.drivers.some(d => d.id === driverId)) return null;
+  if (stints[index].driverId === driverId) return null;
+
+  let from = -1;
+  for (let i = index + 1; i < stints.length; i++) {
+    if (stints[i].driverId === driverId) { from = i; break; }
+  }
+  const end = from === -1 ? stints.length - 1 : from;
+  // Read before the shift overwrites it: with no later stint to give up, the
+  // driver at the end of the plan is the one who pays for the insert.
+  const displacedId = from === -1 ? stints[end].driverId : null;
+  const replacedId = stints[index].driverId;
+  for (let i = end; i > index; i--) stints[i].driverId = stints[i - 1].driverId;
+  stints[index].driverId = driverId;
+  recountPlanTotals(car);
+  return { to: index, from: from === -1 ? null : from, replacedId, displacedId };
+}
+
+// Where the running order has stopped matching the driver table. The generator
+// respects night cover and the double-stint flags, so a plan straight out of
+// GENERATE is clean on those two and anything reported is the consequence of a
+// hand edit — an inserted driver, a reassigned stint — or of a driver setting
+// changing under a plan that was right when it was made.
+// The drive-time limits are in here for a sharper reason: a stop call silently
+// puts someone else in when the planned driver cannot legally see the stint out
+// (see nextDriverCall), so a plan that busts them is a plan the race will not
+// follow. They are read off the plan's own rows, which are race-relative, so
+// this is a projection of the whole plan and not a reading of the clock.
+// byStint[i] is what is wrong with row i; list is the same thing deduplicated
+// for a summary, with index null on the crew-wide ones.
+export function planDriverIssues(car) {
+  const out = { byStint: [], list: [] };
+  const stints = car.plan?.stints;
+  if (!stints?.length) return out;
+  out.byStint = stints.map(() => []);
+  const drvOf = id => car.drivers.find(d => d.id === id) || null;
+  const first = car.stintHistory.length; // history is not up for review
+  const crew = [];
+
+  // Night cover: a night stint on a driver who does not drive at night. A row
+  // flagged noNightCover was generated with nobody available at all — a
+  // different problem, already marked on the row itself.
+  stints.forEach((s, i) => {
+    if (i < first || !s.night || s.noNightCover) return;
+    const d = drvOf(s.driverId);
+    if (d && !d.night) out.byStint[i].push({ code: 'night', text: `${d.name} does not drive at night` });
+  });
+
+  // Consecutive stints. Runs are walked across the whole plan so a double that
+  // starts in history is counted whole; only the rows still to run are marked.
+  for (let i = 0; i < stints.length;) {
+    let j = i;
+    while (j + 1 < stints.length && stints[j + 1].driverId === stints[i].driverId) j++;
+    const len = j - i + 1;
+    const d = drvOf(stints[i].driverId);
+    if (len > 1 && d) {
+      const text = len > 2
+        ? `${d.name} is down for ${len} stints back to back`
+        : (!d.doubleStint ? `${d.name} is not down for double stints` : null);
+      if (text) for (let k = Math.max(i, first); k <= j; k++) out.byStint[k].push({ code: len > 2 ? 'triple' : 'double', text });
+    }
+    i = j + 1;
+  }
+
+  const cfg = car.config;
+  const maxTotalMs = (cfg.regTotalMin || 0) * 60e3;
+  const max6hMs = (cfg.reg6hMin || 0) * 60e3;
+  const overlap = (a, b, c, d) => Math.max(0, Math.min(b, d) - Math.max(a, c));
+  for (const d of car.drivers) {
+    const spans = stints.filter(s => s.driverId === d.id);
+    if (!spans.length) {
+      if (car.drivers.length > 1) crew.push({ code: 'nostints', text: `${d.name} has no stints left in the plan` });
+      continue;
+    }
+    if (maxTotalMs > 0) {
+      const tot = spans.reduce((a, s) => a + (s.toMs - s.fromMs), 0);
+      if (tot > maxTotalMs) {
+        crew.push({ code: 'total', text: `${d.name} is planned for ${fmtClock(tot)} against a ${fmtClock(maxTotalMs)} total drive limit` });
+      }
+    }
+    if (max6hMs > 0) {
+      // The heaviest window always starts on a stint, so the starts are the
+      // only candidates worth measuring.
+      let worst = 0;
+      for (const w of spans) {
+        let sum = 0;
+        for (const t of spans) sum += overlap(t.fromMs, t.toMs, w.fromMs, w.fromMs + REG_WINDOW_MS);
+        if (sum > worst) worst = sum;
+      }
+      if (worst > max6hMs) {
+        crew.push({ code: 'win6h', text: `${d.name} is planned for ${fmtClock(worst)} inside one 6 h window — the limit is ${fmtClock(max6hMs)}` });
+      }
+    }
+  }
+
+  // One entry per fault, carrying every stint it lands on: the same driver
+  // flagged on six night stints is one thing wrong, but the summary still has
+  // to say which six, or it points at the first and hides the rest.
+  const seen = new Map();
+  out.byStint.forEach((arr, i) => {
+    for (const x of arr) {
+      const had = seen.get(x.text);
+      if (had) { had.indexes.push(i); continue; }
+      const rec = { ...x, index: i, indexes: [i] };
+      seen.set(x.text, rec);
+      out.list.push(rec);
+    }
+  });
+  for (const x of crew) {
+    if (seen.has(x.text)) continue;
+    seen.set(x.text, x);
+    out.list.push({ ...x, index: null, indexes: [] });
+  }
+  return out;
 }
 
 // Replan the rest of the race from the live state: driven stints stay as they
@@ -4369,7 +4810,8 @@ export function replanFromNow(car, race, now) {
     assumedStart: false,
     replanned: true,
     stints: [...stints, ...rest.stints],
-    totals: rest.totals
+    totals: rest.totals,
+    truncated: rest.truncated
   };
 }
 
@@ -4459,30 +4901,73 @@ export function driverLapTimes(car, driverId) {
   return laps;
 }
 
-// The pace picture for one driver over their last `n` timed laps. `avgSec` is
-// the plain mean of the window — the number the engineer asked for. The same
-// median rule the fuel model uses also flags in/out and traffic laps, so the
-// card can mark them and offer the average without them (`cleanAvgSec`, null
-// when the window is already clean).
+// Which laps of a list are representative pace. The cut is PACE_OUTLIER_FACTOR
+// of the window average — but the average of what? A four-minute pit lap in the
+// window lifts the mean so far that the cut clears every real lap and nothing
+// is struck, so the reference is re-read from the laps that survive it until
+// the set stops shrinking. A lap at or under the mean always survives, so the
+// set can never empty.
+function paceEligible(laps) {
+  const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
+  let use = laps;
+  for (;;) {
+    const cutSec = mean(use) * PACE_OUTLIER_FACTOR;
+    const keep = laps.map(t => t <= cutSec);
+    const next = laps.filter((_, i) => keep[i]);
+    if (next.length >= use.length) return { keep, cutSec };
+    use = next;
+  }
+}
+
+// The pace picture for one driver over their last `n` timed laps. A lap the
+// crew cannot read pace from — an in or out lap, a lap behind a slower class,
+// a full-course yellow, a spin — is struck through on the card and left out of
+// every figure here, and the window reaches further back for an eligible lap to
+// replace it, so `avgSec` is the mean of `n` real green laps whenever the
+// driver has done that many. `laps` is everything the strip draws (struck laps
+// included); `outliers` says which of them were struck.
 export function paceWindowStats(car, driverId = car.currentDriverId, n = paceWindowLaps(car)) {
   const all = driverLapTimes(car, driverId);
-  const laps = all.slice(-n);
-  const base = { n, driverId, laps, total: all.length };
-  if (!laps.length) {
-    return { ...base, avgSec: null, cleanAvgSec: null, bestSec: null, worstSec: null, lastSec: null, outliers: [] };
+  const base = { n, driverId, total: all.length };
+  if (!all.length) {
+    return {
+      ...base, laps: [], outliers: [], avgSec: null, bestSec: null, worstSec: null,
+      lastSec: null, lastRawSec: null, lastIsOut: false, counted: 0, ignored: 0, cutSec: null
+    };
   }
+
+  // Widen the slice from the newest lap backwards until it holds `n` eligible
+  // laps. Eligibility moves with the slice — a wider window has a different
+  // average, so a different cut — which is why it is re-read on every step
+  // rather than fixed on the first pass. PACE_WINDOW_REACH bounds how far back
+  // it will go: under a long neutralisation nothing is eligible, and a "last
+  // five laps" average must not quietly become half an hour old.
+  const reach = Math.min(all.length, n * PACE_WINDOW_REACH);
+  let laps = [], keep = [], cutSec = 0;
+  for (let take = Math.min(n, all.length); take <= reach; take++) {
+    laps = all.slice(-take);
+    ({ keep, cutSec } = paceEligible(laps));
+    if (keep.reduce((c, k) => c + (k ? 1 : 0), 0) >= n) break;
+  }
+
+  const use = laps.filter((_, i) => keep[i]);
   const mean = a => Math.round((a.reduce((x, y) => x + y, 0) / a.length) * 1000) / 1000;
-  const sorted = [...laps].sort((a, b) => a - b);
-  const cut = sorted[Math.floor(sorted.length / 2)] * LAP_OUTLIER_FACTOR;
-  const clean = laps.filter(t => t <= cut);
+  const sorted = [...use].sort((a, b) => a - b);
   return {
     ...base,
-    avgSec: mean(laps),
-    cleanAvgSec: clean.length && clean.length < laps.length ? mean(clean) : null,
+    laps,
+    outliers: keep.map(k => !k),
+    avgSec: mean(use),
     bestSec: sorted[0],
     worstSec: sorted[sorted.length - 1],
-    lastSec: laps[laps.length - 1],
-    outliers: laps.map(t => t > cut)
+    // The lap the figures are read to, and the lap the car actually just did —
+    // the same number unless the newest lap was struck.
+    lastSec: use[use.length - 1],
+    lastRawSec: laps[laps.length - 1],
+    lastIsOut: !keep[keep.length - 1],
+    counted: use.length,
+    ignored: laps.length - use.length,
+    cutSec: Math.round(cutSec * 1000) / 1000
   };
 }
 

@@ -3,7 +3,7 @@
 // Run with: npm test
 import { startServer } from '../server/server.js';
 import {
-  carCalcs, projectStints, raceClock, effectiveBurn, stopServiceTime, fcyCalc, pitLaneCalc, pitEta,
+  carCalcs, projectStints, projectedStops, raceClock, effectiveBurn, stopServiceTime, fcyCalc, pitLaneCalc, pitEta,
   pitArrivalOrder, generatePlan,
   fuelStrategy, defaultCar, emptyStop,
   recommendedStops, resolveStop,
@@ -11,6 +11,7 @@ import {
   burnAtLapTime, normalizeCurve, pushLapTime, burnDetail, LAP_AVG_WINDOW,
   driveTimeStats, pitCongestion, replanFromNow, planVsActual, stintStats, learnedOf, fmtGapUs,
   driverLapTimes, paceWindowStats, paceWindowLaps, PACE_WINDOW_DEFAULT, PACE_WINDOW_MAX,
+  PACE_OUTLIER_FACTOR, PACE_WINDOW_REACH,
   carPickLabel, DEFAULT_CAR_NUMBERS, defaultCarNumber,
   driverAbbrev, matchTimingDriver, createFeedSeen, wallShowsPlan,
   feedSessionAge, SESSION_FRESH_MS,
@@ -20,7 +21,7 @@ import {
   brakeSetNames, generateBrakeSets, nextSetNumber, BRAKE_COMPONENTS,
   reconcileBrakeSets, linkBrakeKit, brakeKitsOf, stopBrakeAxle,
   reconcileTyreWarmers, loadTyreWarmer, warmableTyreSets, TYRE_WARMER_MAX,
-  buildCarFile, readCarFile, applyCarFile, carFileName, carConfigFields,
+  buildCarFile, readCarFile, applyCarFile, carFileName, carConfigFields, defaultDriver,
   CAR_FILE_GROUPS, CAR_FILE_RACK_FIELDS, EVENT_FIELDS,
   // --- pure-function coverage added below (kits, racks, caution, next driver) ---
   isDiscComponent, axleOfComponent, brakeAxle, brakeAxleWork,
@@ -29,7 +30,10 @@ import {
   reconcileBrakeKits, stopBrakeKit, stopPadSet, brakeSetsOf,
   expandSetNames, defaultTyreSets, newTyreSet, newBrakeSet,
   newTyreWarmer, setTyreSetNames, setBrakeSetNames, warmerOfSet,
-  currentTyreSet, stintStartOf, plannedNextDriver, nextDriverCall,
+  currentTyreSet, tyreCompoundOf, restockRacks, stintStartOf, plannedNextDriver, nextDriverCall,
+  flagPeriods, heldMs, drivenMs,
+  plannedNextStintIndex, insertPlanDriver, recountPlanTotals, planDriverIssues,
+  planBlockers, PLAN_STINT_CAP,
   probabilityOfCautionWithin, cautionCall, cautionSweep, cautionBand, CAUTION_DECISIVE_SEC
 } from '../shared/model.js';
 import WebSocket from 'ws';
@@ -708,6 +712,33 @@ check('preset deleted', !state.presets['test setup']);
   check('a negative life figure cannot get in', hc.config.tyreLifeKm >= 0);
   check('a file with no drivers leaves the roster alone', hc.drivers.length === 4 && hc.drivers[0].name === 'Driver 1');
 
+  // A file fills seats; it never strikes anyone off, and never doubles an id.
+  // The reserve who joined on Friday is not in the file written in October,
+  // and loading that file to correct a tank size must not delete them.
+  const roster = defaultCar('5', '5');
+  roster.drivers = [defaultDriver(1), defaultDriver(2), defaultDriver(3), defaultDriver(5)]; // d4 removed, one added
+  roster.drivers[3].name = 'Friday reserve';
+  roster.drivers[3].totalMs = 90 * 60e3;
+  const three = JSON.parse(JSON.stringify(file));
+  three.drivers = three.drivers.slice(0, 3);
+  applyCarFile(roster, three);
+  check('a shorter file does not strike a driver off',
+    roster.drivers.length === 4 && roster.drivers[3].name === 'Friday reserve' &&
+    roster.drivers[3].totalMs === 90 * 60e3 && roster.drivers[3].id === 'd5');
+  const six = JSON.parse(JSON.stringify(file));
+  six.drivers.push({ name: 'Fifth' }, { name: 'Sixth' });
+  applyCarFile(roster, six);
+  check('a longer file gives every new seat an id of its own',
+    roster.drivers.length === 6 && new Set(roster.drivers.map(d => d.id)).size === 6 &&
+    roster.drivers[3].id === 'd5' && roster.drivers[4].name === 'Fifth' && roster.drivers[5].name === 'Sixth');
+  const blank = defaultCar('6', '6');
+  applyCarFile(blank, three);
+  check('a placeholder seat the file does not fill is dropped', blank.drivers.length === 3);
+  const dup = defaultCar('7', '7');
+  dup.drivers[2].id = 'd2'; // a roster an older build left with two seats on one id
+  applyCarFile(dup, JSON.parse(JSON.stringify(file)));
+  check('a doubled id is split on load', new Set(dup.drivers.map(d => d.id)).size === 4);
+
   check('a file from a newer build still loads, with a warning',
     (() => {
       const future = { ...JSON.parse(JSON.stringify(file)), version: 99 };
@@ -717,6 +748,105 @@ check('preset deleted', !state.presets['test setup']);
   check('a state backup is not a car file', !readCarFile('{"race":{},"cars":{}}').ok);
   check('a truncated file is refused', !readCarFile('{"kind":"pitwall-24h.car"').ok);
   check('an empty file is refused', !applyCarFile(defaultCar('1', '1'), '').ok);
+}
+
+// ---- the rack in a car file: which sets are wets, and whose set is whose ----
+// The allocation is written down once in the garage. Everything about it that
+// is not race data has to come back off the file — the numbers on the rubber,
+// and which of those sets are the wets.
+{
+  const source = defaultCar('1', '31');
+  source.tyreSets = generateTyreSets(source, { pattern: 'GVP[##]', start: 1, count: 8, replaceUnused: true }).sets;
+  source.config.tyreSets = source.tyreSets.length;
+  reconcileTyreSets(source);
+  for (const n of ['GVP07', 'GVP08']) source.tyreSets.find(t => t.name === n).compound = 'wet';
+
+  const file = buildCarFile(source, { app: '1.0.11', savedMs: 1700000000000 });
+  check('a car file says which sets are the wets',
+    file.tyreRack.compounds.length === file.tyreRack.names.length &&
+    file.tyreRack.compounds.filter(c => c === 'wet').length === 2);
+
+  const target = defaultCar('2', '2');
+  applyCarFile(target, JSON.parse(JSON.stringify(file)));
+  check('the wets come back off the file as wets',
+    target.tyreSets.filter(t => tyreCompoundOf(t) === 'wet').map(t => t.name).join() === 'GVP07,GVP08');
+
+  // Unmarking travels too: the file is the crew's note of what the rack is.
+  source.tyreSets.find(t => t.name === 'GVP07').compound = 'slick';
+  applyCarFile(target, buildCarFile(source, { app: '1.0.11', savedMs: 1700000000000 }));
+  check('a set unmarked in the file stops being a wet',
+    target.tyreSets.filter(t => tyreCompoundOf(t) === 'wet').map(t => t.name).join() === 'GVP08');
+
+  // Files written before compounds existed say nothing, and nothing is what
+  // they mean — those sets were slicks and the ones on the car stay as they are.
+  const old = JSON.parse(JSON.stringify(file));
+  delete old.tyreRack.compounds;
+  old.version = 1;
+  target.tyreSets.find(t => t.name === 'GVP01').compound = 'wet';
+  applyCarFile(target, old);
+  check('a file from before compounds leaves the rack alone',
+    target.tyreSets.find(t => t.name === 'GVP01').compound === 'wet');
+
+  // A set the file names is that set, not a replacement for it: it keeps its
+  // id, so the stop pointing at it and the warmer holding it still are.
+  const keeper = defaultCar('3', '3');
+  keeper.config.tyreWarmers = 2;
+  reconcileTyreWarmers(keeper);
+  const hotId = keeper.tyreSets[4].id; // S5, never run
+  loadTyreWarmer(keeper, 'w1', hotId);
+  keeper.nextStop = { ...emptyStop(), tyres: true, tyreSetId: hotId };
+  const sameRack = defaultCar('1', '1');
+  sameRack.config.tyreWarmers = 2;
+  reconcileTyreWarmers(sameRack);
+  applyCarFile(keeper, buildCarFile(sameRack, { app: '1.0.11', savedMs: 1 }));
+  check('a set the file names keeps its id',
+    keeper.tyreSets.some(t => t.id === hotId && t.name === 'S5'));
+  check('the warmer holding it is still holding it', keeper.tyreWarmers[0].setId === hotId);
+  check('the stop calling for it still calls for it',
+    stopTyreSet(keeper, keeper.nextStop)?.id === hotId);
+}
+
+// ---- a new race re-stocks the racks; it does not rebuild them ----
+// The set numbers, the compounds and the kits are garage work — a reset (and
+// so the start of a session) may only wipe what the last race wrote on them.
+{
+  const car = defaultCar('1', '31');
+  car.tyreSets = generateTyreSets(car, { pattern: 'GVP[##]', start: 1, count: 6, replaceUnused: true }).sets;
+  car.config.tyreSets = car.tyreSets.length;
+  reconcileTyreSets(car);
+  car.tyreSets.find(t => t.name === 'GVP06').compound = 'wet';
+  const binned = car.tyreSets.find(t => t.name === 'GVP02');
+  binned.scrapped = true;
+  binned.scrapReason = 'flat spot';
+  const run = car.tyreSets.find(t => t.name === 'GVP01');
+  run.used = true; run.km = 280; run.laps = 70;
+  car.config.tyreWarmers = 2;
+  reconcileTyreWarmers(car);
+  loadTyreWarmer(car, 'w1', car.tyreSets.find(t => t.name === 'GVP03').id);
+  linkBrakeKit(car, 'front', 'df2', 'pf3', 'F9');
+  car.brakeSets.discsFront[1].hours = 11.5;
+  car.brakeSets.discsFront[1].used = true;
+
+  restockRacks(car);
+  check('a new race keeps the set numbers the crew wrote down',
+    car.tyreSets.map(t => t.name).join() === 'S1,GVP01,GVP02,GVP03,GVP04,GVP05,GVP06');
+  check('a new race keeps which sets are the wets',
+    car.tyreSets.find(t => t.name === 'GVP06').compound === 'wet');
+  check('a new race is fresh rubber on the same rack',
+    car.tyreSets.every(t => t.km === 0 && t.laps === 0) &&
+    car.tyreSets.filter(t => t.used).length === 1);
+  check('a set in the bin is still in the bin', binned.name === 'GVP02' &&
+    car.tyreSets.find(t => t.name === 'GVP02').scrapped === true);
+  check('a new race never starts on a binned set',
+    !car.tyreSets.find(t => t.id === car.state.currentTyreSetId).scrapped);
+  check('a new race keeps the kits the crew bedded',
+    brakeKitsOf(car, 'front').some(k => k.name === 'F9' && k.disc.name === 'DF2' && k.pad.name === 'PF3'));
+  check('a new race is fresh brakes on the same rack',
+    BRAKE_COMPONENTS.every(b => brakeSetsOf(car, b.id).every(t => t.hours === 0)));
+  check('a new race starts on a whole kit',
+    currentBrakeKit(car, 'front') !== null && currentBrakeKit(car, 'rear') !== null);
+  check('a new race leaves the boxes empty',
+    car.tyreWarmers.length === 2 && car.tyreWarmers.every(w => w.setId === null));
 }
 
 // ---- the pit wall applies a car file to any car ----
@@ -864,6 +994,74 @@ check('avg model ignores the curve entirely', (() => {
   const d = burnDetail(c3, 'dry', false, 105);
   return d.source === 'driver' && near(d.burn, 9.9);
 })());
+// Whose consumption a projection reads: the driver in the car unless a caller
+// names somebody else — the future stints on the timeline are driven by whoever
+// the plan puts in, not by whoever happens to be in the seat now.
+const seatCar = JSON.parse(JSON.stringify(state.cars['1']));
+seatCar.condition = 'dry';
+seatCar.config.fuelModel = 'driver-avg';
+seatCar.drivers[0].fuelDry = 0; // nothing filled in → the car's average
+seatCar.drivers[0].fuelCurve = [];
+seatCar.drivers[1].fuelDry = 3.5; // own figure
+seatCar.drivers[1].fuelCurve = [];
+seatCar.currentDriverId = seatCar.drivers[0].id;
+seatCar.state.avgLapSecLive = null;
+seatCar.state.lastLapSec = null;
+const seatRace = JSON.parse(JSON.stringify(state.race));
+seatRace.startMs = Date.now() - 3600e3;
+seatRace.durationH = 24;
+seatRace.fcy = { active: false, mode: null, startMs: null, endMs: null };
+seatCar.state.stintStartMs = Date.now() - 30 * 60e3;
+const seatNow = Date.now();
+const seatUsable = seatCar.config.tankLiters - seatCar.config.safetyFuelL;
+check('burnDetail reads a named driver', (() => {
+  const d = burnDetail(seatCar, 'dry', null, null, seatCar.drivers[1].id);
+  return d.source === 'driver' && near(d.burn, 3.5);
+})());
+check('burnDetail defaults to the driver in the car', (() => {
+  const d = burnDetail(seatCar, 'dry');
+  return d.source === 'car' && near(d.burn, seatCar.config.burnPerLap.dry);
+})());
+check('future stints are sized for the planned driver', (() => {
+  const h = seatCar.stintHistory.length;
+  const rows = [];
+  for (let i = 0; i <= h; i++) rows.push({ driverId: seatCar.drivers[0].id });
+  rows.push({ driverId: seatCar.drivers[1].id }); // the stint after the running one
+  rows.push({ driverId: seatCar.drivers[0].id }); // then back to a driver with no figure
+  seatCar.plan = { stints: rows };
+  const calcs = carCalcs(seatCar, seatRace, seatNow);
+  if (calcs.condition.pace) return false; // the test needs a green race
+  const futures = projectStints(seatCar, seatRace, seatNow).filter(b => b.kind === 'future');
+  return futures.length > 2 &&
+    futures[0].laps === Math.floor(seatUsable / 3.5) &&
+    futures[1].laps === Math.floor(seatUsable / seatCar.config.burnPerLap.dry) &&
+    // Past the end of the plan the driver in the car is assumed to carry on.
+    futures[2].laps === Math.floor(seatUsable / seatCar.config.burnPerLap.dry);
+})());
+check('projected stops follow each planned driver tank', (() => {
+  const calcs = carCalcs(seatCar, seatRace, seatNow);
+  const stops = projectedStops(seatCar, seatRace, seatNow);
+  const pit = (seatCar.config.pitLossSec || 0) * 1000;
+  return stops.length > 2 &&
+    near(stops[1].atMs - stops[0].atMs, pit + Math.floor(seatUsable / 3.5) * calcs.lapMs) &&
+    near(stops[2].atMs - stops[1].atMs, pit + Math.floor(seatUsable / seatCar.config.burnPerLap.dry) * calcs.lapMs);
+})());
+check('with no plan the driver in the car carries on', (() => {
+  const c = JSON.parse(JSON.stringify(seatCar));
+  c.plan = null;
+  c.currentDriverId = c.drivers[1].id;
+  const futures = projectStints(c, seatRace, seatNow).filter(b => b.kind === 'future');
+  return futures.length > 1 && futures[0].laps === Math.floor(seatUsable / 3.5) &&
+    futures[1].laps === Math.floor(seatUsable / 3.5);
+})());
+check('a planned driver the car no longer has falls back to the seat', (() => {
+  const c = JSON.parse(JSON.stringify(seatCar));
+  c.plan = { stints: seatCar.plan.stints.map(r => ({ ...r, driverId: 'gone' })) };
+  c.currentDriverId = c.drivers[1].id;
+  const futures = projectStints(c, seatRace, seatNow).filter(b => b.kind === 'future');
+  return futures.length > 0 && futures[0].laps === Math.floor(seatUsable / 3.5);
+})());
+
 check('carCalcs uses the live lap average as the curve reference', (() => {
   const c4 = JSON.parse(JSON.stringify(curveCar));
   c4.state.avgLapSecLive = 105;
@@ -877,9 +1075,12 @@ check('plan uses the curve at the configured average lap', (() => {
   for (const d of c5.drivers) d.fuelCurve = CURVE;
   const p = generatePlan(c5, state.race, Date.now());
   const usable = c5.config.tankLiters - c5.config.safetyFuelL;
-  return p.stints[0].laps === Math.min(
-    Math.floor(usable / 2.5),
-    Math.floor((c5.config.maxStintMin * 60e3) / 110000));
+  // Fuel-based, not lap-based: the stint is as long as the usable fuel lasts
+  // at the curve's burn, unrounded, unless the max stint time is shorter.
+  const want = Math.min((usable / 2.5) * 110000, c5.config.maxStintMin * 60e3);
+  return near(p.stints[0].toMs - p.stints[0].fromMs, want) &&
+    p.stints[0].laps === undefined &&
+    near(p.stints[0].fuelL, want === c5.config.maxStintMin * 60e3 ? (want / 110000) * 2.5 : usable, 0.1);
 })());
 
 // Live laps arriving over the wire must feed the rolling average.
@@ -2165,6 +2366,28 @@ info.timing.engine.reset();
 send4({ type: 'race', patch: { durationH: 24 } });
 await wait(150);
 
+// ---- the rack survives a new race ----
+// The crew books the allocation in once, in the garage. RESET RACE — and so
+// the automatic roll onto a session that starts — must hand it back, not sweep
+// it to S1..S12: that is the whole tyre plan gone at the worst possible moment.
+{
+  const gen = generateTyreSets(state.cars['4'], { pattern: 'MICH[##]', start: 1, count: 6, replaceUnused: true });
+  send({ type: 'update', carId: '4', patch: {
+    tyreSets: gen.sets.map(t => (t.name === 'MICH06' ? { ...t, compound: 'wet' } : t)),
+    config: { tyreSets: gen.sets.length }
+  } });
+  await until(() => state.cars['4'].tyreSets.some(t => t.name === 'MICH06'));
+}
+
+send({ type: 'resetRace' });
+await wait(200);
+check('a new race hands the rack back as it was',
+  state.cars['4'].tyreSets.filter(t => t.name.startsWith('MICH')).length === 6 &&
+  state.cars['4'].tyreSets.find(t => t.name === 'MICH06').compound === 'wet');
+check('a new race hands it back with nothing on it',
+  state.cars['4'].tyreSets.every(t => t.km === 0 && t.laps === 0) &&
+  state.cars['4'].tyreSets.some(t => t.id === state.cars['4'].state.currentTyreSetId));
+
 // ---- starting fuel / starting driver ----
 
 // Back to a pre-start state so the start settings are in their normal context.
@@ -2755,14 +2978,17 @@ check('a measured figure on the part on the car re-seeds the live counter',
 
 // ---- kits: a pad set bedded onto a disc set, mounted and called for as one ----
 {
-  const car1 = state.cars['1'];
+  // "Arrives" is a property of a rack nobody has touched, so it is read off
+  // one: the cars on the wall have run stops and resets by now, and both of
+  // those leave the kits the crew actually ran (see the restock checks).
+  const fresh = defaultCar('9', '9');
   check('a fresh rack arrives kitted straight down the line',
-    car1.brakeSets.discsFront[0].padSetId === 'pf1' &&
-    car1.brakeSets.discsFront[0].kitName === 'F1' &&
-    car1.brakeSets.discsFront[2].padSetId === 'pf3' &&
-    car1.brakeSets.discsRear[0].kitName === 'R1');
+    fresh.brakeSets.discsFront[0].padSetId === 'pf1' &&
+    fresh.brakeSets.discsFront[0].kitName === 'F1' &&
+    fresh.brakeSets.discsFront[2].padSetId === 'pf3' &&
+    fresh.brakeSets.discsRear[0].kitName === 'R1');
   check('a spare pad set with no disc left to bed onto stays free',
-    !car1.brakeSets.discsFront.some(t => t.padSetId === 'pf4'));
+    !fresh.brakeSets.discsFront.some(t => t.padSetId === 'pf4'));
 }
 
 // bedding a free pad set onto a bare disc set is what makes a kit
@@ -3280,6 +3506,212 @@ check('regulations mirrored to every car', Object.values(state.cars).every(c =>
     state.cars['1'].plan.stints[0].driverId === done);
 }
 
+// ---- why a plan cannot be built, said rather than thrown ----
+// Every one of these used to be a GENERATE press that did nothing: the empty
+// crew threw halfway down the generator, the rest handed back a plan that was
+// empty or stopped hours short of the flag and said neither.
+{
+  const now = Date.now();
+  const race = { durationH: 24, startMs: now };
+  const ok = defaultCar('7');
+  check('a car that can be planned for reports no blockers',
+    planBlockers(ok, race).length === 0);
+  check('a plan for it reaches the flag and is not truncated', (() => {
+    const p = generatePlan(ok, race, now);
+    return p.stints.length > 0 && p.truncated === null &&
+      p.stints[p.stints.length - 1].toMs >= race.durationH * 3600e3 - 1;
+  })());
+
+  const noCrew = { ...defaultCar('7'), drivers: [] };
+  check('an empty driver table is named as the blocker',
+    planBlockers(noCrew, race).length === 1 && /driver table is empty/.test(planBlockers(noCrew, race)[0]));
+  // The generator is exported and called from more than one screen: it has to
+  // survive a bad table on its own, not rely on being asked nicely.
+  check('and the generator hands back an empty plan instead of throwing', (() => {
+    const p = generatePlan(noCrew, race, now);
+    return p.stints.length === 0 && p.totals && p.truncated === null;
+  })());
+  // The harder path: a race under way, a stint running, and nobody in the
+  // table to hand it to. Everything the replan reads on the way through has to
+  // survive that, not just the generator at the end of it.
+  check('replanning mid-race with no crew does not throw either', (() => {
+    const c = defaultCar('7');
+    c.drivers = [];
+    c.state.stintStartMs = now - 1800e3;
+    const live = { durationH: 24, startMs: now - 3600e3 };
+    const p = replanFromNow(c, live, now);
+    return Array.isArray(p.stints) && p.replanned === true;
+  })());
+
+  check('a race with no length is named as the blocker',
+    /no length/.test(planBlockers(ok, { durationH: 0 })[0] || ''));
+  check('and generates nothing rather than looping',
+    generatePlan(ok, { durationH: 0, startMs: now }, now).stints.length === 0);
+  check('both blockers are reported together, not one at a time',
+    planBlockers(noCrew, { durationH: 0 }).length === 2);
+  check('a missing car is a blocker of its own', planBlockers(null, race).length === 1);
+
+  // Nothing usable in the tank: every stint comes out one lap long, so the
+  // stint cap runs out before the flag does. That is a setting, not a plan.
+  const dry = defaultCar('7');
+  dry.config.safetyFuelL = dry.config.tankLiters;
+  const cut = generatePlan(dry, race, now);
+  check('a plan that cannot reach the flag says where it stopped',
+    cut.stints.length === PLAN_STINT_CAP && !!cut.truncated &&
+    cut.truncated.atMs < cut.truncated.totalMs &&
+    cut.truncated.totalMs === race.durationH * 3600e3);
+  check('and a car that can reach it is not flagged', generatePlan(ok, race, now).truncated === null);
+  check('nothing blocks it — the fault is in the settings, not the table',
+    planBlockers(dry, race).length === 0);
+}
+
+// ---- the GREEN plan writes the running order ----
+// Pinning a driver on the green stop card moves them up the stint plan, so the
+// rows after the stop keep telling the truth about who gets in and when. The
+// neutralisation plans stay stop-local.
+{
+  const car = state.cars['1'];
+  send({ type: 'update', carId: '1', patch: { plan: generatePlan(car, state.race, Date.now()) } });
+  await wait(150);
+  const at = plannedNextStintIndex(state.cars['1'], state.race, Date.now());
+  const order = () => state.cars['1'].plan.stints.map(s => s.driverId);
+  // Sorted, because reordering the plan reorders the keys of a tally built
+  // from it and JSON would call the same counts different.
+  const counts = o => JSON.stringify(Object.entries(
+    o.reduce((a, id) => (a[id] = (a[id] || 0) + 1, a), {})).sort());
+  const before = order();
+  // Someone the plan does not already have in that seat, and who is due later.
+  const later = before.slice(at + 1).find(id => id !== before[at]);
+  const wasAt = before.indexOf(later, at + 1);
+
+  send({ type: 'pinStop', carId: '1', plan: 'green', field: 'driver', value: later });
+  await until(() => state.cars['1'].plan.stints[at].driverId === later);
+  const after = order();
+  check('a driver pinned on GREEN is moved up the stint plan', after[at] === later);
+  check('the order behind the insert slides one stint back',
+    after.slice(at + 1, wasAt + 1).join(',') === before.slice(at, wasAt).join(','));
+  check('nothing before or after the insert moves',
+    after.slice(0, at).join(',') === before.slice(0, at).join(',') &&
+    after.slice(wasAt + 1).join(',') === before.slice(wasAt + 1).join(','));
+  check('nobody gains or loses a stint', counts(after) === counts(before));
+  check('seat-time totals follow the insert',
+    Math.abs(Object.values(state.cars['1'].plan.totals).reduce((a, b) => a + b, 0) -
+      state.cars['1'].plan.stints.reduce((a, s) => a + (s.toMs - s.fromMs), 0)) < 1);
+  check('the stop call now reads the driver it was told to expect',
+    plannedNextDriver(state.cars['1'], state.race, Date.now())?.id === later);
+
+  // A neutralisation plan is a work order for a flag, not a running order.
+  const held = order();
+  const other = state.cars['1'].drivers.find(d => d.id !== held[at]).id;
+  send({ type: 'pinStop', carId: '1', plan: 'sc', field: 'driver', value: other });
+  await wait(200);
+  check('a driver pinned on SAFETY CAR leaves the running order alone',
+    order().join(',') === held.join(','));
+  check('the safety car pin is still stored against its own plan',
+    state.cars['1'].nextStop.pins.sc.driver === other);
+  send({ type: 'pinStop', carId: '1', plan: 'sc', field: 'driver', value: null });
+  send({ type: 'pinStop', carId: '1', plan: 'green', field: 'driver', value: null });
+  await wait(150);
+  check('handing the line back to the app does not undo the move',
+    order().join(',') === held.join(','));
+}
+
+// ---- insertPlanDriver on its own ----
+{
+  const c = defaultCar('9');
+  c.drivers.forEach((d, i) => { d.name = 'D' + (i + 1); });
+  const [a, b, cc, dd] = c.drivers.map(d => d.id);
+  const span = i => ({ fromMs: i * 60e3, toMs: (i + 1) * 60e3 });
+  const mk = ids => ({ ...c, plan: { stints: ids.map((id, i) => ({ driverId: id, ...span(i) })) } });
+
+  const p1 = mk([a, b, cc, dd, a, b]);
+  const r1 = insertPlanDriver(p1, 0, cc);
+  check('the driver is taken out of the stint they were next due in',
+    p1.plan.stints.map(s => s.driverId).join(',') === [cc, a, b, dd, a, b].join(',') &&
+    r1.from === 2 && r1.to === 0 && r1.displacedId === null);
+
+  // No later stint to give up — D1 is only ever down for the first row, which
+  // is behind the insert. The tail shifts and the last row is paid with.
+  const p2 = mk([a, b, cc, dd]);
+  const r2 = insertPlanDriver(p2, 1, a);
+  check('a driver with no later stint costs whoever held the last row',
+    p2.plan.stints.map(s => s.driverId).join(',') === [a, a, b, cc].join(',') &&
+    r2.from === null && r2.displacedId === dd);
+
+  const p3 = mk([a, b, cc]);
+  p3.stintHistory = [{ driverId: a }];
+  check('a stint already driven is never inserted into', insertPlanDriver(p3, 0, cc) === null);
+  check('naming the driver already in that stint moves nothing', insertPlanDriver(p3, 1, b) === null);
+  check('a driver who is not on the car moves nothing', insertPlanDriver(p3, 1, 'ghost') === null);
+  check('a car with no plan moves nothing', insertPlanDriver({ ...c, plan: null }, 0, a) === null);
+
+  const p4 = mk([a, b, cc, a]);
+  insertPlanDriver(p4, 0, cc);
+  recountPlanTotals(p4);
+  check('totals count every row and nothing else',
+    p4.plan.totals[a] === 120e3 && p4.plan.totals[cc] === 60e3 && p4.plan.totals[dd] === 0);
+}
+
+// ---- where the running order stops matching the driver table ----
+{
+  const c = defaultCar('8');
+  c.drivers.forEach((d, i) => { d.name = 'D' + (i + 1); });
+  const [a, b, cc] = c.drivers.map(d => d.id);
+  const row = (id, i, night = false) => ({ driverId: id, fromMs: i * 3600e3, toMs: (i + 1) * 3600e3, night });
+
+  const clean = { ...c, plan: { stints: [row(a, 0), row(b, 1), row(cc, 2), row(c.drivers[3].id, 3)] } };
+  check('a plan that matches the driver table says nothing',
+    planDriverIssues(clean).list.length === 0);
+
+  // A night stint on a driver who does not drive at night.
+  const nightBad = { ...c, plan: { stints: [row(a, 0), row(b, 1, true), row(cc, 2), row(c.drivers[3].id, 3)] } };
+  nightBad.drivers = c.drivers.map(d => d.id === b ? { ...d, night: false } : d);
+  const ni = planDriverIssues(nightBad);
+  check('a night stint on a driver who does not drive at night is flagged',
+    ni.byStint[1].some(x => x.code === 'night') && ni.list.some(x => x.index === 1));
+
+  // Back to back for someone who is not down for it.
+  const dbl = { ...c, plan: { stints: [row(a, 0), row(b, 1), row(b, 2), row(cc, 3)] } };
+  dbl.drivers = c.drivers.map(d => d.id === b ? { ...d, doubleStint: false } : d);
+  const di = planDriverIssues(dbl);
+  check('back-to-back stints for a driver who does not double are flagged',
+    di.byStint[1].some(x => x.code === 'double') && di.byStint[2].some(x => x.code === 'double'));
+  check('the same fault is listed once, not once per row',
+    di.list.filter(x => x.code === 'double').length === 1);
+  check('a driver who does double is not flagged for two',
+    planDriverIssues({ ...c, plan: dbl.plan }).list.every(x => x.code !== 'double'));
+
+  // Three in a row is nobody's preference — the generator never writes one.
+  const tri = { ...c, plan: { stints: [row(a, 0), row(b, 1), row(b, 2), row(b, 3)] } };
+  check('three stints back to back are flagged whatever the flags say',
+    planDriverIssues(tri).list.some(x => x.code === 'triple' && /3 stints/.test(x.text)));
+
+  // Driven stints are history, not something to warn about.
+  const past = { ...nightBad, stintHistory: [{ driverId: a }, { driverId: b }] };
+  check('a fault in a stint already driven is left alone',
+    planDriverIssues(past).list.length === 0);
+
+  // Drive-time limits, read off the plan's own rows.
+  const reg = { ...c, plan: { stints: [row(a, 0), row(a, 1), row(a, 2), row(b, 3)] } };
+  reg.config = { ...c.config, regTotalMin: 120, reg6hMin: 0 };
+  check('a driver planned past the total drive limit is flagged',
+    planDriverIssues(reg).list.some(x => x.code === 'total' && x.index === null));
+  reg.config = { ...c.config, regTotalMin: 0, reg6hMin: 120 };
+  check('a driver planned past the 6 h window limit is flagged',
+    planDriverIssues(reg).list.some(x => x.code === 'win6h'));
+  reg.config = { ...c.config, regTotalMin: 0, reg6hMin: 0 };
+  check('limits left at zero are not enforced',
+    planDriverIssues(reg).list.every(x => x.code !== 'total' && x.code !== 'win6h'));
+
+  // A driver the order has squeezed out entirely.
+  const none = { ...c, plan: { stints: [row(a, 0), row(b, 1)] } };
+  check('a driver with no stints left in the plan is flagged',
+    planDriverIssues(none).list.filter(x => x.code === 'nostints').length === 2);
+
+  check('a car with no plan has nothing to say',
+    planDriverIssues({ ...c, plan: null }).list.length === 0);
+}
+
 // ---- pit congestion ----
 {
   const cg = pitCongestion(Object.values(state.cars), state.race, Date.now());
@@ -3336,21 +3768,61 @@ check('stintStats filters outliers', (() => {
 
   const p5 = paceWindowStats(pw, 'd2', 5);
   check('pace window takes the newest laps', p5.laps.join() === '102,103,104,100,101');
-  check('pace average is the plain mean of the window', p5.avgSec === 102);
+  check('pace average is the mean of the window', p5.avgSec === 102);
   check('pace best / worst / last', p5.bestSec === 100 && p5.worstSec === 104 && p5.lastSec === 101);
   check('pace counts every lap behind the window', p5.total === 7);
+  check('a clean window strikes nothing', p5.ignored === 0 && p5.counted === 5 && !p5.lastIsOut);
+  check('the cut is 107% of the counted average', p5.cutSec === Math.round(102 * PACE_OUTLIER_FACTOR * 1000) / 1000);
 
-  // An in-lap in the window: it still counts in the headline average (that is
-  // what the engineer asked for) but is flagged, and the clean figure is offered.
+  // An in-lap arrives. It is struck through, counts in NO figure on the card,
+  // and the window reaches one lap further back so the average is still read
+  // over five real laps — the same five it was reading before the stop.
   pw.state.stintLapSec = [100, 101, 145];
   const pOut = paceWindowStats(pw, 'd2', 5);
-  check('pace flags the outlier lap', pOut.outliers.filter(Boolean).length === 1 &&
+  check('pace strikes the outlier lap', pOut.outliers.filter(Boolean).length === 1 &&
     pOut.outliers[pOut.outliers.length - 1] === true);
-  check('pace clean average drops it', pOut.cleanAvgSec != null && pOut.cleanAvgSec < pOut.avgSec);
+  check('the struck lap is out of the average', pOut.avgSec === 102 && pOut.counted === 5);
+  check('the window reached back to replace it', pOut.laps.length === 6 && pOut.ignored === 1);
+  check('best / slowest ignore the struck lap', pOut.bestSec === 100 && pOut.worstSec === 104);
+  check('the last-lap figure falls back to the last counted lap',
+    pOut.lastSec === 101 && pOut.lastRawSec === 145 && pOut.lastIsOut === true);
+
+  // 107%, not the fuel model's 115%: a lap 8% off the average is a lap spent
+  // behind something, and the crew must not read it as this driver's pace.
+  const pw107 = defaultCar('9', '9');
+  pw107.currentDriverId = 'd1';
+  pw107.state.stintLapSec = [100, 100, 100, 100, 109, 100, 100];
+  const p107 = paceWindowStats(pw107, 'd1', 5);
+  check('a lap 9% off the average is struck', p107.ignored === 1 && p107.avgSec === 100 &&
+    p107.laps.length === 6 && p107.counted === 5);
+  const p115 = paceWindowStats({ ...pw107, state: { ...pw107.state, stintLapSec: [100, 100, 100, 100, 105, 100, 100] } }, 'd1', 5);
+  check('a lap inside 107% still counts', p115.ignored === 0 && p115.counted === 5);
+
+  // A whole window run under a neutralisation is not struck out wholesale —
+  // the cut is relative to the window's own average, so five consistent slow
+  // laps read as five slow laps, which is exactly what the crew is looking at.
+  const pwSc = defaultCar('9', '9');
+  pwSc.currentDriverId = 'd1';
+  pwSc.state.stintLapSec = [100, 100, 100, 100, 100, 185, 186, 187, 188, 189];
+  const pSc = paceWindowStats(pwSc, 'd1', 5);
+  check('an evenly neutralised window reads its own pace',
+    pSc.laps.length === 5 && pSc.ignored === 0 && pSc.avgSec === 187);
+
+  // When eligible laps really are scarce, the reach stops at three times the
+  // window rather than dragging a half-hour-old stint into a five-lap average.
+  const pwFar = defaultCar('9', '9');
+  pwFar.currentDriverId = 'd1';
+  pwFar.state.stintLapSec = [
+    ...Array(10).fill(100), ...Array(11).fill(400), ...Array(4).fill(100)
+  ];
+  const pFar = paceWindowStats(pwFar, 'd1', 5);
+  check('the reach is bounded', pFar.laps.length === 5 * PACE_WINDOW_REACH);
+  check('a short window is honest about what it counted',
+    pFar.counted === 4 && pFar.ignored === 11 && pFar.avgSec === 100);
 
   const pEmpty = paceWindowStats(pw, 'd4', 5);
   check('pace window empty for a driver who has not driven',
-    pEmpty.laps.length === 0 && pEmpty.avgSec === null && pEmpty.cleanAvgSec === null);
+    pEmpty.laps.length === 0 && pEmpty.avgSec === null && pEmpty.counted === 0 && pEmpty.cutSec === null);
 }
 
 // ---- pit arrival estimate (pitEta) ----
@@ -4457,6 +4929,17 @@ check('stintStats filters outliers', (() => {
   await wait(250);
   check('the qualifying laps are on the sheet', stateR.cars['1'].state.totalLaps === 2);
 
+  // The allocation the crew booked in for the weekend, with the wets marked:
+  // the one thing a session change must hand back rather than sweep away.
+  {
+    const gen = generateTyreSets(stateR.cars['1'], { pattern: 'Q[#]', start: 1, count: 5, replaceUnused: true });
+    sendR({ type: 'update', carId: '1', patch: {
+      tyreSets: gen.sets.map(t => (t.name === 'Q5' ? { ...t, compound: 'wet' } : t)),
+      config: { tyreSets: gen.sets.length }
+    } });
+    await until(() => stateR.cars['1'].tyreSets.some(t => t.name === 'Q5'));
+  }
+
   // Next session of the weekend, its clock at zero: nothing on screen can
   // belong to it, so it is saved and the race rolls onto the new one.
   infoR.timing._liveTest(heat('Race', 0));
@@ -4464,6 +4947,10 @@ check('stintStats filters outliers', (() => {
   check('a session that starts here needs no answer on the wall', !stateR.timing.sessionAlert);
   check('the race rolls onto it', stateR.timing.sessionKey === 'Race' &&
     stateR.cars['1'].state.totalLaps === 0);
+  check('the rack survives the session it was booked in for',
+    stateR.cars['1'].tyreSets.filter(t => /^Q\d$/.test(t.name)).length === 5 &&
+    stateR.cars['1'].tyreSets.find(t => t.name === 'Q5').compound === 'wet' &&
+    stateR.cars['1'].tyreSets.every(t => t.km === 0 && t.laps === 0));
   const rolled = stateR.timing.sessionRolled;
   check('what was on screen is saved first', rolled?.from === 'Qualifying' && rolled?.to === 'Race' &&
     rolled?.laps === 2 && !!rolled?.backup);
@@ -4500,6 +4987,75 @@ check('stintStats filters outliers', (() => {
     stateR.timing.sessionRolled?.from === 'Race' && !!stateR.timing.sessionRolled?.backup);
   fs.rmSync(rollDir, { recursive: true, force: true });
 }
+
+// ---- red flags: the field stood still, so did the clocks --------------------
+// Pure: a race with a safety car, one red flag that ended and one still out.
+// Nothing that counts driving may count the red minutes — the stint clock,
+// seat time under the regulations — and the timeline cuts the stint where
+// the flag fell.
+{
+  const t0 = 1_700_000_000_000;
+  const M = 60e3;
+  const race = {
+    startMs: t0, durationH: 4,
+    fcy: { mode: 'auto', active: false, startMs: null, source: 'feed', flag: 2, overrideFlag: null },
+    flagLog: [
+      { id: 'sc', fromMs: t0 + 10 * M, toMs: t0 + 15 * M, source: 'feed' },
+      { id: 'red', fromMs: t0 + 30 * M, toMs: t0 + 50 * M, source: 'feed' },
+      { id: 'red', fromMs: t0 + 80 * M, toMs: null, source: 'manual' }
+    ]
+  };
+  const now = t0 + 90 * M;
+  check('a yellow is not a hold', heldMs(race, t0, t0 + 20 * M) === 0);
+  check('a red inside the span is held in full', heldMs(race, t0, t0 + 60 * M) === 20 * M);
+  check('a red across the edge is held in part', heldMs(race, t0 + 40 * M, t0 + 60 * M) === 10 * M);
+  check('a red still out is held to the end of the span', heldMs(race, t0 + 60 * M, now) === 10 * M);
+  check('driven time is the span less the reds', drivenMs(race, t0, now) === 60 * M);
+  const periods = flagPeriods(race, now);
+  check('the open period reads to now', periods.at(-1).toMs === now && periods.at(-1).open === true);
+  check('closed periods are not open', periods.slice(0, 2).every(p => !p.open));
+
+  const car = defaultCar('9', 9);
+  const [d0, d1] = car.drivers;
+  car.currentDriverId = d1.id;
+  car.state.stintStartMs = t0 + 60 * M;
+  car.stintHistory = [{ startMs: t0, endMs: t0 + 60 * M, driverId: d0.id, laps: 20,
+    pitSec: 70, stationarySec: 40, estStationarySec: 60 }];
+  const c = carCalcs(car, race, now);
+  check('the stint clock leaves the red out', c.stintElapsedMs === 20 * M, c.stintElapsedMs);
+  check('and says it is held', c.stintHeld === true);
+  const reg = driveTimeStats(car, race, now);
+  check('seat time leaves the reds out', reg.byDriver[d0.id].totalMs === 40 * M && reg.byDriver[d1.id].totalMs === 20 * M,
+    `${reg.byDriver[d0.id].totalMs / M} / ${reg.byDriver[d1.id].totalMs / M}`);
+
+  const blocks = projectStints(car, race, now);
+  const kinds = blocks.map(b => b.kind);
+  check('a past stint is cut at the red flag', kinds.slice(0, 4).join() === 'past,red,past,lane', kinds.slice(0, 5).join());
+  const lane = blocks.find(b => b.kind === 'lane');
+  check('the lane block runs from entry to release', lane.to - lane.from === 70e3 && lane.to === 60 * M && lane.done && lane.pitSec === 70);
+  check('the stint block ends at the lane entry', blocks[2].to === lane.from);
+  check('the red block keeps its stint number', blocks[1].stint === 0 && blocks[1].open === false);
+  // A lane block is numbered with the stint it ends, so the next stop is
+  // stint 1's too — the driving pieces are what the cut is about.
+  const cur = blocks.filter(b => b.stint === 1 && b.kind !== 'lane');
+  check('the running stint is cut by the red still out, up to NOW',
+    cur.map(b => b.kind).join() === 'current,red,projected' && cur[1].to === 90 * M && cur[1].open === true,
+    cur.map(b => b.kind).join());
+  const next = blocks.find(b => b.kind === 'lane' && b.next);
+  check('the next stop is a lane block the size of the pit loss',
+    !!next && next.to - next.from === (car.config.pitLossSec || 0) * 1000 && !next.done);
+  check('a red flag before the stint does not touch it', drivenMs(race, t0 + 50 * M, t0 + 70 * M) === 20 * M);
+}
+
+// Live: a condition called by hand opens a period on the server's flag log,
+// and going back to green closes it.
+send({ type: 'fcy', mode: 'sc' });
+await until(() => state.race.flagLog?.at(-1)?.id === 'sc' && state.race.flagLog.at(-1).toMs == null);
+check('a manual call opens a period on the flag log',
+  state.race.flagLog.at(-1)?.id === 'sc' && state.race.flagLog.at(-1).source === 'manual');
+send({ type: 'fcy', mode: 'auto' });
+await until(() => state.race.flagLog.at(-1).toMs > 0);
+check('back to green closes it', state.race.flagLog.at(-1).toMs >= state.race.flagLog.at(-1).fromMs);
 
 // ---- port walk -------------------------------------------------------------
 // The pit wall asks for headroom (portTries): a port already held — a second

@@ -14,6 +14,7 @@
   --night-row: #131b2e;    /* night stints in the plan table */
   --tl-future: #31405a;    /* projected future stints on the timeline */
   --tl-night: #3b4d7a;     /* the 21:00–06:00 ribbon above the timeline bar */
+  --tl-lane: #c9d3e0;      /* the pit lane on the timeline: never a driver colour */
   --fcy-bg: #2a2110;
   --flash-bg: #2a1414;
   --go-bg: #12281a;        /* green "stays as is" tint: stay-out verdict, first in queue */
@@ -65,6 +66,7 @@ body.light {
   --night-row: #dde4f0;
   --tl-future: #b6c3d6;
   --tl-night: #8fa3c8;
+  --tl-lane: #4b5a70;
   --fcy-bg: #fdf1da;
   --flash-bg: #ffdada;
   --go-bg: #d8f7e2;
@@ -768,6 +770,12 @@ body.page-scroll .station .main > .col { overflow-y: auto; min-height: 0; }
 .nowstrip .itm { display: flex; align-items: baseline; gap: 7px; white-space: nowrap; }
 /* display:flex would beat the hidden attribute (same trap as .lapbox) */
 .nowstrip .itm[hidden] { display: none; }
+/* The stint clock under a red flag: the number stands still, and this says why. */
+.nowstrip .held {
+  align-self: center; font-size: 10px; font-weight: 700; letter-spacing: .08em;
+  padding: 1px 6px; border-radius: 3px; background: var(--red); color: var(--bg);
+}
+.nowstrip .held[hidden] { display: none; }
 .nowstrip .lab {
   color: var(--dim);
   font-size: 11px;
@@ -1473,7 +1481,7 @@ body.page-scroll .station .main > .col { overflow-y: auto; min-height: 0; }
 .timeline-wrap { overflow: hidden; flex-shrink: 0; }
 /* The extra height over the bar itself is the pit-stop lane: every stop is
    marked on the bar and priced above it. */
-.timeline-wrap svg { width: 100%; height: 172px; display: block; }
+.timeline-wrap svg { width: 100%; height: 190px; display: block; }
 
 .drv-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
 .drv-row .dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
@@ -2629,9 +2637,9 @@ body.board-min .wallcard .pitorder .of { display: none; }
 .grabtable td.blocked .v { color: var(--amber); }
 /* Same instruction as the column beside it: said in full, said quietly. */
 .grabtable td.echo .v { color: var(--dim); font-weight: 700; font-size: 20px; opacity: .75; }
-/* The row that forces the next stop: a marker, not an instruction — amber,
-   so the pair of instruction colours keeps meaning only what it means. */
-.grabtable tr.lim td.cat { color: var(--amber); }
+/* Which row forces the next stop is said in words in the band at the top of
+   the card ("FUEL limited"), so the part names down the side stay one colour:
+   on the grab list itself colour only ever means the instruction. */
 .grabtable tfoot td {
   border-top: 1px solid var(--line);
   border-bottom: none;
@@ -2797,7 +2805,7 @@ body.board-min .wallcard .pitorder .of { display: none; }
   .planner textarea { height: 32px; }
   .planner .actions { margin-top: 8px; }
   .limitbanner .val { font-size: 20px; }
-  .timeline-wrap svg { height: 142px; }
+  .timeline-wrap svg { height: 160px; }
   .meter { margin: 3px 0 6px; }
 }
 
@@ -3050,6 +3058,26 @@ body.light { --trk-s1: #c92730; --trk-s2: #7f8f0a; --trk-s3: #0e93a0; --trk-s4: 
 .plan-table td.crit { color: var(--red); font-weight: 700; }
 .plan-table td .warn { color: var(--amber); font-weight: 700; }
 .plan-table td .ico { width: 14px; height: 14px; vertical-align: -2px; }
+/* The row a stop taken now would start — the one the GREEN plan's DRIVER line
+   is about, marked so the link between the two screens is visible from here. */
+.plan-table tr.next td:first-child { box-shadow: inset 3px 0 0 var(--amber); }
+/* A row that no longer respects the driver table. Amber edge, not a fill: the
+   night tint underneath it is still worth reading. */
+.plan-table tr.offplan td { background: color-mix(in srgb, var(--amber) 9%, transparent); }
+
+/* Everything the running order breaks, above the table. */
+.planwarn {
+  margin: 10px 0 2px;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--amber) 10%, transparent);
+  color: var(--amber);
+  font-size: 14px;
+  line-height: 1.45;
+}
+.planwarn b { color: var(--amber); }
+.planwarn .ico { width: 15px; height: 15px; vertical-align: -3px; }
 
 .drift {
   margin: 10px 0 2px;

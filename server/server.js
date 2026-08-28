@@ -10,7 +10,7 @@ import {
   defaultState, defaultCar, defaultCarNumber, defaultDriver, defaultTiming, defaultEvent, EVENT_FIELDS,
   timingNrOf, deepMerge, emptyStop, effectiveBurn, pushLapTime, raceCondition, paceLapSec,
   FCY_MODES, PORT, defaultTyreSets, reconcileTyreSets, stopTyreSet, stintStats,
-  reconcileTyreWarmers, loadTyreWarmer, TYRE_WARMER_MAX,
+  reconcileTyreWarmers, loadTyreWarmer, TYRE_WARMER_MAX, restockRacks,
   learnLapSample, learnFuelReading, dirtyFuelRef, startFuelOf,
   currentTyreSet, tyreSetMileage, recommendedStops, resolveStop, stopPlanHash,
   PLAN_KEYS, activePlanKey,
@@ -18,7 +18,8 @@ import {
   defaultAllBrakeSets, reconcileBrakeSets, stopBrakeSet, brakeSetsOf, DEFAULT_BRAKE_SET_COUNT,
   reconcileBrakeKits, linkBrakeKit, syncBrakeKitToCar, brakeAxle, kitOfDiscSet,
   stopBrakeKit, stopPadSet,
-  PACE_WINDOW_DEFAULT, applyCarFile, stintStartOf, raceClock, feedSessionAge
+  PACE_WINDOW_DEFAULT, applyCarFile, stintStartOf, raceClock, feedSessionAge, drivenMs, heldMs,
+  plannedNextStintIndex, insertPlanDriver, recountPlanTotals
 } from '../shared/model.js';
 import { createTimingService } from './livetiming.js';
 
@@ -65,6 +66,8 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
     s.race.fcy.source ??= s.race.fcy.active ? 'manual' : 'none';
     s.race.fcy.flag ??= null;
     s.race.fcy.overrideFlag ??= null;
+    // Every flag period the race has seen (timeline bands, red-flag holds).
+    s.race.flagLog ??= [];
     s.settings ??= {};
     s.settings.backupIntervalMin ??= 5;
     // States saved before event settings existed: adopt the first car's
@@ -255,6 +258,18 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
         d.abbrev ??= '';
         d.timingName ??= '';
         if (!Array.isArray(d.fuelCurve)) d.fuelCurve = [];
+      }
+      // Two seats sharing an id (a longer car file loaded onto a re-numbered
+      // roster by an older build) are one driver to every reader keyed by id;
+      // the later seat gets an id of its own.
+      const seatIds = new Set();
+      for (const d of c.drivers) {
+        if (!d.id || seatIds.has(d.id)) {
+          let n = 1;
+          while (seatIds.has('d' + n) || c.drivers.some(x => x !== d && x.id === 'd' + n)) n++;
+          d.id = 'd' + n;
+        }
+        seatIds.add(d.id);
       }
       if (!c.drivers.some(d => d.id === c.currentDriverId)) {
         c.currentDriverId = c.drivers[0].id;
@@ -619,6 +634,7 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
   function resetRaceData() {
     state.race.startMs = null;
     state.race.fcy = { mode: 'auto', active: false, startMs: null, source: 'none', flag: null, overrideFlag: null };
+    state.race.flagLog = [];
     const nowOnline = stationsOnline();
     for (const c of Object.values(state.cars)) {
       const fresh = defaultCar(c.id, c.number).state;
@@ -631,21 +647,12 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
       c.stintHistory = [];
       for (const d of c.drivers) d.totalMs = 0;
       // Fresh rubber and a clean learning slate — a reset usually means a new
-      // event, where old pace/burn data would only mislead.
-      c.tyreSets = defaultTyreSets(c.config.tyreSets || 12);
-      c.tyreSets[0].used = true;
-      c.state.currentTyreSetId = c.tyreSets[0].id;
-      // A fresh rack too, with the first of each set fitted.
-      c.brakeSets = defaultAllBrakeSets(c.config.brakeSets);
-      c.state.currentBrakeSetId = Object.fromEntries(
-        BRAKE_COMPONENTS.map(b => [b.id, c.brakeSets[b.id][0].id]));
+      // event, where old pace/burn data would only mislead. The racks
+      // themselves survive: the crew's own set numbers, compounds and kits are
+      // garage work, not race data, and a session starting must never sweep
+      // them back to S1..S12 (see restockRacks).
       c.learn = { byDriver: {}, fuelRef: null };
-      reconcileTyreSets(c);
-      // The boxes stay — they are the garage's, not the race's — but a reset
-      // empties them, since the rack they were holding is gone.
-      for (const w of c.tyreWarmers || []) w.setId = null;
-      reconcileTyreWarmers(c);
-      reconcileBrakeSets(c);
+      restockRacks(c);
     }
   }
 
@@ -1059,6 +1066,19 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
     // having to re-derive it from a timing snapshot it may not have yet.
     if (cond.id !== fcy.condition) {
       fcy.condition = cond.id;
+      changed = true;
+    }
+    // The flag log: every non-green period the race has seen, feed flags and
+    // manual calls alike, closed the moment the condition moves on. The
+    // timeline draws it, and the clocks that stop with the field read the
+    // red periods off it — so it is written here, where the condition is
+    // resolved, and nowhere else.
+    const log = state.race.flagLog;
+    const open = log.length && log[log.length - 1].toMs == null ? log[log.length - 1] : null;
+    if (cond.id !== (open ? open.id : 'green')) {
+      const at = Date.now();
+      if (open) open.toMs = at;
+      if (cond.id !== 'green') log.push({ id: cond.id, fromMs: at, toMs: null, source: cond.source });
       changed = true;
     }
     return changed;
@@ -1577,10 +1597,7 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
           st.driverId = m.driverId;
           // Seat-time totals are shown straight off the plan, so they have to
           // follow the edit or the table contradicts itself.
-          const totals = {};
-          for (const d of car.drivers) totals[d.id] = 0;
-          for (const s of car.plan.stints) totals[s.driverId] = (totals[s.driverId] || 0) + (s.toMs - s.fromMs);
-          car.plan.totals = totals;
+          recountPlanTotals(car);
         }
         break;
       }
@@ -1685,7 +1702,13 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
         if (!car || !car.state.stintStartMs) break;
         const elapsed = Number(m.elapsedMs);
         if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed > 48 * 3600e3) break;
-        let ms = Date.now() - elapsed;
+        // `elapsed` is driven time: the red flags between the start and now
+        // go back in, so the clock reads what was asked for. Each pass can
+        // only uncover more red behind the start it just moved, hence the
+        // few fixed-point rounds.
+        const at = Date.now();
+        let ms = at - elapsed;
+        for (let i = 0; i < 4; i++) ms = at - elapsed - heldMs(state.race, ms, at);
         if (state.race.startMs) ms = Math.max(ms, state.race.startMs);
         car.state.stintStartMs = ms;
         break;
@@ -1770,7 +1793,7 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
           const now = Date.now();
           const start = stintStartOf(car, state.race);
           const stintH = raceClock(state.race, now).running && start
-            ? Math.max(0, now - start) / 3600e3 : 0;
+            ? drivenMs(state.race, start, now) / 3600e3 : 0;
           car.state.brakeUsedH[m.comp] = +Math.max(0, hours - stintH).toFixed(4);
           set.used = true;
         } else {
@@ -1930,6 +1953,21 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
         car.nextStop.pins[key] ??= {};
         if (m.value == null) delete car.nextStop.pins[key][m.field];
         else car.nextStop.pins[key][m.field] = m.value;
+        // GREEN is the stint plan's running order, so a driver called for by
+        // hand here is written into it: the named driver is moved up to the
+        // next stint and the rest of the order slides one stint back, which
+        // keeps every row after this stop telling the truth about who gets in
+        // and when. Under the old behaviour the pin was stop-local and every
+        // later row of the plan was quietly one driver out.
+        // The neutralisation plans stay stop-local on purpose — a safety car
+        // plan written hours ahead for a flag that never flies must not
+        // reorder the race. Handing the line back to the app (a null pin) does
+        // not undo the move either: the plan now says what was pinned, so the
+        // app's own answer is already that driver.
+        if (key === 'green' && m.field === 'driver' && m.value != null) {
+          const idx = plannedNextStintIndex(car, state.race, Date.now());
+          insertPlanDriver(car, idx, m.value === 'stay' ? car.currentDriverId : m.value);
+        }
         // The plan the crew was shown has changed under them — that one only.
         if (car.nextStop.approvals?.[key]) car.nextStop.approvals[key].stale = true;
         break;
@@ -2056,7 +2094,7 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
     // Clamped to the race start: a stint anchored in an earlier session must
     // not fold six days of brake hours and seat time into this stop.
     const stintStartMs = stintStartOf(car, state.race);
-    const stintMs = stintStartMs ? Math.max(0, now - stintStartMs) : 0;
+    const stintMs = stintStartMs ? drivenMs(state.race, stintStartMs, now) : 0;
 
     for (const k of Object.keys(s.brakeUsedH)) {
       s.brakeUsedH[k] = +(s.brakeUsedH[k] + stintMs / 3600e3).toFixed(4);

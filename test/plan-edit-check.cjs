@@ -180,6 +180,70 @@ app.whenReady().then(async () => {
   })()`);
   check('a second station sees the same edited plan', shown2 === target);
 
+  // ---- the other direction: the GREEN card writes the running order ----
+  // A driver called for by hand on the stop card is moved up the stint plan and
+  // the order behind them slides one stint back, so every row after the stop
+  // still says who gets in and when. Driven through the real button.
+  await js("document.getElementById('btn-plan-close').click(); true");
+  await wait(600);
+  const { plannedNextStintIndex } = await import(pathToFileURL(path.join(root, 'shared', 'model.js')));
+  const at = plannedNextStintIndex(shared.cars['1'], shared.race, Date.now());
+  const orderBefore = shared.cars['1'].plan.stints.map(s => s.driverId);
+  // Someone the plan does not already have in that seat and who is due later.
+  const moveUp = orderBefore.slice(at + 1).find(id => id !== orderBefore[at]);
+  const wasAt = orderBefore.indexOf(moveUp, at + 1);
+  const clicked = await js(`(() => {
+    const b = document.querySelector('#plan-lines button[data-pin="driver"][data-val="${moveUp}"]');
+    if (!b) return false;
+    b.click();
+    return true;
+  })()`);
+  check('the DRIVER line offers the other drivers as buttons', clicked);
+  const moved = await until(() => shared.cars['1'].plan.stints[at].driverId === moveUp);
+  const orderAfter = shared.cars['1'].plan.stints.map(s => s.driverId);
+  console.log(`   stints ${at + 1}-${wasAt + 1}: ${orderBefore.slice(at, wasAt + 1).join(',')} -> ${orderAfter.slice(at, wasAt + 1).join(',')}`);
+  check('a driver pinned on GREEN is moved up the stint plan', moved);
+  check('the order behind the insert slides one stint back',
+    orderAfter.slice(at + 1, wasAt + 1).join(',') === orderBefore.slice(at, wasAt).join(','));
+  check('nothing outside the moved run is touched',
+    orderAfter.slice(0, at).join(',') === orderBefore.slice(0, at).join(',') &&
+    orderAfter.slice(wasAt + 1).join(',') === orderBefore.slice(wasAt + 1).join(','));
+  const tally = o => JSON.stringify(Object.entries(
+    o.reduce((a, id) => (a[id] = (a[id] || 0) + 1, a), {})).sort());
+  check('nobody gains or loses a stint', tally(orderAfter) === tally(orderBefore));
+  check('the pin is stored against the green plan only',
+    shared.cars['1'].nextStop.pins.green.driver === moveUp &&
+    !shared.cars['1'].nextStop.pins.sc.driver);
+
+  // The line the call was made on says what it did to the plan.
+  const drvRow = await js(`(() => {
+    const el = [...document.querySelectorAll('#plan-lines .k')].find(
+      e => e.textContent.trim() === 'DRIVER');
+    return el ? el.closest('.pline').innerText.replace(/\\s+/g, ' ').trim() : '';
+  })()`);
+  console.log(`   DRIVER row now reads: "${drvRow}"`);
+  check('the DRIVER line says the stint plan was written', /stint plan/i.test(drvRow));
+
+  // The open plan table has to redraw on the new order, which carries no new
+  // timestamp for the render key to notice.
+  await js("document.getElementById('btn-plan').click(); true");
+  await wait(900);
+  const tableAt = await js(`(() => {
+    const sels = document.querySelectorAll('#plan-out select.plan-drv');
+    return sels[${at}] ? sels[${at}].value : null;
+  })()`);
+  check('the plan table redraws on the moved order', tableAt === moveUp);
+  // A window made with show:false never repaints, so capturePage would hand
+  // back a stale frame — show it without stealing focus just long enough.
+  station.showInactive();
+  await wait(1200);
+  await js("document.getElementById('plan-out').scrollIntoView({block:'start'}); true");
+  await wait(400);
+  await station.webContents.capturePage().then(img =>
+    fs.writeFileSync(path.join(outDir, 'plan-insert.png'), img.toPNG()));
+  station.hide();
+  console.log('   captured plan-insert.png');
+
   // ---- the neutralisation-call fields, edited on the card itself ----
   // Close the plan panel first so the card is on screen.
   await js("document.getElementById('btn-plan-close').click(); true");
@@ -260,6 +324,88 @@ app.whenReady().then(async () => {
     fs.writeFileSync(path.join(outDir, 'caution-card.png'), img.toPNG()));
   station.hide();
   console.log('   captured caution-card.png');
+
+  // ---- the other half: an order that no longer matches the driver table ----
+  // Driver 2 is taken off doubles, then the plan is bent to give them two
+  // stints back to back — a thing the generator can never write for itself, so
+  // everything the panel says about it is the consequence of the hand edit.
+  send({ type: 'update', carId: '1', patch: {
+    drivers: shared.cars['1'].drivers.map((d, i) =>
+      i === 1 ? { ...d, night: false, doubleStint: false } : d)
+  } });
+  await until(() => shared.cars['1'].drivers[1].doubleStint === false);
+  const d2 = shared.cars['1'].drivers[1].id;
+  const d1 = shared.cars['1'].drivers[0].id;
+  const pair = shared.cars['1'].plan.stints.length - 2;
+  // Exactly two in a row: the stint before the pair is handed to someone else,
+  // or a stray third would make this a triple and read as a different fault.
+  send({ type: 'planStint', carId: '1', index: pair - 1, driverId: d1 });
+  send({ type: 'planStint', carId: '1', index: pair, driverId: d2 });
+  send({ type: 'planStint', carId: '1', index: pair + 1, driverId: d2 });
+  await until(() => shared.cars['1'].plan.stints[pair].driverId === d2 &&
+    shared.cars['1'].plan.stints[pair + 1].driverId === d2);
+
+  await js("document.getElementById('btn-plan').click(); true");
+  await wait(900);
+  const warned = await js(`(() => {
+    const strip = document.querySelector('#plan-out .planwarn');
+    const rows = document.querySelectorAll('#plan-out tr.offplan');
+    return { strip: strip ? strip.innerText.replace(/\\s+/g, ' ').trim() : null, rows: rows.length };
+  })()`);
+  console.log(`   plan warning: "${warned.strip}" on ${warned.rows} rows`);
+  check('a hand-edited order says what it broke',
+    !!warned.strip && /double/i.test(warned.strip));
+  check('and it names every stint the fault lands on, not just the first',
+    /stints \d+(, \d+)+/.test(warned.strip));
+  check('and the rows themselves are flagged', warned.rows >= 2);
+
+  // The stop card carries the same news, sized to the stop: a fault ten stints
+  // away is counted, not spelled out, so the busiest screen stays readable.
+  await js("document.getElementById('btn-plan-close').click(); true");
+  await wait(700);
+  const drvRow2 = await js(`(() => {
+    const el = [...document.querySelectorAll('#plan-lines .k')].find(
+      e => e.textContent.trim() === 'DRIVER');
+    return el ? el.closest('.pline').innerText.replace(/\\s+/g, ' ').trim() : '';
+  })()`);
+  console.log(`   DRIVER row with a broken plan: "${drvRow2}"`);
+  check('the stop card says the running order is broken further down',
+    /later stints? no longer match/i.test(drvRow2));
+  await js("document.getElementById('btn-plan').click(); true");
+  await wait(700);
+
+  // Put both settings back, and the panel has to go quiet again — a warning
+  // that sticks once shown is worse than none. The order is untouched: it is
+  // the driver table that has moved back under it.
+  send({ type: 'update', carId: '1', patch: {
+    drivers: shared.cars['1'].drivers.map((d, i) =>
+      i === 1 ? { ...d, night: true, doubleStint: true } : d)
+  } });
+  await until(() => shared.cars['1'].drivers[1].doubleStint === true &&
+    shared.cars['1'].drivers[1].night === true);
+  // The panel is left open on purpose: the order has not moved, only the table
+  // it is measured against, and the plan has to notice that on its own.
+  await wait(1200);
+  const quiet = await js("document.querySelectorAll('#plan-out .planwarn').length");
+  const quietRows = await js("document.querySelectorAll('#plan-out tr.offplan').length");
+  check('putting the setting back clears the warning with the panel still open',
+    quiet === 0 && quietRows === 0);
+
+  // Bend it again for the picture, then paint: a window made with show:false
+  // never repaints, so capturePage would hand back a stale frame.
+  send({ type: 'update', carId: '1', patch: {
+    drivers: shared.cars['1'].drivers.map((d, i) =>
+      i === 1 ? { ...d, night: false, doubleStint: false } : d)
+  } });
+  await until(() => shared.cars['1'].drivers[1].doubleStint === false);
+  station.showInactive();
+  await wait(1200);
+  await js("document.getElementById('plan-out').scrollIntoView({block:'start'}); true");
+  await wait(400);
+  await station.webContents.capturePage().then(img =>
+    fs.writeFileSync(path.join(outDir, 'plan-warning.png'), img.toPNG()));
+  station.hide();
+  console.log('   captured plan-warning.png');
 
   check('no console errors on the station', consoleErrors.length === 0);
   if (consoleErrors.length) console.log('   ' + consoleErrors.join('\n   '));
