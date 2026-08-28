@@ -3936,37 +3936,50 @@ function renderPlanner(car, c, now) {
     b.classList.toggle('mk-stale', !!ap && !!ap.stale);
     b.classList.toggle('mk-custom', !ap && custom);
     const onWall = wallShowsPlan(car, id);
-    b.classList.toggle('offwall', !onWall);
+    // Dashed only when the engineer took the column down — safety car has no
+    // column to take down, so its tab stays plain.
+    b.classList.toggle('offwall', !onWall && id !== 'sc');
     b.title = (id === tab && held
       ? `Holding the ${PLAN_LABEL[id]} plan — tap again to follow the race. `
       : `Write the ${PLAN_LABEL[id]} plan. `) +
       (custom ? 'Its own lines are pinned here. ' : 'Every line follows the app here. ') +
-      (onWall ? '' : 'The wall carries no column for it until the flag is out.');
+      (onWall ? '' : id === 'sc'
+        ? 'The wall never carries a column for it — it shows only while the flag is out.'
+        : 'The wall carries no column for it until the flag is out.');
     b.querySelector('[data-when]').textContent =
       plans.live === id ? 'NOW'
         : p.dueMs != null && p.dueMs > 0 ? fmtMinSec(p.dueMs)
         : id === 'green' ? '—' : 'if it drops';
   }
 
-  // ---- does the wall carry a column for this situation? Two neutralisation
-  // columns that say the same thing are width the crew cannot spare — and the
-  // wall never folds them together on its own, because a column that comes and
-  // goes with what a plan happens to say reads as news across the garage. So it
-  // is the engineer who takes one down. Green never offers the switch: the
-  // planned stop is what the whole card is built around.
+  // ---- does the wall carry a column for this situation? A speculative column
+  // that says the same thing as the planned stop is width the crew cannot
+  // spare — and the wall never folds them together on its own, because a
+  // column that comes and goes with what a plan happens to say reads as news
+  // across the garage. So it is the engineer who takes the code 60 column
+  // down. Green never offers the switch: the planned stop is what the whole
+  // card is built around. Safety car never offers it either: this series runs
+  // Code 60, so the wall carries no IF SAFETY CAR column at all — the line
+  // says so, with nothing to press.
   const wallEl = $('plan-wall');
   const onWall = wallShowsPlan(car, tab);
   wallEl.classList.toggle('hidden', tab === 'green');
   // Rebuilt only when the words change, for the same reason the hold bar is.
   const wallKey = tab === 'green' ? '' : tab + '|' + onWall;
   if (wallKey && wallKey !== planWallKey) {
-    wallEl.className = 'planwall' + (onWall ? '' : ' off');
+    // Amber only for a column the engineer took down; the safety car line is
+    // the normal state of things and stays quiet.
+    wallEl.className = 'planwall' + (onWall || tab === 'sc' ? '' : ' off');
     wallEl.innerHTML = `${icon('monitor')} <span>` + (onWall
       ? `The wall carries an <b>IF ${PLAN_LABEL[tab]}</b> column for this car`
-      : `<b>OFF THE WALL</b> — no ${PLAN_LABEL[tab]} column. The plan still stands, ` +
-        `and the wall shows it the moment the flag is out`) +
-      `</span><button data-wall="${onWall ? 'hide' : 'show'}">` +
-      `${onWall ? 'TAKE IT OFF THE WALL' : 'PUT IT BACK'}</button>`;
+      : tab === 'sc'
+        ? `<b>NEVER ON THE WALL</b> — no ${PLAN_LABEL[tab]} column. The plan still stands, ` +
+          `and the wall shows it only while the flag is actually out`
+        : `<b>OFF THE WALL</b> — no ${PLAN_LABEL[tab]} column. The plan still stands, ` +
+          `and the wall shows it the moment the flag is out`) +
+      `</span>` + (tab === 'sc' ? '' :
+      `<button data-wall="${onWall ? 'hide' : 'show'}">` +
+      `${onWall ? 'TAKE IT OFF THE WALL' : 'PUT IT BACK'}</button>`);
   }
   planWallKey = wallKey;
 

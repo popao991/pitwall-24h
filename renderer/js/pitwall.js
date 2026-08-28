@@ -1156,11 +1156,13 @@ function setTag(set) {
 // asked for but there is nothing free in the rack to do it with.
 // Each column is headed by its own flag chip in its own colour, so which
 // situation a column answers for reads before the words do.
-// The engineer keeps a separate plan per situation, so under green the code 60
-// and safety car plans get a column each — whether they agree or not. Which
-// columns stand is settled by the flag and by what the engineer has left on
-// the wall, never by what a plan currently says: a column that came and went
-// as the plans converged would have the crew reading a layout change as news.
+// The engineer keeps a separate plan per situation; under green the code 60
+// plan gets an IF column beside the planned stop, whether they agree or not.
+// The safety car plan never gets a speculative column — this series runs Code
+// 60, so it only shows while that flag is actually out. Which columns stand
+// is settled by the flag and by what the engineer has left on the wall, never
+// by what a plan currently says: a column that came and went as the plans
+// converged would have the crew reading a layout change as news.
 // Sending a stop takes none of them down either. The stop becomes the card's
 // anchor column, and the IF columns stay beside it — the flag can still drop
 // while the car is on its way in, and that is exactly when the crew needs to
@@ -1233,8 +1235,9 @@ function renderGrab(card, car, c, plans, now) {
     };
   };
   // Which situations get a column: the flag that is out, else the ones this
-  // car keeps on the wall. Never what a plan currently says — two that agree
-  // still stand side by side, the repeated cells simply going dim.
+  // car keeps on the wall (wallShowsPlan never says yes to safety car). Never
+  // what a plan currently says — two that agree still stand side by side, the
+  // repeated cells simply going dim.
   const neutrals = plans.live === 'fcy' || plans.live === 'sc'
     ? [neutralCol(plans.live, 'flying now')]
     : ['fcy', 'sc'].filter(k => wallShowsPlan(car, k)).map(k => neutralCol(k, 'if it drops'));

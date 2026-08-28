@@ -658,13 +658,15 @@ Each card is a **grab list**: the parts down the side (fuel, tyres, driver,
 brakes) and one column per situation — **what this car needs if a yellow drops
 this second**, against the **planned green stop** and when it is due. Every
 column is headed by its own flag badge in its own colour — amber **CODE 60**,
-white **SAFETY CAR**, green **GREEN** — with the line under it saying when the
-column applies (*if it drops*, *planned · 45:30*), so which plan a column
-answers for reads before the words do. Under green the code 60 and safety car
-plans get a column each, whether they currently say the same thing or not:
-which columns stand is decided by the flag and by what the engineer keeps on
-the wall, never by what a plan happens to say — a column that appeared the
-moment two plans diverged would read as news to a crew glancing up. Under an
+green **GREEN**, white **SAFETY CAR** only while that flag is actually out —
+with the line under it saying when the column applies (*if it drops*,
+*planned · 45:30*), so which plan a column answers for reads before the words
+do. Under green the code 60 plan gets a column beside the planned stop, whether
+they currently say the same thing or not: which columns stand is decided by
+the flag and by what the engineer keeps on the wall, never by what a plan
+happens to say — a column that appeared the moment two plans diverged would
+read as news to a crew glancing up. The safety car plan never gets a
+speculative column: this series neutralises under Code 60. Under an
 actual neutralisation only the flag that is flying gets a column, and sending
 a stop takes none of them down: the work order the crew has been given becomes
 the card's anchor column (**this stop**, in the accent colour) and the *if it

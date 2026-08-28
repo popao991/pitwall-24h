@@ -123,6 +123,7 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
       c.wallPlans ??= {};
       for (const k of PLAN_KEYS) c.wallPlans[k] ??= true;
       c.wallPlans.green = true; // the planned stop is never taken off the wall
+      c.wallPlans.sc = false; // and the safety car column never goes up
       c.config.fuelModel ??= 'driver-avg';
       c.config.startFuelL ??= 0;
       c.config.refuelLps ??= 2.5;
@@ -2001,9 +2002,10 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
       // The plan is untouched: it still stands, still approves, and the wall
       // still shows it the moment that flag is actually flying — this only
       // decides whether the crew carries a speculative "IF" column for it.
+      // Green is never taken down and safety car is never put up.
       case 'wallPlan': {
-        if (!car || !PLAN_KEYS.includes(m.plan) || m.plan === 'green') break;
-        car.wallPlans ??= { green: true, fcy: true, sc: true };
+        if (!car || !PLAN_KEYS.includes(m.plan) || m.plan === 'green' || m.plan === 'sc') break;
+        car.wallPlans ??= { green: true, fcy: true, sc: false };
         car.wallPlans[m.plan] = m.show !== false;
         break;
       }

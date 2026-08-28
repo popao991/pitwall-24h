@@ -352,13 +352,15 @@ export function stopPins(car, key) {
 
 // Which of the three situations this car puts a column up for on the wall.
 // The green plan is the card's anchor and always shows — take that away and
-// the crew has no planned stop to read. The two neutralisation columns are the
-// engineer's call: a crew that will never split its safety car plan from its
-// code 60 one gets a column of repeats across the garage instead of
-// information, so they can take one off the wall. Only the column goes — the
-// plan itself stands, and the wall shows it the moment that flag is out.
+// the crew has no planned stop to read. The safety car column never goes up:
+// this series neutralises under Code 60, so a speculative SAFETY CAR column
+// was width across the garage that never said anything the crew would act on.
+// The plan itself stands, and the wall shows it the moment that flag is
+// actually out. The code 60 column is the engineer's call — they can take it
+// off the wall too, and only the column goes.
 export function wallShowsPlan(car, key) {
   if (key === 'green') return true;
+  if (key === 'sc') return false;
   return car?.wallPlans?.[key] !== false;
 }
 
@@ -1700,10 +1702,11 @@ export function defaultCar(id, number) {
       pitCatchUp: null
     },
     nextStop: emptyStop(),
-    // Which situation columns this car shows on the wall's grab list. Both
-    // neutralisation columns are up by default — the engineer takes one down
-    // when its plan will never differ from the other's.
-    wallPlans: { green: true, fcy: true, sc: true },
+    // Which situation columns this car shows on the wall's grab list. The
+    // code 60 column is up by default — the engineer takes it down when its
+    // plan will never differ from the green one. The safety car column never
+    // goes up (see wallShowsPlan).
+    wallPlans: { green: true, fcy: true, sc: false },
     stintHistory: []
   };
 }

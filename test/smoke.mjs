@@ -3171,25 +3171,34 @@ send({ type: 'clearStop', carId: '4', plan: 'sc' });
 await until(() => state.cars['4'].nextStop.status === 'draft');
 
 // ---- which situations get a column on the wall ----
-check('every situation is on the wall to begin with',
-  ['green', 'fcy', 'sc'].every(k => wallShowsPlan(state.cars['4'], k)));
-send({ type: 'wallPlan', carId: '4', plan: 'sc', show: false });
-await until(() => state.cars['4'].wallPlans.sc === false);
-check('the safety car column comes off the wall', !wallShowsPlan(state.cars['4'], 'sc'));
-check('taking a column down leaves the other two up',
-  wallShowsPlan(state.cars['4'], 'fcy') && wallShowsPlan(state.cars['4'], 'green'));
+check('green and code 60 are on the wall to begin with',
+  ['green', 'fcy'].every(k => wallShowsPlan(state.cars['4'], k)));
+check('the safety car column is never on the wall', !wallShowsPlan(state.cars['4'], 'sc'));
+{
+  // The plan itself is untouched — only the column is missing.
+  const plansSc = recommendedStops(state.cars['4'], state.race, Date.now());
+  check('the safety car plan still resolves without a column',
+    resolveStop(state.cars['4'], plansSc.sc) != null);
+}
+send({ type: 'wallPlan', carId: '4', plan: 'sc', show: true });
+await wait(120);
+check('the safety car column cannot be put up', !wallShowsPlan(state.cars['4'], 'sc'));
+send({ type: 'wallPlan', carId: '4', plan: 'fcy', show: false });
+await until(() => state.cars['4'].wallPlans.fcy === false);
+check('the code 60 column comes off the wall', !wallShowsPlan(state.cars['4'], 'fcy'));
+check('taking a column down leaves the planned stop up', wallShowsPlan(state.cars['4'], 'green'));
 {
   // The plan itself is untouched — only the column went.
   const plansOff = recommendedStops(state.cars['4'], state.race, Date.now());
   check('the plan behind a hidden column still resolves',
-    resolveStop(state.cars['4'], plansOff.sc) != null);
+    resolveStop(state.cars['4'], plansOff.fcy) != null);
 }
 send({ type: 'wallPlan', carId: '4', plan: 'green', show: false });
 await wait(120);
 check('the planned stop can never be taken off the wall', wallShowsPlan(state.cars['4'], 'green'));
-send({ type: 'wallPlan', carId: '4', plan: 'sc', show: true });
-await until(() => state.cars['4'].wallPlans.sc === true);
-check('the safety car column goes back up', wallShowsPlan(state.cars['4'], 'sc'));
+send({ type: 'wallPlan', carId: '4', plan: 'fcy', show: true });
+await until(() => state.cars['4'].wallPlans.fcy === true);
+check('the code 60 column goes back up', wallShowsPlan(state.cars['4'], 'fcy'));
 
 // a stop nobody has filled in is sent as the app planned it
 send({ type: 'update', carId: '4', patch: { nextStop: emptyStop() } });
