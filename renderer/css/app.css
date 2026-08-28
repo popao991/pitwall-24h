@@ -3238,6 +3238,31 @@ button.cardcog.on { background: var(--accent); color: #06121f; border-color: var
   font-variant-numeric: tabular-nums;
 }
 .cfg-out { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+
+/* The bypass: the crew's own points for a flag. Set apart from the figures
+   above it because it does not feed them — it replaces what they answer. */
+.ownpoints {
+  margin-top: 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.ownpoints .cfg-grid,
+.ownpoints .cfg-out { opacity: .45; transition: opacity .12s; }
+.ownpoints.on .cfg-grid,
+.ownpoints.on .cfg-out { opacity: 1; }
+.ownpoints .cfg-out { border-top: 0; margin-top: 8px; padding-top: 0; font-size: 13px; }
+.ownpoints-on {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  letter-spacing: .02em;
+  cursor: pointer;
+}
+.ownpoints-on input { width: 16px; height: 16px; accent-color: var(--accent); }
+.ownpoints .good { color: var(--accent); }
+.ownpoints .warn { color: var(--amber, #e0a030); }
+.ownpoints svg { vertical-align: -2px; }
 .cfg-out .row { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; font-size: 13px; }
 .cfg-out .row .v { font-variant-numeric: tabular-nums; font-weight: 600; }
 .cfg-out .verdict { font-weight: 700; letter-spacing: .02em; margin-bottom: 6px; }

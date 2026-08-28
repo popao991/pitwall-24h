@@ -131,6 +131,9 @@ export function startServer({ dataFile, backupDir, replayDir, port = PORT, portT
       // event and the crew's own read of it, so a car starts with no view and
       // the neutralisation call is made on the plan ranking alone until it is set.
       c.config.cautionsPerHour ??= 0.639;
+      // The crew's own points for a flag. A state written before they existed
+      // gets them off, which is exactly how that state behaved.
+      c.config.flagRule ??= { on: false, fuelL: 0, stintMin: 0, tyreFuelL: 0, tyreStintMin: 0 };
       c.config.tyreDegSecPerKm ??= 0.0087;
       c.config.fuelWeightSecPerL ??= 0.0079;
       // These three shipped as 0 for a few builds, which left the call inert

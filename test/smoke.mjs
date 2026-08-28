@@ -5057,6 +5057,86 @@ send({ type: 'fcy', mode: 'auto' });
 await until(() => state.race.flagLog.at(-1).toMs > 0);
 check('back to green closes it', state.race.flagLog.at(-1).toMs >= state.race.flagLog.at(-1).fromMs);
 
+// ---- the crew's own points for a flag --------------------------------------
+// The bypass: under a neutralisation the numbers the crew wrote answer the
+// stop, and the ranking is not consulted. Green never sees them.
+{
+  const now = Date.now();
+  // The suite has long since taken the clock down by here, and a stop plan
+  // says nothing without a running race: give this block its own, two hours in.
+  const race = JSON.parse(JSON.stringify(state.race));
+  race.startMs = now - 2 * 3600e3;
+  race.durationH = 24;
+  race.condition = 'dry';
+  const mk = (rule, fuelL, stintMin) => {
+    const c = JSON.parse(JSON.stringify(state.cars['1']));
+    Object.assign(c.config, {
+      tankLiters: 100, safetyFuelL: 3, tyreLifeKm: 300, tyreChangeSec: 25,
+      tyreDegSecPerKm: 0.0087, fuelWeightSecPerL: 0.0079,
+      flagRule: { on: false, fuelL: 0, stintMin: 0, tyreFuelL: 0, tyreStintMin: 0, ...rule }
+    });
+    c.state.fuelLiters = fuelL;
+    // A stint that started `stintMin` ago, on rubber with life left in it, so
+    // nothing but the rule can be calling for a stop or a set.
+    c.state.stintStartMs = now - stintMin * 60e3;
+    c.tyreSets = Array.from({ length: 20 }, (_, i) => ({
+      id: 'fr' + i, name: 'F' + (i + 1), km: 0, kmFcy: 0, used: i === 0, scrapped: false
+    }));
+    c.state.currentTyreSetId = 'fr0';
+    c.state.tyreLapsOnSet = 2;
+    return c;
+  };
+  const at = (rule, fuelL, stintMin, pace = 'fcy') =>
+    recommendedStop(mk(rule, fuelL, stintMin), race, now, { pace });
+
+  const fuelPoint = { on: true, fuelL: 40 };
+  check('under the fuel point the flag is taken',
+    at(fuelPoint, 35, 20).verdict === 'boxNow');
+  check('above it the flag is left alone',
+    at(fuelPoint, 60, 20).verdict === 'stay');
+  check('the call says whose it was',
+    /Your points/.test(at(fuelPoint, 35, 20).sub));
+  check('and the plan carries the rule for the screens',
+    at(fuelPoint, 35, 20).rule?.box === true);
+
+  // Either point calls it, so a crew can set one and leave the other at 0.
+  const stintPoint = { on: true, stintMin: 45 };
+  check('the stint point calls it on its own',
+    at(stintPoint, 90, 50).verdict === 'boxNow' && at(stintPoint, 90, 30).verdict === 'stay');
+  check('whichever point is reached first calls it',
+    at({ on: true, fuelL: 40, stintMin: 45 }, 90, 50).verdict === 'boxNow' &&
+    at({ on: true, fuelL: 40, stintMin: 45 }, 35, 10).verdict === 'boxNow');
+
+  // The tyre points only say what to do once the car is coming in.
+  // Tyre points say what to do at a stop, never that there is one — so a form
+  // with only those filled in is still an empty rule, and the maths keeps the
+  // call. The settings panel is what says so.
+  check('a tyre point alone leaves the stop call to the maths',
+    at({ on: true, tyreFuelL: 90 }, 60, 20).rule == null);
+  check('but it takes the set once the stop is called',
+    at({ on: true, fuelL: 40, tyreFuelL: 50 }, 35, 20).tyres.change === true);
+  check('and leaves it alone when its own point is not reached',
+    at({ on: true, fuelL: 40, tyreFuelL: 20 }, 35, 20).tyres.change === false);
+  check('a set taken on the point is marked as theirs, not the models',
+    at({ on: true, fuelL: 40, tyreFuelL: 50 }, 35, 20).tyres.byRule === true);
+
+  // Green is the fuel window's call, whatever is written here.
+  check('green is never answered off the points',
+    at(fuelPoint, 35, 20, null).sub === undefined ||
+    !/Your points/.test(at(fuelPoint, 35, 20, null).sub));
+
+  // A switch over an empty form is not a rule.
+  check('the switch alone changes nothing',
+    at({ on: true }, 35, 20).rule == null);
+  check('and off is off',
+    at({ on: false, fuelL: 40 }, 35, 20).rule == null);
+
+  // The countdown to the first point the car has not reached.
+  const wait = at({ on: true, stintMin: 45 }, 90, 30).rule;
+  check('a point not yet reached counts down to itself',
+    wait.msToPoint > 14 * 60e3 && wait.msToPoint <= 15 * 60e3);
+}
+
 // ---- port walk -------------------------------------------------------------
 // The pit wall asks for headroom (portTries): a port already held — a second
 // copy of the app — walks to the next free one, and the listening promise

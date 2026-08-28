@@ -244,6 +244,45 @@ app.whenReady().then(async () => {
   check('the light capture has pixels in it', await shoot('caution-graph-light.png') > 2000);
   await js("document.body.classList.remove('light'); true");
 
+  // ---- the bypass on the same panel: the crew's own points for a flag.
+  // Left until after the captures, because turning it on changes the answer
+  // the card is showing and the screenshots above are of the ranking.
+  await cog(true);
+  const rOff = await js("document.getElementById('flagrule-out').textContent");
+  check('the points say so while they are off', /the ranking above is making the call/.test(rOff),
+    rOff.trim().slice(0, 50));
+
+  // A fuel point no tank could be above: whatever this car is carrying, it is
+  // under it, so the stop is called and the wording can be read back.
+  await js(`(() => {
+    const box = document.getElementById('flagrule-on');
+    box.checked = true;
+    box.dispatchEvent(new Event('change', { bubbles: true }));
+    const f = document.querySelector('input[data-cpath="flagRule.fuelL"]');
+    f.value = '999';
+    f.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  })()`);
+  await wait(1400);
+  const rOn = await js("document.getElementById('flagrule-out').textContent");
+  check('a point the car is already past reads as a stop', /BOX/.test(rOn), rOn.trim().slice(0, 60));
+
+  await cog(false);
+  // The tabs toggle: the Code 60 tab was already held above, and clicking it
+  // again would drop the card back onto the live plan — which is green here.
+  await js(`(() => {
+    const b = document.querySelector('#plan-tabs button[data-plan="fcy"]');
+    if (!b.classList.contains('on')) b.click();
+    return true;
+  })()`);
+  await wait(1400);
+  const ruled = await js(`({
+    head: document.getElementById('plan-head').textContent,
+    sub: document.getElementById('plan-sub').textContent
+  })`);
+  check('and the Code 60 stop is answered off them, not the ranking',
+    /BOX NOW/.test(ruled.head) && /Your points/.test(ruled.sub), ruled.sub.slice(0, 70));
+
   check('no console errors on the station', consoleErrors.length === 0);
   if (consoleErrors.length) console.log('   ' + consoleErrors.join('\n   '));
 

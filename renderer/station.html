@@ -259,6 +259,41 @@
             waiting beats taking this one. Above your rate, take it.
           </p>
 
+          <!-- The bypass. Everything above is a model; a crew that knows its
+               car can answer the flag with a number instead, and these are
+               those numbers. They replace the call under a neutralisation and
+               touch nothing under green. -->
+          <div class="ownpoints">
+            <label class="ownpoints-on" title="Answer every Code 60 and Safety Car off the four points below instead of the ranking above. Green is never touched — the fuel window and the limits still own that call.">
+              <input type="checkbox" id="flagrule-on" />
+              <span>Call the flag off my own points</span>
+            </label>
+            <p class="hint help" id="flagrule-hint">
+              A point at 0 is off. Either of the top two calls the stop —
+              whichever is reached first — and the bottom two only say what to
+              do once the car is coming in anyway.
+            </p>
+            <div class="cfg-grid">
+              <label title="Box under a neutralisation once the tank is at or below this level. 0 = do not call the stop on fuel.">
+                Box from fuel (L)
+                <input data-cpath="flagRule.fuelL" type="number" step="1" min="0" />
+              </label>
+              <label title="Box under a neutralisation once the stint has run this long. The stint clock is the one on the top bar, so a red flag does not count toward it. 0 = do not call the stop on stint time.">
+                Box from stint (min)
+                <input data-cpath="flagRule.stintMin" type="number" step="1" min="0" />
+              </label>
+              <label title="Take tyres at that stop if the tank is at or below this level. Read only once the stop itself is called. 0 = do not call tyres on fuel.">
+                Tyres from fuel (L)
+                <input data-cpath="flagRule.tyreFuelL" type="number" step="1" min="0" />
+              </label>
+              <label title="Take tyres at that stop if the stint has run this long. Read only once the stop itself is called. 0 = do not call tyres on stint time.">
+                Tyres from stint (min)
+                <input data-cpath="flagRule.tyreStintMin" type="number" step="1" min="0" />
+              </label>
+            </div>
+            <div class="cfg-out" id="flagrule-out"></div>
+          </div>
+
           <!-- The same comparison as the verdict above, swept across the whole
                stint: what each option is worth against staying out at every
                minute of it, and where the car sits on that curve right now. -->

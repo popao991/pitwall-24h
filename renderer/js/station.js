@@ -17,7 +17,7 @@ import {
   brakeAxle, brakeKitsOf, kitOfDiscSet, freePadSets, currentBrakeSet,
   stopBrakeAxle, brakeAxleWork, brakeWorkComps,
   recommendedStops, resolveStop, PLAN_KEYS, PLAN_LABEL, activePlanKey, stopPins, wallShowsPlan, cautionCall, tyreBudget,
-  cautionSweep, CAUTION_DECISIVE_SEC,
+  cautionSweep, CAUTION_DECISIVE_SEC, flagRuleCall,
   fmtClock, fmtMinSec, fmtLap, fmtH,
   TIMING_FLAGS, fmtLapUs, fmtGapUs, timingNrOf, ourTimingNrs, createFeedSeen, carPickLabel,
   driverAbbrev, matchTimingDriver, fuelBreakEven, pitCostSec, refuelTimeSec, isNightAt,
@@ -1034,7 +1034,7 @@ cautionCog.addEventListener('click', () => {
     // Answer straight away rather than waiting for the next state push — the
     // panel is opened to read it, and a blank card looks broken.
     const car = state?.cars[carId];
-    if (car) { renderCautionOut(car); renderCautionGraph(car); }
+    if (car) { renderCautionOut(car); renderCautionGraph(car); renderFlagRule(car); }
   }
 });
 
@@ -1052,6 +1052,10 @@ for (const inp of cautionPanel.querySelectorAll('input[data-cpath]')) {
   });
 }
 
+$('flagrule-on').addEventListener('change', () => {
+  patchSettings({ config: { flagRule: { on: $('flagrule-on').checked } } });
+});
+
 function fillCautionInputs() {
   const cfg = settingsCar()?.config;
   if (!cfg) return;
@@ -1059,6 +1063,39 @@ function fillCautionInputs() {
     // Never fight the field being typed into.
     if (document.activeElement !== inp) inp.value = getPath(cfg, inp.dataset.cpath) ?? 0;
   }
+  $('flagrule-on').checked = !!cfg.flagRule?.on;
+}
+
+// What the crew's own points are doing right now: which of them is reached,
+// what the card would say under a flag, and — when the switch is on over an
+// empty form — that nothing has actually been overruled.
+function renderFlagRule(car) {
+  const out = $('flagrule-out');
+  if (!out || cautionPanel.hasAttribute('hidden')) return;
+  const r = car.config.flagRule;
+  const wrap = out.closest('.ownpoints');
+  wrap?.classList.toggle('on', !!r?.on);
+  if (!r?.on) {
+    out.innerHTML = '<span class="hint">Off — the ranking above is making the call.</span>';
+    return;
+  }
+  const c = carCalcs(car, state.race, Date.now());
+  const call = flagRuleCall(car, c);
+  if (!call || call.empty) {
+    out.innerHTML = `<span class="warn">${icon('alert')} Nothing is set — write a fuel level or a stint ` +
+      'time, or the ranking above keeps the call.</span>';
+    return;
+  }
+  const fuelNow = car.state.fuelLiters;
+  const stintNow = Math.floor(c.stintElapsedMs / 60e3);
+  const now = `<span class="hint">Now: ${fuelNow.toFixed(0)} L on board, ${stintNow} min into the stint.</span>`;
+  out.innerHTML = call.box
+    ? `<span class="good">${icon('check')} A flag now would be <b>BOX` +
+      `${call.tyres ? ' · FUEL + TYRES' : ''}</b> — ${esc(call.why)}.</span><br>${now}`
+    : `<span>${icon('pause')} A flag now would be <b>STAY OUT</b>` +
+      (call.msToPoint != null ? ` — your first point comes up in ${fmtMinSec(call.msToPoint)}` : '') +
+      `.</span><br>${now}`;
+  applyIcons(out);
 }
 
 // Both flags, side by side: they differ a lot, and the standing call for the
@@ -3529,6 +3566,7 @@ function render() {
     fillCautionInputs();
     renderCautionOut(car);
     renderCautionGraph(car);
+    renderFlagRule(car);
   }
 
   document.title = `PitWall 24H — ${car.name}`;

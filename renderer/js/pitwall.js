@@ -10,7 +10,7 @@ import {
   recommendedStops, resolveStop, PIT_SERVICE_MARGIN_SEC, PLAN_LABEL, activePlanKey, wallShowsPlan,
   TIMING_FLAGS, fmtLapUs, fmtGapUs, timingNrOf, createFeedSeen,
   driverAbbrev, matchTimingDriver, pitSegments, pitLaneTimeSec, refuelTimeSec,
-  fuelBreakEven, buildCarFile, readCarFile, carFileName
+  fuelBreakEven, buildCarFile, readCarFile, carFileName, flagRuleCall
 } from '../../shared/model.js';
 import { connect } from './net.js';
 import { renderConditionBar } from './condition.js';
@@ -1520,7 +1520,17 @@ function render() {
       vCls = 'stay';
       vHtml = `${icon('check')} NO FUEL STOP NEEDED — reaches the flag`;
     } else if (fs && neutralised) {
-      if (fs.netPitNowSec <= 0) {
+      // A car whose crew has written its own points is answered off them and
+      // not off the pit-time maths — the same call the station is showing, or
+      // the wall and the station disagree about the car with the flag out.
+      const rule = flagRuleCall(car, c);
+      if (rule && !rule.empty) {
+        vCls = rule.box ? 'go' : 'stay';
+        vHtml = rule.box
+          ? `${icon('boxin')} BOX NOW${rule.tyres ? ' · FUEL + TYRES' : ''} <small>your own points</small>`
+          : `${icon('stop')} STAY OUT <small>your points` +
+            (rule.msToPoint != null ? ` — first one in ${fmtMinSec(rule.msToPoint)}` : '') + '</small>';
+      } else if (fs.netPitNowSec <= 0) {
         vCls = 'go';
         vHtml = `${icon('boxin')} BOX NOW — ${fs.netPitNowSec <= -1
           ? 'saves ' + Math.abs(fs.netPitNowSec).toFixed(0) + ' s'

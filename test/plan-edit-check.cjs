@@ -257,8 +257,9 @@ app.whenReady().then(async () => {
   })()`);
   // Six figures the call reads, plus the three the simulation needs and had
   // nowhere else to live: how long a caution runs, the slack on a stop, and
-  // the fuel burnt in the lane.
-  check('the cog flips the card to the caution inputs', cfgOpen === 9, `${cfgOpen} inputs`);
+  // the fuel burnt in the lane — and the four points a crew can answer a flag
+  // off instead of the ranking.
+  check('the cog flips the card to the caution inputs', cfgOpen === 13, `${cfgOpen} inputs`);
 
   // The card must arrive with the measured figures already in it, not zeros —
   // a blank card reads as broken and there is nothing to seed them from at the

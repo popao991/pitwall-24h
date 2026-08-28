@@ -197,6 +197,30 @@ in an e-mail, and can be written the week before with nothing running at all.
     head names the work the flag is actually worth doing — *BOX NOW · FUEL +
     TYRES*, *BOX NOW · FUEL ONLY* — and a stop that does not pay yet says which
     minute of the stint it starts to.
+  - **CALL THE FLAG OFF MY OWN POINTS** (same cog): the bypass. Everything
+    above is a model, and a model is only as right as the figures under it — a
+    crew that has run the car all season often already knows the answer as a
+    number. Tick it and four points make the call instead: box under a
+    neutralisation from a **fuel level**, or from a **stint time**, and take
+    **tyres** at that stop from a fuel level or a stint time of their own. Any
+    point that is reached calls it, so a level alone is a complete rule and the
+    others stay at 0, which is off. The two tyre points never bring the car in
+    — they only say what to do once it is coming — so a form with nothing but
+    those filled in is still empty, and the panel says so rather than
+    pretending to have overruled anything.
+    - It replaces the ranking under a flag and touches **nothing** under green:
+      the fuel window and the binding limit still own that call.
+    - A set the life rule says is **due** is still changed — running a stint on
+      rubber that cannot last it is not a call anybody makes on purpose. The
+      points decide everything above that floor.
+    - Both screens say whose call it was — *your own points* on the wall,
+      *Your points: 38 L on board, at or under your 40 L* on the station — and
+      the line adds what the maths would have said, because a bypass that hides
+      what it overruled is one nobody can check. The panel itself shows the
+      answer a flag would get right now, so the numbers can be set against the
+      car rather than in the abstract.
+    - The points are per car and travel in its car file with the rest of the
+      neutralisation figures.
 - **Low fuel warning**: once the tank is down to the warning threshold
   (SETTINGS → FUEL → *Low-fuel warning (L)*, default 15 L, 0 = off) a banner
   appears with the liters, laps and time left above the safety level — amber

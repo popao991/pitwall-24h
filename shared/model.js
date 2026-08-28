@@ -1577,6 +1577,16 @@ export function defaultCar(id, number) {
       // 2019-2025: 7.1 min is the median Code 60 of 4 minutes or longer, and
       // roughly a quarter of them are short enough that a stop never pays.
       cautionMinutes: 7.1,
+      // The crew's own points for a flag that is out. Everything above is a
+      // model, and a model is only ever as right as the figures under it — a
+      // crew that knows its car often just wants a number: under a
+      // neutralisation, box from this fuel level, or from this far into the
+      // stint, and take tyres from this one. With `on` set those points ARE
+      // the answer under a flag; the ranking is bypassed, not blended, and it
+      // is still shown so the crew can see what they overruled. Each point is
+      // off at 0, and green is never touched — the fuel window and the limits
+      // keep that call.
+      flagRule: { on: false, fuelL: 0, stintMin: 0, tyreFuelL: 0, tyreStintMin: 0 },
       // Slack added to every stop the call prices, on top of the measured lane
       // and service times. Real stops are rarely textbook: an overshot box, a
       // sticky coupling, traffic in the lane. It is a robustness knob — wind it
@@ -1785,7 +1795,7 @@ export const CAR_FILE_GROUPS = [
     // sensitivity to fuel and rubber, and the rate is how the crew reads the
     // event they are running.
     fields: ['cautionsPerHour', 'cautionMinutes', 'tyreDegSecPerKm', 'fuelWeightSecPerL',
-      'pitSlackSec', 'pitLaneFuelL']
+      'pitSlackSec', 'pitLaneFuelL', 'flagRule']
   }
 ];
 
@@ -4058,6 +4068,57 @@ export function nextDriverCall(car, calcs, now, opts = {}) {
   return { change: !cur || pick.id !== cur.id, driver: pick, source: planned ? 'plan-override' : 'auto', why };
 }
 
+// The crew's own points for the flag that is out, or null when they are not
+// being used. This is the bypass: the ranking in cautionRanking prices a stop
+// out of caution rate, lap times and wear coefficients, and every one of those
+// is an estimate. A crew that has run the car all season often knows the
+// answer as a number — "under a Code 60, if we are under forty litres, we
+// box" — and this lets them say exactly that.
+//
+// Two points can call the stop (a fuel level and a stint length) and two more
+// call the tyres. Any point that is hit calls it, so a crew can set the fuel
+// level alone and leave the clock at 0. The tyre points are only read once the
+// stop itself is called: they say what to do while the car is in there, never
+// whether to come in.
+export function flagRuleCall(car, calcs) {
+  const r = car.config?.flagRule;
+  if (!r || !r.on) return null;
+
+  const fuelL = car.state.fuelLiters;
+  const stintMs = calcs.stintElapsedMs;
+  const stintMin = stintMs / 60e3;
+
+  const hits = [];
+  if (r.fuelL > 0 && fuelL <= r.fuelL) hits.push(`${fuelL.toFixed(0)} L on board, at or under your ${r.fuelL} L`);
+  if (r.stintMin > 0 && stintMin >= r.stintMin) hits.push(`${Math.floor(stintMin)} min into the stint, at or past your ${r.stintMin}`);
+  const box = hits.length > 0;
+
+  const tyreHits = [];
+  if (r.tyreFuelL > 0 && fuelL <= r.tyreFuelL) tyreHits.push(`fuel is under your ${r.tyreFuelL} L tyre point`);
+  if (r.tyreStintMin > 0 && stintMin >= r.tyreStintMin) tyreHits.push(`the stint is past your ${r.tyreStintMin} min tyre point`);
+
+  // How long until the earliest point that is set comes up, so a stop the crew
+  // has not reached yet still counts down like every other call on the card.
+  const waits = [];
+  if (r.fuelL > 0 && fuelL > r.fuelL && calcs.burn > 0 && calcs.lapMs > 0) {
+    waits.push(((fuelL - r.fuelL) / calcs.burn) * calcs.lapMs);
+  }
+  if (r.stintMin > 0 && stintMin < r.stintMin) waits.push(r.stintMin * 60e3 - stintMs);
+  const msToPoint = waits.length ? Math.min(...waits) : null;
+
+  return {
+    on: true,
+    box,
+    tyres: box && tyreHits.length > 0,
+    // Nothing is set at all: the switch is on but every point is 0. Say so
+    // rather than answering STAY OUT for a rule that was never written.
+    empty: !(r.fuelL > 0 || r.stintMin > 0),
+    why: box ? hits.join(' · ') : null,
+    tyreWhy: tyreHits.length ? tyreHits.join(' · ') : null,
+    msToPoint
+  };
+}
+
 // One plan. `pace` is the situation it answers for: null = green, 'fcy' =
 // code 60 / full course yellow, 'sc' = safety car. Everything else follows the
 // live state, so the three plans differ exactly where the maths differs.
@@ -4070,6 +4131,12 @@ export function recommendedStop(car, race, now, opts = {}) {
   const pitLoss = cfg.pitLossSec || 0;
   const running = calcs.clock.running;
   const rem = calcs.clock.remainingMs;
+  // The crew's own points, when they are using them. Only under a flag: green
+  // is still the fuel window's call, and the limits still bind it.
+  const ruleSet = neutral && running ? flagRuleCall(car, calcs) : null;
+  // A switch turned on over an empty form is not a call. The maths keeps the
+  // stop until at least one point is written; the settings panel says so.
+  const rule = ruleSet && !ruleSet.empty ? ruleSet : null;
 
   // How long the stint after this stop can run — the yardstick for "will this
   // component survive to the next stop, or does it have to be done now?".
@@ -4142,16 +4209,25 @@ export function recommendedStop(car, race, now, opts = {}) {
     }
   }
 
-  const change = due || opportunity;
+  // A set that is due is still due whatever the crew's points say — running a
+  // stint on rubber that cannot last it is not a call anybody makes on
+  // purpose. Above that floor the points own the answer: they say what to do
+  // while the car is in there, and the opportunity maths steps aside.
+  const change = rule ? (due || (rule.box && rule.tyres)) : (due || opportunity);
   const fit = change ? stopTyreSet(car) : null;
+  const ruleTyres = !!(rule && !due && change);
   const tyres = {
     change: !!change,
     set: fit,
     setId: fit?.id || null,
     // True when the rubber is not due and the flag is what makes it worth doing.
-    opportunity,
+    opportunity: opportunity && !rule,
+    // True when the crew's own point, not the maths, called for the set.
+    byRule: ruleTyres,
     why: !running ? 'race not started'
       : reachFlag ? `${calcs.tyreLapsLeft} laps left — reaches the flag`
+      : ruleTyres ? (fit ? `your call — ${rule.tyreWhy}` : 'no set free — every spare is used or scrapped')
+      : rule && !due ? `${calcs.tyreLapsLeft} laps left — your tyre point is not reached`
       : opportunity ? (fit ? oppWhy : 'no set free — every spare is used or scrapped')
       : due ? (fit ? `${calcs.tyreLapsLeft} laps left, next stint ${Math.round(stintMs / calcs.lapMs)}`
                       : 'no set free — every spare is used or scrapped')
@@ -4264,6 +4340,27 @@ export function recommendedStop(car, race, now, opts = {}) {
     dueKey = 'FUEL LEFT';
     dueMs = calcs.msToEmpty;
     dueNote = 'low fuel';
+  } else if (rule && fs && !fs.noStopNeeded) {
+    // The crew's own points, and nothing else. The ranking above still ran, so
+    // the line can say what it was that got overruled — a bypass that hides
+    // the maths is one nobody can check.
+    const maths = caution ? (caution.takeIt ? 'the maths would box too' : 'the maths would stay out') : null;
+    if (rule.box) {
+      verdict = 'boxNow';
+      head = rule.tyres ? 'BOX NOW · FUEL + TYRES' : 'BOX NOW';
+      sub = `Your points: ${rule.why}.` + (maths ? ` For what it is worth, ${maths}.` : '');
+      dueKey = 'PIT ENTRY';
+      dueMs = null;
+      dueNote = 'your own points';
+    } else {
+      verdict = 'stay';
+      head = 'STAY OUT';
+      sub = 'Your points are not reached yet, so this flag is not yours to take.'
+        + (maths ? ` For what it is worth, ${maths}.` : '');
+      dueKey = rule.msToPoint != null ? 'YOUR POINT IN' : 'YOUR POINTS';
+      dueMs = rule.msToPoint;
+      dueNote = rule.msToPoint != null ? 'if the flag is still out' : 'not reached';
+    }
   } else if (neutral && fs && !fs.noStopNeeded) {
     // How far the winning plan is ahead of simply staying out — the number the
     // call turns on. The ranking's gaps are measured down from the best plan,
@@ -4380,7 +4477,10 @@ export function recommendedStop(car, race, now, opts = {}) {
     gainSec, netSec, work,
     stopSec: costFull.T, lossGreenSec: costFull.lossGreen, lossNowSec: costFull.lossNeutral,
     est: { stationarySec: svc.totalSec, totalSec: svc.totalSec + pitLoss, addLiters: svc.addLiters },
-    limit: { key: calcs.limit.key, label: calcs.limit.label, ms: calcs.limit.ms }
+    limit: { key: calcs.limit.key, label: calcs.limit.label, ms: calcs.limit.ms },
+    // Set when the crew's own points answered this one, so every screen can
+    // show whose call it was rather than passing it off as the model's.
+    rule
   };
 }
 
